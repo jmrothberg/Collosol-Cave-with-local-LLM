@@ -1,4 +1,4 @@
-sentence-transformers huggingface_hub
+sentence-transformers
 gradio
 fuzzywuzzy
 diffusers
@@ -7,3 +7,4 @@ transformers
 python-Levenshtein
 accelerate
 safetensors
+sentencepiece
