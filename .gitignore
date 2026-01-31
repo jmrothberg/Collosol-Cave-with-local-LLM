@@ -1,0 +1,82 @@
+# Environment files (contain secrets!)
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Gradio
+.gradio/
+
+# Large model directories (users download their own)
+LTX-Video/
+Pyramid_Flow/
+wan/
+Z-Image-Turbo/
+
+# Generated content
+Generated_Art/
+Adventure_Art/
+temp_videos/
+WanVideos/
+Small_vids/
+
+# Saved games
+Adventure_Game_Saved/
+
+# Large model files (users download their own)
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.gguf
+
+# Test outputs
+flux-dev.png
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Spec files
+*.spec

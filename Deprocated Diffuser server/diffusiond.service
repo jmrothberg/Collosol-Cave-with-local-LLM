@@ -1,0 +1,24 @@
+[Unit]
+Description=DiffusionD - Ollama-like diffusion model server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=jonathan
+WorkingDirectory=/home/jonathan/Colossal_Cave
+ExecStart=/bin/bash -c 'source /home/jonathan/Colossal_Cave/.venv/bin/activate && python3 /home/jonathan/Colossal_Cave/diffusiond.py --host 127.0.0.1 --port 8000'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables
+Environment=DIFFUSION_MODELS_DIR=/data/Diffusion_Models
+
+# Resource limits (adjust based on your GPU/CPU)
+LimitNOFILE=65536
+MemoryLimit=32G
+
+[Install]
+WantedBy=multi-user.target

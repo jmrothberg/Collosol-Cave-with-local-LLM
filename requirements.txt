@@ -1,0 +1,68 @@
+# ============================================================================
+# Colossal Cave Adventure - Requirements
+# ============================================================================
+# This file contains dependencies for both adventure games:
+#   - LMM_adventure_Dec_7_25.py (LLM-driven adventure)
+#   - Colossal_Cave_Aug_2_25.py (Classic adventure with video generation)
+# ============================================================================
+
+# === CORE PYTORCH (for CUDA/MPS acceleration) ===
+# For CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# For MPS (Mac): pip install torch torchvision torchaudio
+torch
+torchvision
+torchaudio
+
+# === DIFFUSION/IMAGE GENERATION ===
+diffusers>=0.24.0          # Stable Diffusion, FLUX, Z-Image pipelines
+transformers               # Text encoders for diffusion models
+accelerate                 # GPU memory optimization
+safetensors                # Fast model loading format
+huggingface-hub>=0.20.1    # Model downloads from Hugging Face
+
+# === LLM INTEGRATION ===
+ollama                     # Local LLM interface (requires Ollama installed separately)
+llama-cpp-python           # Alternative local LLM support (optional)
+# For CUDA: CMAKE_ARGS="-DLLAMA_CUBLAS=1" pip install llama-cpp-python --no-cache-dir
+# For Mac Metal: CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python --no-cache-dir
+
+# === NATURAL LANGUAGE PROCESSING ===
+sentence-transformers      # Vector embeddings for command parsing
+fuzzywuzzy                 # Fuzzy string matching
+python-Levenshtein         # Fast Levenshtein distance (speeds up fuzzywuzzy)
+sentencepiece              # Tokenization for transformers
+
+# === WEB UI ===
+gradio                     # Web interface for games
+
+# === IMAGE PROCESSING ===
+Pillow                     # Image manipulation and display
+opencv-python              # Video frame processing
+
+# === VIDEO GENERATION (for Pyramid Flow and Wan2.2) ===
+einops>=0.8.0              # Tensor operations for video models
+timm>=1.0.12               # Vision transformers
+imageio                    # Video export
+imageio-ffmpeg             # FFmpeg backend for video export
+
+# === DIFFUSION SERVER (optional, for client-server mode) ===
+fastapi                    # REST API server
+uvicorn                    # ASGI server
+requests                   # HTTP client
+
+# === UTILITIES ===
+protobuf                   # Protocol buffers
+tensorboardX>=2.6.2        # Logging (optional)
+IPython>=8.30.0            # Interactive features
+psutil                     # System monitoring (for Mac memory detection)
+
+# ============================================================================
+# INSTALLATION NOTES:
+# ============================================================================
+# 1. Create virtual environment: python -m venv .venv
+# 2. Activate: source .venv/bin/activate (Linux/Mac) or .venv\Scripts\activate (Windows)
+# 3. Install: pip install -r requirements.txt
+# 4. For CUDA support, install PyTorch with CUDA first:
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# 5. For Mac with Apple Silicon, standard pip install torch works
+# ============================================================================
