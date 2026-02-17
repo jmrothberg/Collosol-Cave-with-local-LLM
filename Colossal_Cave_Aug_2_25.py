@@ -139,19 +139,17 @@ from huggingface_hub import login
 from complete_instruction import get_complete_instructions  # Game help system
 
 # === HUGGING FACE AUTHENTICATION ===
-# Try to login to Hugging Face using environment variable, but don't fail if offline
-# Set HF_TOKEN environment variable with your Hugging Face token (get from https://huggingface.co/settings/tokens)
-hf_token = os.environ.get("HF_TOKEN")
-if hf_token:
-    try:
+# Try to login to Hugging Face, but don't fail if offline
+try:
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if hf_token:
         login(hf_token)
-        print("Successfully logged in to Hugging Face")
-    except Exception as e:
-        print(f"Warning: Could not login to Hugging Face: {e}")
-        print("This is okay - you can still use local models and the game will work fine.")
-else:
-    print("Note: HF_TOKEN not set. Set environment variable for Hugging Face access.")
-    print("You can still use local models and the game will work fine.")
+    else:
+        login()  # uses cached token from huggingface-cli login
+    print("Successfully logged in to Hugging Face")
+except Exception as e:
+    print(f"Warning: Could not login to Hugging Face: {e}")
+    print("This is okay - you can still use local models and the game will work fine.")
 
 # === DEVICE SETUP FOR MULTI-MODEL DEPLOYMENT ===
 print("Platform.machine: ", platform.machine())

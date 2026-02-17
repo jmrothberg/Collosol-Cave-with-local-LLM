@@ -1,0 +1,53 @@
+
+# Core dependencies
+torch>=2.7.1
+torchvision>=0.22.1
+transformers>=4.53.3
+accelerate>=0.30.0
+diffusers>=0.34.0
+safetensors
+
+# Image and video processing
+pillow
+imageio>=2.33.1
+imageio-ffmpeg>=0.5.1
+opencv-python-headless>=4.10.0.84
+scikit-image
+
+# Model and AI libraries
+timm>=1.0.17
+huggingface-hub
+sentencepiece
+tiktoken
+mflux
+
+# Data processing and utilities
+numpy>=1.24.4
+pandas
+einops
+ftfy
+packaging
+tqdm
+torchmetrics
+jsonlines
+
+# Development and monitoring
+psutil
+ipython
+contexttimer
+pre-commit
+python-magic
+plotly
+tensorboardX
+
+# Web and UI
+gradio>=5.38.0
+streamlit
+
+# Text processing
+fuzzywuzzy
+python-Levenshtein
+spacy>=3.7.5
+
+# Build tools
+wheel

@@ -44,12 +44,17 @@ env/
 # Large model directories (users download their own)
 LTX-Video/
 Pyramid_Flow/
+Pyramid-Flow/
+pyramid-flow-miniflux/
 wan/
 Z-Image-Turbo/
 
 # Generated content
 Generated_Art/
 Adventure_Art/
+Flux_Images/
+Pyramid_Movies/
+Collasal Cave Screenshots/
 temp_videos/
 WanVideos/
 Small_vids/
