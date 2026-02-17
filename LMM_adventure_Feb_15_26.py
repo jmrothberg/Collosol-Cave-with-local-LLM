@@ -1,18 +1,25 @@
 # JMR's LLM Adventure Game Engine
-# August 19, 2025
+# December 4, 2025 — Updated to MLX-LM + MFLUX (Feb 2026)
 #
 # This is a fully LLM-driven adventure game where the Large Language Model
 # acts as the game master, storyteller, and world engine. The LLM has complete
 # creative control while using structured JSON to maintain consistent game state.
 #
+# DEPENDENCIES:
+# - MLX-LM (for LLM models on Apple Silicon): pip install mlx-lm
+# - MFLUX (for FLUX image generation on Apple Silicon): pip install mflux
+# - Gradio (for web UI): pip install gradio
+# - Local FLUX models in ~/Diffusion_Models/ (e.g. FLUX2-klein-9B-mlx-8bit)
+#
 # The LLM is instructed via system prompt to use these JSON tools, making this
 # a powerful general-purpose adventure engine that can run ANY adventure the
 # LLM can imagine, while maintaining proper game state through function calls.
 
+import os
 import argparse
 import json
-import os
 import pickle
+import platform
 import sys
 import time
 import zipfile
@@ -23,9 +30,13 @@ from typing import Any, Dict, List, Optional, Tuple, Set
 import re
 import gradio as gr
 
-import torch
-import ollama
-from diffusers import DiffusionPipeline, FluxPipeline, StableDiffusion3Pipeline
+from mlx_lm import load as mlx_load, generate as mlx_generate
+from mlx_lm.sample_utils import make_sampler
+
+# MLX model discovery
+MLX_MODELS_DIR = "/Users/jonathanrothberg/MLX_Models"
+
+from mflux_image_gen import MfluxImageGenerator
 
 """
 FLEXIBLE GAMEPLAY PHILOSOPHY:
@@ -122,11 +133,64 @@ IN_GAME_IMG_DIR = os.path.join(SAVE_DIR, "in_game_images")
 # riddles_and_tasks, loot_progression, fail_states, dynamic_rules
 WORLD_BIBLE: Optional[Dict[str, Any]] = None
 
-# CHANGE: default image theme used only when no Theme is applied in the UI
+# Default image theme used when no custom theme is specified
 DEFAULT_IMAGE_THEME = (
     "Studio Ghibli background art, dark fantasy cavern, painterly matte painting, "
     "soft rim light, volumetric fog, by Studio Ghibli"
 )
+
+# Preset themes for the dropdown - each theme should be a complete description
+# that guides both the world bible generation AND the image generation
+PRESET_THEMES = {
+    "Tolkien Cave Adventure": (
+        "An adventure game starting at the entrance to a giant cave system, "
+        "featuring Tolkien-inspired characters like wizards, hobbits, dwarves, and elves. "
+        "Each character and object should play a meaningful part in completing the quest. "
+        "Art style: detailed fantasy illustration with warm torchlight, ancient stone architecture, "
+        "and atmospheric mist. Environments should feel lived-in and mysterious."
+    ),
+    "Star Wars Universe": (
+        "An adventure game set in the Star Wars universe with iconic characters like Jedi, "
+        "droids, and aliens. Features lightsabers, the Force, and galactic technology. "
+        "Each character and item should be essential to completing the mission. "
+        "Art style: cinematic sci-fi with neon glows, metallic surfaces, holographic displays, "
+        "and dramatic lighting contrasts between light and dark side aesthetics."
+    ),
+    "Colossal Cave (Classic)": (
+        "A classic text adventure inspired by the original Colossal Cave Adventure. "
+        "Features underground caverns, twisty passages, treasure hunting, and puzzle solving. "
+        "Characters include a helpful hermit, mysterious spirits, and cave-dwelling creatures. "
+        "Art style: nostalgic fantasy illustration with glowing crystals, underground rivers, "
+        "ancient ruins, and atmospheric cave lighting."
+    ),
+    "Zork-style Mystery": (
+        "A mysterious adventure in the style of Zork, featuring a sprawling underground empire, "
+        "ancient artifacts, and clever puzzles. Characters are enigmatic and locations are interconnected. "
+        "Art style: dark fantasy with ornate architecture, magical glows, brass and copper machinery, "
+        "and deep shadows hiding secrets."
+    ),
+    "Myst Island": (
+        "A puzzle-focused adventure on a mysterious island with strange machines and hidden passages. "
+        "Minimal characters but rich environmental storytelling. Each mechanism and clue connects to the solution. "
+        "Art style: surreal landscapes, steampunk machinery, crystalline structures, "
+        "ethereal lighting, and dreamlike atmosphere."
+    ),
+    "Pirate Treasure Hunt": (
+        "A swashbuckling adventure seeking buried treasure on a tropical island. "
+        "Features pirates, sea caves, ancient maps, and hidden troves. "
+        "Characters include a helpful parrot, ghostly pirates, and island natives. "
+        "Art style: vibrant tropical colors, weathered wood and rope, golden treasure glints, "
+        "moonlit beaches, and mysterious jungle ruins."
+    ),
+    "Cyberpunk Heist": (
+        "A high-tech adventure in a neon-lit dystopian city. "
+        "Features hackers, corporate secrets, AI companions, and cybernetic enhancements. "
+        "Each contact and gadget serves a purpose in the heist. "
+        "Art style: neon-soaked cityscapes, holographic interfaces, rain-slicked streets, "
+        "chrome and glass architecture, and dramatic urban lighting."
+    ),
+    "Custom (type below)": ""
+}
 
 
 def ensure_directories_exist() -> None:
@@ -151,15 +215,15 @@ def get_theme_suffix() -> str:
     return theme_suffix
 
 
-def execute_world_bible_generation(state_mgr: "StateManager", model_id: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+def execute_world_bible_generation(state_mgr: "StateManager", model_id: str, theme: Optional[str] = None, max_tokens: int = 4000) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
     Shared world bible generation logic.
     Returns (success, message, world_bible_data).
     """
     global WORLD_BIBLE
     
-    if not check_ollama_running():
-        return False, "Ollama not running. Cannot generate world bible.", None
+    if not check_mlx_available():
+        return False, "MLX not available. Cannot generate world bible.", None
 
     # Handle auto model selection
     if model_id == "(auto)":
@@ -171,7 +235,7 @@ def execute_world_bible_generation(state_mgr: "StateManager", model_id: str) -> 
         return False, "No heavy model selected for world bible generation.", None
 
     print(f"Generating world bible using model: {heavy_model_id}")
-    result = generate_world_bible(state_mgr, heavy_model_id)
+    result = generate_world_bible(state_mgr, heavy_model_id, theme, max_tokens)
     
     if result:
         WORLD_BIBLE = result
@@ -180,38 +244,134 @@ def execute_world_bible_generation(state_mgr: "StateManager", model_id: str) -> 
         return False, "Failed to generate world bible.", None
 
 
-def generate_themed_image(image_gen: "ImageGenerator", base_prompt: str, theme_suffix: Optional[str] = None) -> Optional[str]:
+# Image generation rules to prevent hallucinated content
+IMAGE_RULES = (
+    "ONLY show objects, characters, and elements explicitly described in the scene. "
+    "Do NOT add people, creatures, or characters unless specifically mentioned. "
+    "Empty rooms should appear empty. Solitary scenes should show no other beings. "
+    "Focus on environmental details, lighting, and atmosphere rather than adding figures."
+)
+
+
+def generate_themed_image(image_gen: "MfluxImageGenerator", base_prompt: str, theme_suffix: Optional[str] = None) -> Optional[str]:
     """
     Generate an image with theme applied consistently.
     Returns the generated image path or None if generation fails.
     """
     if not image_gen:
         return None
-    
+
     if not theme_suffix:
         theme_suffix = get_theme_suffix()
+
+    # Build the final prompt with theme and anti-hallucination rules
+    parts = [base_prompt]
     
-    # Apply theme to prompt
     if theme_suffix and theme_suffix.lower() not in base_prompt.lower():
-        themed_prompt = f"{base_prompt}. World art style: {theme_suffix}. Strictly adhere to this style."
-    else:
-        themed_prompt = base_prompt
+        parts.append(f"Art style: {theme_suffix}")
     
+    # Always add the image rules to prevent extra characters
+    parts.append(IMAGE_RULES)
+    
+    themed_prompt = ". ".join(parts)
+
     return image_gen.generate(themed_prompt)
 
 
-def generate_room_image_if_needed(state_mgr: "StateManager", image_gen: Optional["ImageGenerator"], room_name: str, debug_lines: Optional[List[str]] = None) -> Optional[str]:
+def extract_narrative_elements(narrative: str, room_name: str = "room") -> str:
+    """
+    Extract only concrete objects, people, and environmental elements explicitly mentioned in the narrative.
+    This prevents image generation from hallucinating content that's not actually in the story.
+    """
+    # Convert to lowercase for easier matching
+    text = narrative.lower()
+
+    # Define categories of elements to extract
+    elements = []
+
+    # Check if the narrative explicitly says we're alone or no one is here
+    alone_phrases = [
+        "no one", "nobody", "alone", "empty", "deserted", "abandoned",
+        "solitary", "by yourself", "no visible", "no other", "just you"
+    ]
+    is_alone = any(phrase in text for phrase in alone_phrases)
+
+    # Environmental descriptors (concrete, not abstract)
+    env_words = [
+        'stone', 'wall', 'floor', 'ceiling', 'door', 'console', 'pedestal', 'panel',
+        'corridor', 'passage', 'chamber', 'room', 'tunnel', 'glow', 'light', 'shadow',
+        'dust', 'metal', 'machine', 'machinery', 'humming', 'console', 'datapad',
+        'draft', 'air', 'echo', 'vibration', 'seam', 'bulkhead', 'ventilation',
+        'cave', 'cavern', 'rock', 'crystal', 'water', 'river', 'pool', 'torch',
+        'lantern', 'candle', 'fire', 'flame', 'smoke', 'mist', 'fog'
+    ]
+
+    # Object descriptors
+    object_words = [
+        'console', 'pedestal', 'panel', 'datapad', 'button', 'lever', 'switch',
+        'door', 'gate', 'portal', 'screen', 'display', 'terminal', 'control',
+        'keypad', 'lock', 'mechanism', 'device', 'artifact', 'relic',
+        'chest', 'box', 'crate', 'barrel', 'table', 'chair', 'throne',
+        'altar', 'statue', 'pillar', 'column', 'arch', 'bridge'
+    ]
+
+    # Lighting/color descriptors (tied to concrete elements)
+    lighting_words = [
+        'blue glow', 'faint blue', 'dimly lit', 'flickering', 'red button',
+        'humming glow', 'eerie shadows', 'cool draft', 'distant hum',
+        'golden light', 'green glow', 'purple haze', 'orange flame'
+    ]
+
+    # Check for environmental elements
+    for word in env_words:
+        if word in text:
+            elements.append(word)
+
+    # Check for objects
+    for word in object_words:
+        if word in text:
+            elements.append(word)
+
+    # Check for specific lighting/color combinations
+    for phrase in lighting_words:
+        if phrase.replace(' ', '') in text.replace(' ', '') or phrase in text:
+            elements.append(phrase)
+
+    # Remove duplicates and join
+    unique_elements = list(set(elements))
+
+    if unique_elements:
+        # Create a focused prompt with the room name and extracted elements
+        room_part = f"{room_name}"
+        elements_part = ", ".join(unique_elements[:8])  # Limit to avoid token bloat
+        base = f"{room_part} with {elements_part}"
+    else:
+        # Fallback if no specific elements found
+        base = f"{room_name}, adventure game environment"
+
+    # Add explicit "empty, no people" if narrative says we're alone
+    if is_alone:
+        base += ", empty scene, no people, no characters, solitary environment"
+
+    return base
+
+
+def generate_room_image_if_needed(state_mgr: "StateManager", image_gen: Optional["MfluxImageGenerator"], room_name: str, debug_lines: Optional[List[str]] = None, narrative_context: Optional[str] = None) -> Optional[str]:
     """
     Generate a room image only if one doesn't already exist.
     Returns the image path (new or existing) or None.
+    
+    Args:
+        narrative_context: Optional description from LLM narration to use for the image prompt
     """
     if not image_gen:
         return None
     
     # Check if room already has an image
-    if state_mgr.state.has_room_image(room_name):
+    # If we have narrative context, always generate a new image to match the current state
+    if state_mgr.state.has_room_image(room_name) and not narrative_context:
         state_mgr.state.images_reused += 1
-        
+
         # Find and return the existing image path
         for img_data in state_mgr.state.last_images:
             if img_data.get("type") == "room" and img_data.get("subject") == room_name:
@@ -220,14 +380,38 @@ def generate_room_image_if_needed(state_mgr: "StateManager", image_gen: Optional
                     if debug_lines:
                         debug_lines.append(f"Reuse existing image for room: {room_name} → {os.path.basename(existing_path)}")
                     return existing_path
-        
+
         # Image tracked but file not found
         if debug_lines:
             debug_lines.append(f"WARNING: Room {room_name} marked as having image but file not found!")
         return None
     
-    # Generate new room image
-    base_prompt = f"atmospheric fantasy {room_name.lower()}, detailed environment, adventure game location"
+    # Build image prompt from narrative context if available, otherwise use world bible or generic
+    if narrative_context and len(narrative_context) > 20:
+        # Extract only objects/people explicitly mentioned in the narrative
+        # This prevents hallucinated content in images
+        base_prompt = extract_narrative_elements(narrative_context, room_name)
+        if debug_lines:
+            debug_lines.append(f"Extracted narrative elements for image: {base_prompt[:50]}...")
+    else:
+        # Try to get description from world bible
+        wb_desc = None
+        try:
+            if 'WORLD_BIBLE' in globals() and WORLD_BIBLE:
+                for loc in WORLD_BIBLE.get("locations", []):
+                    if isinstance(loc, dict) and loc.get("name", "").lower() == room_name.lower():
+                        wb_desc = loc.get("description")
+                        break
+        except Exception:
+            pass
+
+        if wb_desc:
+            base_prompt = f"{room_name}: {wb_desc}"
+            if debug_lines:
+                debug_lines.append(f"Using world bible description for image: {base_prompt[:50]}...")
+        else:
+            base_prompt = f"atmospheric {room_name.lower()}, detailed environment, adventure game location"
+    
     image_path = generate_themed_image(image_gen, base_prompt)
     
     if image_path:
@@ -239,7 +423,7 @@ def generate_room_image_if_needed(state_mgr: "StateManager", image_gen: Optional
     return image_path
 
 
-def generate_item_image_if_needed(state_mgr: "StateManager", image_gen: Optional["ImageGenerator"], item_name: str, debug_lines: Optional[List[str]] = None) -> Optional[str]:
+def generate_item_image_if_needed(state_mgr: "StateManager", image_gen: Optional["MfluxImageGenerator"], item_name: str, debug_lines: Optional[List[str]] = None) -> Optional[str]:
     """
     Generate an item image only if one doesn't already exist.
     Returns the image path (new or existing) or None.
@@ -343,7 +527,7 @@ def populate_gallery_from_state(state_mgr: "StateManager", ui_data: Dict[str, An
     This is called after loading games or pregeneration to show existing images.
     """
     existing_images = get_all_image_paths_from_state(state_mgr)
-    # CHANGE: Deduplicate file paths while preserving order to avoid duplicate thumbnails
+    # Deduplicate image paths while preserving order
     seen_paths = set()
     deduped = []
     for p in existing_images:
@@ -515,7 +699,7 @@ class GameState:
         - Return to "Cave" later -> has_room_image("Cave") returns True -> NO regeneration
         - This works even across save/load because rooms_with_images is persisted
         """
-        # CHANGE: add world bible reference if available for easier debugging/consistency
+        # Add world bible reference for debugging
         wb_ref = _world_bible_reference_for(room_name, "room")
         self.last_images.append({"prompt": prompt, "path": image_path, "type": "room", "subject": room_name, "wb_ref": wb_ref})
         if room_name not in self.rooms_with_images:
@@ -535,7 +719,7 @@ class GameState:
         - Drop and pick up "Sword" -> has_item_image("Sword") returns True -> NO regeneration
         - See "Sword" in different room -> still reuses same image
         """
-        # CHANGE: add world bible reference if available for easier debugging/consistency
+        # Add world bible reference for debugging
         wb_ref = _world_bible_reference_for(item_name, "item")
         self.last_images.append({"prompt": prompt, "path": image_path, "type": "item", "subject": item_name, "wb_ref": wb_ref})
         if item_name not in self.items_with_images:
@@ -626,13 +810,270 @@ class StateManager:
         room_name = room or self.state.location
         return list(self.state.room_items.get(room_name, []))
 
+    # -------------------- Enhanced State Query Helpers --------------------
+
+    def get_shortest_path(self, start_room: Optional[str] = None, target_room: str = "") -> List[str]:
+        """
+        Find shortest path between rooms using BFS.
+        Returns empty list if no path exists.
+        """
+        start = start_room or self.state.location
+        if start == target_room:
+            return [start]
+
+        visited = set()
+        queue = [(start, [start])]  # (current_room, path_to_here)
+        visited.add(start)
+
+        while queue:
+            current, path = queue.pop(0)
+            exits = self.state.known_map.get(current, {}).get("exits", [])
+
+            for exit_room in exits:
+                if exit_room not in visited:
+                    new_path = path + [exit_room]
+                    if exit_room == target_room:
+                        return new_path
+                    visited.add(exit_room)
+                    queue.append((exit_room, new_path))
+
+        return []  # No path found
+
+    def get_room_distance(self, target_room: str, start_room: Optional[str] = None) -> int:
+        """Get distance (rooms) to target room. Returns -1 if unreachable."""
+        path = self.get_shortest_path(start_room, target_room)
+        return len(path) - 1 if path else -1
+
+    def find_items_by_type(self, item_type: str) -> Dict[str, List[str]]:
+        """
+        Find all items containing a type keyword in their name.
+        Returns {"inventory": [...], "rooms": {"room_name": [...]}}
+        """
+        result = {"inventory": [], "rooms": {}}
+
+        # Check inventory
+        for item in self.state.inventory:
+            if item_type.lower() in item.lower():
+                result["inventory"].append(item)
+
+        # Check room items
+        for room, items in self.state.room_items.items():
+            matching_items = [item for item in items if item_type.lower() in item.lower()]
+            if matching_items:
+                result["rooms"][room] = matching_items
+
+        return result
+
+    def get_connected_rooms(self, room: Optional[str] = None, depth: int = 1) -> Dict[str, List[str]]:
+        """
+        Get all rooms connected within specified depth.
+        Returns {distance: [room_names]}
+        """
+        start = room or self.state.location
+        result = {}
+        visited = set()
+        current_level = {start}
+
+        for d in range(depth + 1):
+            if d > 0:
+                result[d] = list(current_level - visited)
+            visited.update(current_level)
+
+            next_level = set()
+            for r in current_level:
+                exits = self.state.known_map.get(r, {}).get("exits", [])
+                next_level.update(exits)
+            current_level = next_level - visited
+
+        return result
+
+    def get_item_relationships(self, item_name: str) -> Dict[str, Any]:
+        """
+        Get comprehensive information about an item's relationships.
+        Returns location, nearby items, usage hints from flags, etc.
+        """
+        info = {
+            "name": item_name,
+            "location": None,
+            "nearby_items": [],
+            "related_flags": {},
+            "usage_hints": []
+        }
+
+        # Find location
+        if item_name in self.state.inventory:
+            info["location"] = "inventory"
+        else:
+            for room, items in self.state.room_items.items():
+                if item_name in items:
+                    info["location"] = room
+                    # Get nearby items in same room
+                    info["nearby_items"] = [i for i in items if i != item_name]
+                    break
+
+        # Find related game flags
+        for flag_name, flag_value in self.state.game_flags.items():
+            if isinstance(flag_value, str) and item_name.lower() in flag_value.lower():
+                info["related_flags"][flag_name] = flag_value
+            elif isinstance(flag_value, dict) and str(flag_value.get("item", "")).lower() == item_name.lower():
+                info["related_flags"][flag_name] = flag_value
+
+        # Extract usage hints from story context
+        if self.state.story_context:
+            context_lower = self.state.story_context.lower()
+            if item_name.lower() in context_lower:
+                # Simple heuristic: extract sentences containing the item
+                sentences = [s.strip() for s in self.state.story_context.split('.') if item_name.lower() in s.lower()]
+                info["usage_hints"] = sentences[:3]  # Limit to 3 hints
+
+        return info
+
+    def get_game_progress_hints(self) -> List[str]:
+        """
+        Analyze current state and provide hints about next logical steps.
+        Considers inventory, location, unexplored areas, etc.
+        """
+        hints = []
+
+        # Check for unexplored directions
+        current_exits = set(self.state.known_map.get(self.state.location, {}).get("exits", []))
+        visited_rooms = set(self.state.known_map.keys())
+        unexplored_exits = current_exits - visited_rooms
+
+        if unexplored_exits:
+            hints.append(f"You haven't explored: {', '.join(unexplored_exits)}")
+
+        # Check for items that might be usable together
+        if len(self.state.inventory) >= 2:
+            hints.append("You have multiple items - try combining them or using them in different locations")
+
+        # Check health status
+        if self.state.health < 50:
+            hints.append("Your health is low - look for healing items or safe areas")
+
+        # Check for dead ends (rooms with only one exit)
+        dead_ends = []
+        for room, info in self.state.known_map.items():
+            exits = info.get("exits", [])
+            if len(exits) == 1:
+                dead_ends.append(room)
+
+        if dead_ends and self.state.location in dead_ends:
+            hints.append("You're in a dead end - consider going back")
+
+        return hints[:5]  # Limit hints to avoid overwhelming
+
+    def process_timers_and_chains(self) -> List[str]:
+        """
+        Process active timers and chain reactions.
+        Returns list of triggered effects for the LLM to narrate.
+        Call this at the start of each turn.
+        """
+        triggered_events = []
+
+        # Process timers
+        timers_to_remove = []
+        for flag_name, flag_value in list(self.state.game_flags.items()):
+            if isinstance(flag_value, dict) and flag_value.get("type") == "timer":
+                timer = flag_value
+                timer["remaining"] -= 1
+
+                if timer["remaining"] <= 0:
+                    # Timer expired - execute action
+                    action = timer.get("action", "")
+                    value = timer.get("value")
+
+                    if action == "take_damage" and isinstance(value, (int, float)):
+                        old_health = self.state.health
+                        self.change_health(-abs(int(value)))
+                        triggered_events.append(f"Timer '{flag_name}' triggered: took {value} damage ({old_health} -> {self.state.health})")
+
+                    elif action == "heal" and isinstance(value, (int, float)):
+                        old_health = self.state.health
+                        self.change_health(abs(int(value)))
+                        triggered_events.append(f"Timer '{flag_name}' triggered: healed {value} HP ({old_health} -> {self.state.health})")
+
+                    elif action == "remove_item" and isinstance(value, str):
+                        if value in self.state.inventory:
+                            self.remove_item(value)
+                            triggered_events.append(f"Timer '{flag_name}' triggered: {value} disappeared from inventory")
+
+                    elif action == "move_to" and isinstance(value, str):
+                        old_location = self.state.location
+                        self.move_to(value)
+                        triggered_events.append(f"Timer '{flag_name}' triggered: teleported from {old_location} to {value}")
+
+                    else:
+                        triggered_events.append(f"Timer '{flag_name}' triggered: {action} with value {value}")
+
+                    timers_to_remove.append(flag_name)
+                else:
+                    # Timer still counting down
+                    triggered_events.append(f"Timer '{flag_name}' counting down: {timer['remaining']} turns remaining")
+
+        # Remove expired timers
+        for timer_name in timers_to_remove:
+            del self.state.game_flags[timer_name]
+
+        # Process chain reactions (check for triggers)
+        for flag_name, flag_value in list(self.state.game_flags.items()):
+            if isinstance(flag_value, dict) and flag_value.get("type") == "chain_reaction":
+                chain = flag_value
+                if not chain.get("active", False):
+                    continue
+
+                trigger = chain.get("trigger", "")
+                # Simple trigger detection (can be expanded)
+                triggered = False
+
+                # Note: room movement triggers are handled in apply_llm_directives
+                # Here we focus on flag-based and item-based triggers
+                if trigger.startswith("used_"):
+                    item = trigger[5:]
+                    # Check if item was recently used (this is a simple heuristic)
+                    if item in self.state.inventory:
+                        triggered = True
+                elif trigger in self.state.game_flags and self.state.game_flags[trigger]:
+                    triggered = True
+
+                if triggered:
+                    effects = chain.get("effects", [])
+                    for effect in effects:
+                        effect_type = effect.get("type")
+                        effect_value = effect.get("value")
+
+                        if effect_type == "change_health" and isinstance(effect_value, (int, float)):
+                            old_health = self.state.health
+                            self.change_health(int(effect_value))
+                            triggered_events.append(f"Chain reaction: health {effect_value:+d} ({old_health} -> {self.state.health})")
+
+                        elif effect_type == "move_to" and isinstance(effect_value, str):
+                            old_location = self.state.location
+                            self.move_to(effect_value)
+                            triggered_events.append(f"Chain reaction: moved to {effect_value}")
+
+                        elif effect_type == "add_item" and isinstance(effect_value, str):
+                            self.add_item(effect_value)
+                            triggered_events.append(f"Chain reaction: gained {effect_value}")
+
+                        elif effect_type == "remove_item" and isinstance(effect_value, str):
+                            if effect_value in self.state.inventory:
+                                self.remove_item(effect_value)
+                                triggered_events.append(f"Chain reaction: lost {effect_value}")
+
+                    # Deactivate chain reaction after triggering (unless permanent)
+                    if not chain.get("permanent", False):
+                        chain["active"] = False
+
+        return triggered_events
+
     def describe_map(self) -> str:
         lines: List[str] = []
         for room, info in self.state.known_map.items():
             exits_str = ", ".join(info.get("exits", [])) or "None"
             notes = info.get("notes", "")
             note_str = f" | notes: {notes}" if notes else ""
-            # CHANGE (TRIVIAL): Do not list items in the Known Map; items are not part of map display
+            # Items are not displayed in the map view
             items_part = ""
             here = " (current)" if room == self.state.location else ""
             lines.append(f"- {room}{here} -> exits: {exits_str}{note_str}{items_part}")
@@ -795,407 +1236,432 @@ class StateManager:
         self.state = GameState.from_json(json_str)
 
 
-class ImageGenerator:
-    def __init__(self, model_id: Optional[str] = None, device_preference: Optional[str] = None, local_root: Optional[str] = None) -> None:
-        self.model_id = model_id
-        self.device = self._resolve_device(device_preference)
-        self.local_root = local_root
-        self._pipeline = None  # lazy init
-        self._dtype = self._default_dtype()
-    
-    def cleanup(self) -> None:
-        """Clean up the current pipeline and free memory"""
-        if self._pipeline is not None:
-            try:
-                del self._pipeline
-                self._pipeline = None
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                print("[image] Cleaned up previous diffusion pipeline")
-            except Exception as e:
-                print(f"[image] Error cleaning up pipeline: {e}")
-
-    def _resolve_device(self, device_pref: Optional[str]) -> str:
-        # Check for explicit GPU override via environment variable
-        gpu_override = os.environ.get("DIFFUSION_GPU")
-        if gpu_override:
-            try:
-                gpu_id = int(gpu_override)
-                if torch.cuda.is_available() and gpu_id < torch.cuda.device_count():
-                    print(f"[image] Using GPU {gpu_id} (set by DIFFUSION_GPU environment variable)")
-                    return f"cuda:{gpu_id}"
-                else:
-                    print(f"[image] DIFFUSION_GPU={gpu_override} not available, falling back to auto-selection")
-            except ValueError:
-                print(f"[image] Invalid DIFFUSION_GPU value: {gpu_override}, falling back to auto-selection")
-
-        if device_pref:
-            return device_pref
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
-            # For multi-GPU systems, try to find a less loaded GPU
-            # Check if we have multiple GPUs (relevant for CUDA systems only, not MPS)
-            gpu_count = torch.cuda.device_count()
-            if gpu_count > 1:
-                # Find the GPU with the most available memory
-                best_gpu = 0
-                max_free_memory = 0
-
-                print(f"[image] Checking {gpu_count} GPUs for available memory:")
-                for i in range(gpu_count):
-                    try:
-                        # Get both free and total memory for better calculation
-                        free_bytes, total_bytes = torch.cuda.mem_get_info(i)
-                        total_gb = total_bytes / (1024**3)
-                        free_gb = free_bytes / (1024**3)
-                        allocated_gb = torch.cuda.memory_allocated(i) / (1024**3)
-                        reserved_gb = torch.cuda.memory_reserved(i) / (1024**3)
-                        # More conservative estimate: account for PyTorch overhead and fragmentation
-                        # FLUX needs ~16-20GB for inference, so be very conservative
-                        effective_free_gb = free_gb - reserved_gb - 2.0  # 2GB safety buffer
-
-                        print(f"[image] GPU {i}: {free_gb:.1f}GB free, {allocated_gb:.1f}GB allocated, {reserved_gb:.1f}GB reserved, {effective_free_gb:.1f}GB effective")
-
-                        # Use effective free memory with safety buffer for FLUX
-                        if effective_free_gb > max_free_memory and effective_free_gb >= 20.0:  # Minimum 20GB for FLUX
-                            max_free_memory = effective_free_gb
-                            best_gpu = i
-                    except Exception as e:
-                        print(f"[image] Error checking GPU {i}: {e}")
-                        continue
-
-                print(f"[image] Selected GPU {best_gpu} with {max_free_memory:.1f}GB available")
-                return f"cuda:{best_gpu}"
-            return "cuda"
-        return "cpu"
-
-    def _default_dtype(self) -> torch.dtype:
-        if self.device == "mps":
-            return torch.float32
-        if self.device.startswith("cuda"):
-            return torch.float16
-        return torch.float32
-
-    def _local_model_path(self) -> Optional[str]:
-        if not self.model_id:
-            return None
-        # Absolute path
-        if os.path.isdir(self.model_id):
-            return self.model_id
-        # Optional explicit root
-        if self.local_root:
-            candidate = os.path.join(self.local_root, self.model_id)
-            if os.path.isdir(candidate):
-                return candidate
-        # Environment override for diffusion models dir
-        env_diff_dir = os.environ.get("DIFFUSION_MODELS_DIR")
-        if env_diff_dir and os.path.isdir(env_diff_dir):
-            for name in (self.model_id, self.model_id.split("/")[-1], self.model_id.replace("/", "_")):
-                candidate = os.path.join(env_diff_dir, name)
-                if os.path.isdir(candidate):
-                    return candidate
-        # Default path similar to Colossal Cave
-        default_model_root = "/Users/jonathanrothberg" if sys.platform == "darwin" else "/data"
-        default_diff_dir = os.path.join(default_model_root, "Diffusion_Models")
-        # Try multiple common folder namings
-        candidates = [
-            os.path.join(default_diff_dir, self.model_id),
-            os.path.join(default_diff_dir, self.model_id.split("/")[-1]),
-            os.path.join(default_diff_dir, self.model_id.replace("/", "_")),
-        ]
-        for candidate in candidates:
-            if os.path.isdir(candidate):
-                return candidate
-        return None
-
-    def _apply_mps_compat_patches(self) -> None:
-        # Mirror MPS safety patches used in Colossal Cave for FLUX
-        torch.set_default_dtype(torch.float32)
-        original_from_numpy = torch.from_numpy
-        def mps_safe_from_numpy(ndarray):
-            tensor = original_from_numpy(ndarray)
-            if tensor.dtype == torch.float64:
-                tensor = tensor.float()
-            return tensor
-        torch.from_numpy = mps_safe_from_numpy  # type: ignore
-        original_arange = torch.arange
-        def mps_safe_arange(*args, **kwargs):
-            if 'dtype' in kwargs and kwargs['dtype'] == torch.float64:
-                kwargs['dtype'] = torch.float32
-            return original_arange(*args, **kwargs)
-        torch.arange = mps_safe_arange  # type: ignore
-
-    def _lazy_init(self) -> None:
-        if self._pipeline is not None or not self.model_id:
-            return
-        model_local_path = self._local_model_path()
-        try:
-            if model_local_path:
-                # Prefer local pipeline types matching model
-                base_name_upper = os.path.basename(model_local_path).upper()
-                print(f"[image] Loading local diffusion model from: {model_local_path}")
-                if "FLUX" in base_name_upper or "FLUX" in (self.model_id or "").upper():
-                    if self.device == "mps":
-                        self._apply_mps_compat_patches()
-                        self._pipeline = FluxPipeline.from_pretrained(
-                            model_local_path,
-                            torch_dtype=torch.float32,
-                        )
-                        self._pipeline = self._pipeline.to("mps")
-                    elif self.device.startswith("cuda"):
-                        torch.cuda.empty_cache()
-                        gpu_id = int(self.device.split(":")[-1]) if ":" in self.device else 0
-
-                        # Check available GPU memory - if we have >= 20GB free, use GPU directly
-                        try:
-                            gpu_memory_free = torch.cuda.get_device_properties(gpu_id).total_memory / (1024**3)
-                            gpu_memory_used = torch.cuda.memory_allocated(gpu_id) / (1024**3)
-                            gpu_memory_available = gpu_memory_free - gpu_memory_used
-
-                            # If we have >= 20GB available, load directly to GPU (FLUX needs ~12-16GB)
-                            if gpu_memory_available >= 20.0:
-                                print(f"[image] Local GPU {gpu_id}: {gpu_memory_available:.1f}GB available, loading FLUX directly to GPU")
-                                self._pipeline = FluxPipeline.from_pretrained(
-                                    model_local_path,
-                                    torch_dtype=torch.bfloat16,
-                                )
-                                self._pipeline = self._pipeline.to(self.device)
-                                print(f"[image] Local FLUX loaded directly to GPU {gpu_id}")
-                            else:
-                                print(f"[image] Local GPU {gpu_id}: {gpu_memory_available:.1f}GB available, using CPU offloading")
-                                self._pipeline = FluxPipeline.from_pretrained(
-                                    model_local_path,
-                                    torch_dtype=torch.bfloat16,
-                                )
-                                if hasattr(self._pipeline, "enable_model_cpu_offload"):
-                                    self._pipeline.enable_model_cpu_offload(gpu_id=gpu_id)
-                                    print(f"[image] Local FLUX using CPU offloading with GPU {gpu_id}")
-                                else:
-                                    self._pipeline = self._pipeline.to(self.device)
-                        except Exception as e:
-                            print(f"[image] Local memory check failed ({e}), using CPU offloading")
-                            self._pipeline = FluxPipeline.from_pretrained(
-                                model_local_path,
-                                torch_dtype=torch.bfloat16,
-                            )
-                            if hasattr(self._pipeline, "enable_model_cpu_offload"):
-                                self._pipeline.enable_model_cpu_offload(gpu_id=gpu_id)
-                                print(f"[image] Local FLUX using CPU offloading with GPU {gpu_id}")
-                            else:
-                                self._pipeline = self._pipeline.to(self.device)
-                    else:
-                        self._pipeline = FluxPipeline.from_pretrained(
-                            model_local_path,
-                            torch_dtype=torch.float32,
-                        )
-                else:
-                    # CHANGE: Use device_map="balanced" on CUDA and avoid .to();
-                    # keep explicit .to() for MPS. This preserves CUDA sharding and fixes Qwen-Image.
-                    if self.device.startswith("cuda"):
-                        self._pipeline = DiffusionPipeline.from_pretrained(
-                            model_local_path,
-                            torch_dtype=self._dtype,
-                            device_map="balanced",
-                        )
-                        # IMPORTANT: do not call .to() after device_map
-                    else:
-                        self._pipeline = DiffusionPipeline.from_pretrained(
-                            model_local_path,
-                            torch_dtype=self._dtype,
-                        )
-                        if self.device == "mps":
-                            self._pipeline = self._pipeline.to(self.device)
-                return
-
-            name_upper = self.model_id.upper()
-            if "FLUX" in name_upper:
-                if self.device == "mps":
-                    print("[image] Setting up FLUX for MPS with safety patches...")
-                    self._apply_mps_compat_patches()
-                    self._pipeline = FluxPipeline.from_pretrained(
-                        self.model_id,
-                        torch_dtype=torch.float32,
-                    )
-                    self._pipeline = self._pipeline.to("mps")
-                elif self.device.startswith("cuda"):
-                    torch.cuda.empty_cache()
-                    gpu_id = int(self.device.split(":")[-1]) if ":" in self.device else 0
-
-                    # Check available GPU memory - if we have >= 20GB free, use GPU directly
-                    try:
-                        gpu_memory_free = torch.cuda.get_device_properties(gpu_id).total_memory / (1024**3)
-                        gpu_memory_used = torch.cuda.memory_allocated(gpu_id) / (1024**3)
-                        gpu_memory_available = gpu_memory_free - gpu_memory_used
-
-                        # If we have >= 20GB available, load directly to GPU (FLUX needs ~12-16GB)
-                        if gpu_memory_available >= 20.0:
-                            print(f"[image] GPU {gpu_id}: {gpu_memory_available:.1f}GB available, loading FLUX directly to GPU")
-                            self._pipeline = FluxPipeline.from_pretrained(
-                                self.model_id,
-                                torch_dtype=torch.bfloat16,
-                            )
-                            self._pipeline = self._pipeline.to(self.device)
-                            print(f"[image] FLUX loaded directly to GPU {gpu_id} (sufficient memory available)")
-                        else:
-                            print(f"[image] GPU {gpu_id}: {gpu_memory_available:.1f}GB available, using CPU offloading")                            # Fallback to CPU offloading for memory management
-                            self._pipeline = FluxPipeline.from_pretrained(
-                                self.model_id,
-                                torch_dtype=torch.bfloat16,
-                            )
-                            if hasattr(self._pipeline, "enable_model_cpu_offload"):
-                                self._pipeline.enable_model_cpu_offload(gpu_id=gpu_id)
-                                print(f"[image] FLUX using CPU offloading with GPU {gpu_id}")
-                            else:
-                                self._pipeline = self._pipeline.to(self.device)
-                    except Exception as e:
-                        print(f"[image] Memory check failed ({e}), using CPU offloading")
-                        # Fallback to CPU offloading
-                        self._pipeline = FluxPipeline.from_pretrained(
-                            self.model_id,
-                            torch_dtype=torch.bfloat16,
-                        )
-                        if hasattr(self._pipeline, "enable_model_cpu_offload"):
-                            self._pipeline.enable_model_cpu_offload(gpu_id=gpu_id)
-                            print(f"[image] FLUX using CPU offloading with GPU {gpu_id}")
-                        else:
-                            self._pipeline = self._pipeline.to(self.device)
-                else:
-                    # CPU fallback
-                    self._pipeline = FluxPipeline.from_pretrained(
-                        self.model_id,
-                        torch_dtype=torch.float32,
-                    )
-                return
-
-            if "stable-diffusion-3" in self.model_id.lower():
-                torch.cuda.empty_cache() if self.device == "cuda" else None
-                self._pipeline = StableDiffusion3Pipeline.from_pretrained(
-                    self.model_id,
-                    torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
-                )
-                self._pipeline = self._pipeline.to(self.device if self.device in ("cuda", "mps") else "cpu")
-                return
-
-            # Generic fallback via HF id - auto-enable HF downloads for known models
-            hf_models = curated_hf_diffusers()
-            auto_allow = any(self.model_id.startswith(prefix) for prefix in ["black-forest-labs/", "stabilityai/", "runwayml/"])
-            
-            if auto_allow or os.environ.get("ALLOW_HF_DOWNLOAD", "0").lower() in {"1", "true", "yes"}:
-                if auto_allow:
-                    print(f"[image] Auto-enabling HF download for recognized model: {self.model_id}")
-                    # Temporarily set the environment variable for this session
-                    os.environ["ALLOW_HF_DOWNLOAD"] = "1"
-                # CHANGE: On CUDA use device_map="balanced" and skip .to(); on MPS use explicit .to()
-                if self.device.startswith("cuda"):
-                    self._pipeline = DiffusionPipeline.from_pretrained(
-                        self.model_id,
-                        torch_dtype=self._dtype,
-                        device_map="balanced",
-                    )
-                    # IMPORTANT: do not call .to() after device_map
-                else:
-                    self._pipeline = DiffusionPipeline.from_pretrained(
-                        self.model_id,
-                        torch_dtype=self._dtype,
-                    )
-                    if self.device == "mps":
-                        self._pipeline = self._pipeline.to(self.device)
-            else:
-                print(f"[image] Skipping download for '{self.model_id}'. Set ALLOW_HF_DOWNLOAD=1 to enable.")
-                self._pipeline = None
-        except Exception as e:
-            print(f"[image] Failed to initialize pipeline '{self.model_id}': {e}")
-            
-            # If FLUX failed due to memory, try a lighter model
-            if "out of memory" in str(e).lower() and "flux" in self.model_id.lower():
-                print("[image] FLUX failed due to memory. Trying lighter SDXL-turbo fallback...")
-                try:
-                    # Try SDXL-turbo as fallback (much lighter)
-                    fallback_model = "stabilityai/sdxl-turbo"
-                    self._pipeline = DiffusionPipeline.from_pretrained(
-                        fallback_model,
-                        torch_dtype=torch.float16 if self.device.startswith("cuda") else torch.float32,
-                        variant="fp16" if self.device.startswith("cuda") else None,
-                        use_safetensors=True,
-                    )
-                    if self.device.startswith("cuda"):
-                        # Use the selected GPU
-                        self._pipeline = self._pipeline.to(self.device)
-                    print(f"[image] Successfully loaded fallback model: {fallback_model}")
-                except Exception as e2:
-                    print(f"[image] Fallback also failed: {e2}")
-                    self._pipeline = None
-            else:
-                self._pipeline = None
-
-    def generate(self, prompt: str) -> Optional[str]:
-        if not self.model_id:
-            print("[image] Image generation disabled (no model selected).")
-            return None
-        self._lazy_init()
-        if self._pipeline is None:
-            return None
-        try:
-            if isinstance(self._pipeline, FluxPipeline):
-                image = self._pipeline(
-                    prompt,
-                    num_inference_steps=4,
-                    guidance_scale=0.0,
-                ).images[0]
-            else:
-                # CHANGE: default to 10 steps for non-FLUX pipelines (e.g., Qwen-Image, SD)
-                image = self._pipeline(prompt, num_inference_steps=10).images[0]
-            ts = datetime.now().strftime("%m%d-%H%M%S")
-            safe = prompt[:24].strip().replace(" ", "_").replace("/", "_")
-            out_name = f"{safe}_{ts}.png" if safe else f"img_{ts}.png"
-            out_path = os.path.join(ART_DIR, out_name)
-            image.save(out_path)
-            # Also copy into in-game images to persist with saves
-            try:
-                ig_path = os.path.join(IN_GAME_IMG_DIR, out_name)
-                shutil.copyfile(out_path, ig_path)
-            except Exception as e:
-                print(f"[image] copy to in-game images failed: {e}")
-            return out_path
-        except Exception as e:
-            print(f"[image] Generation error: {e}")
-            return None
-
-
 class LLMEngine:
-    def __init__(self, model_id: str, max_new_tokens: int = 1500, temperature: float = 0.7) -> None:
-        """
-        Initialize the LLM engine.
-        
-        Args:
-            model_id: Ollama model name
-            max_new_tokens: Maximum tokens to generate (1500 allows for detailed narration + complete JSON)
-            temperature: Creativity setting (0.7 is balanced)
-        """
-        self.model_id = model_id
+    def __init__(self, model_path: str, max_new_tokens: int = 1500, temperature: float = 0.7) -> None:
+        self.model_path = model_path
+        self.model_id = os.path.basename(model_path) if model_path else ""
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.model = None
+        self.tokenizer = None
+        if model_path:
+            self._load()
+
+    def _load(self):
+        print(f"[LLMEngine] Loading model from {self.model_path} ...")
+        self.model, self.tokenizer = mlx_load(self.model_path)
+        print(f"[LLMEngine] Model loaded: {self.model_id}")
+
+    def _unload(self):
+        self.model = None
+        self.tokenizer = None
+        import gc
+        gc.collect()
+        try:
+            import mlx.core as mx
+            mx.metal.clear_cache()
+        except Exception:
+            pass
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
+        if self.model is None or self.tokenizer is None:
+            return "(LLM error: no model loaded)"
         try:
-            # Use Ollama's system field plus a single combined prompt
-            generate_params: Dict[str, Any] = {
-                "model": self.model_id,
-                "prompt": user_prompt,
-                "system": system_prompt,
-                "options": {
-                    "num_predict": int(self.max_new_tokens),
-                    "temperature": float(self.temperature),
-                },
-            }
-            response = ollama.generate(**generate_params)
-            return response.get("response", "").strip()
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            prompt_tokens = self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            sampler = make_sampler(temp=self.temperature)
+            text = mlx_generate(
+                self.model, self.tokenizer, prompt=prompt_tokens,
+                max_tokens=self.max_new_tokens, sampler=sampler, verbose=False,
+            )
+            return text.strip()
         except Exception as e:
             return f"(LLM error: {e})"
 
 
+def fix_common_json_errors(json_str: str) -> str:
+    """
+    Fix common LLM JSON generation mistakes to make parsing more robust.
+    Enhanced with better error recovery and partial directive handling.
+    """
+    import re
 
+    # Remove trailing commas before closing braces/brackets
+    json_str = re.sub(r',\s*}', '}', json_str)
+    json_str = re.sub(r',\s*]', ']', json_str)
+
+    # Fix missing commas between key-value pairs
+    # Look for patterns like "key1": value1 "key2": value2 and add comma
+    json_str = re.sub(r'("\w+")\s*:\s*([^,}]+)\s+(?="[^"]+"\s*:)', r'\1: \2,', json_str)
+
+    # Fix unquoted keys (common LLM mistake: {name: "value"} instead of {"name": "value"})
+    # This is tricky to do safely, so we'll be conservative
+    # Only fix if it looks like a simple key without spaces or special chars
+    def fix_unquoted_keys(match):
+        key = match.group(1)
+        # Only fix keys that look like valid identifiers
+        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', key):
+            return f'"{key}": '
+        return match.group(0)  # Leave as-is if it doesn't look safe
+
+    json_str = re.sub(r'(\w+):\s', fix_unquoted_keys, json_str)
+
+    # Fix incomplete JSON by adding missing closing braces/brackets
+    # Count braces and brackets
+    open_braces = json_str.count('{')
+    close_braces = json_str.count('}')
+    open_brackets = json_str.count('[')
+    close_brackets = json_str.count(']')
+
+    # Add missing closing braces
+    while close_braces < open_braces:
+        json_str += '}'
+        close_braces += 1
+
+    # Add missing closing brackets
+    while close_brackets < open_brackets:
+        json_str += ']'
+        close_brackets += 1
+
+    # Fix single quotes to double quotes (but be careful about apostrophes in strings)
+    # This is complex, so we'll skip for now to avoid breaking valid strings
+
+    # Remove any extra closing braces/brackets at the end that might have been added incorrectly
+    # This is a simple heuristic - if we have more closing than opening, remove extras
+    while json_str.count('}') > json_str.count('{'):
+        json_str = json_str.rstrip('}')
+    while json_str.count(']') > json_str.count('['):
+        json_str = json_str.rstrip(']')
+
+    return json_str
+
+
+def parse_json_with_fallbacks(json_str: str, recognized_keys: List[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    Parse JSON with multiple fallback strategies for maximum robustness.
+    Returns (parsed_dict, error_message) where error_message is empty on success.
+    """
+    if recognized_keys is None:
+        recognized_keys = ["state_updates", "images"]
+
+    # Strategy 1: Direct parsing
+    try:
+        result = json.loads(json_str)
+        if isinstance(result, dict):
+            return result, ""
+    except Exception as e:
+        pass
+
+    # Strategy 2: Fix common errors and retry
+    try:
+        fixed_json = fix_common_json_errors(json_str)
+        result = json.loads(fixed_json)
+        if isinstance(result, dict):
+            return result, ""
+    except Exception as e:
+        pass
+
+    # Strategy 3: Extract and parse individual key-value pairs
+    # Look for patterns like "key": value or key: value
+    partial_result = {}
+    error_msgs = []
+
+    # Pattern for quoted keys
+    quoted_pattern = re.compile(r'"(' + '|'.join(recognized_keys) + r')"?\s*:\s*({.*?}|\[.*?\]|"[^"]*"|\d+|true|false|null)', re.IGNORECASE | re.DOTALL)
+
+    # Pattern for unquoted keys (common LLM mistake)
+    unquoted_pattern = re.compile(r'(?<!")\b(' + '|'.join(recognized_keys) + r')\b(?!")\s*:\s*({.*?}|\[.*?\]|"[^"]*"|\d+|true|false|null)', re.IGNORECASE | re.DOTALL)
+
+    for pattern in [quoted_pattern, unquoted_pattern]:
+        for match in pattern.finditer(json_str):
+            key, value_str = match.groups()
+            try:
+                # Try to parse the value
+                value = json.loads(value_str)
+                partial_result[key] = value
+            except Exception as e:
+                error_msgs.append(f"Failed to parse {key}: {str(e)[:50]}")
+
+    if partial_result:
+        return partial_result, f"Partial parse succeeded: {', '.join(error_msgs)}"
+
+    return None, f"All parsing strategies failed. Raw text: {json_str[:200]}..."
+
+
+def extract_json_from_text(text: str) -> List[Dict[str, Any]]:
+    """
+    Extract and parse JSON objects from text using multiple strategies.
+    Returns a list of successfully parsed JSON objects.
+    Enhanced with better extraction and fallback parsing.
+    """
+    candidates = []
+    recognized_keys = ["state_updates", "images"]
+
+    # Strategy 1: Extract complete JSON objects using balanced brace counting
+    start_idx = text.find('{')
+    if start_idx != -1:
+        brace_count = 0
+        json_start = start_idx
+
+        for i, char in enumerate(text[start_idx:], start_idx):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    # Found complete JSON object - try to parse it
+                    json_candidate = text[json_start:i+1]
+                    parsed, error = parse_json_with_fallbacks(json_candidate, recognized_keys)
+                    if parsed:
+                        candidates.append(parsed)
+                    # Look for next JSON object
+                    remaining = text[i+1:]
+                    next_start = remaining.find('{')
+                    if next_start != -1:
+                        json_start = i + 1 + next_start
+                        brace_count = 0
+                    else:
+                        break
+
+    # Strategy 2: Look for partial JSON structures that might contain our keys
+    # This catches cases where the LLM starts JSON but doesn't complete it
+    if not candidates:
+        # Look for any text that contains our recognized keys near braces
+        key_patterns = []
+        for key in recognized_keys:
+            # Match key followed by colon and some structure
+            pattern = rf'"{key}"?\s*:\s*({{.*?}}|\[.*?\]|"[^"]*"|\d+|true|false|null)'
+            key_patterns.append(pattern)
+
+        combined_pattern = '|'.join(f'({p})' for p in key_patterns)
+        matches = re.finditer(combined_pattern, text, re.IGNORECASE | re.DOTALL)
+
+        partial_dict = {}
+        for match in matches:
+            # Try to extract key-value pairs
+            matched_text = match.group(0)
+            # Simple key-value extraction
+            colon_idx = matched_text.find(':')
+            if colon_idx > 0:
+                key_part = matched_text[:colon_idx].strip().strip('"')
+                value_part = matched_text[colon_idx+1:].strip()
+                try:
+                    value = json.loads(value_part)
+                    partial_dict[key_part] = value
+                except:
+                    pass
+
+        if partial_dict:
+            candidates.append(partial_dict)
+
+    return candidates
+
+
+def extract_fallback_directives(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract directives from text using flexible pattern matching when JSON fails.
+    Supports formats like:
+    - move_to: Cave Entrance
+    - add_items: sword, shield
+    - change_health: +10
+    """
+    directives = {}
+    lines = text.split('\n')
+
+    # Pattern matching for common directive formats
+    patterns = {
+        "move_to": re.compile(r'(?:move_to|move\s+to|go\s+to)\s*:\s*(.+)', re.IGNORECASE),
+        "add_items": re.compile(r'(?:add_items|add\s+items?|gain|get)\s*:\s*(.+)', re.IGNORECASE),
+        "remove_items": re.compile(r'(?:remove_items|remove\s+items?|drop|lose)\s*:\s*(.+)', re.IGNORECASE),
+        "change_health": re.compile(r'(?:change_health|health|damage|heal)\s*:\s*([+-]?\d+)', re.IGNORECASE),
+        "place_items": re.compile(r'(?:place_items|place\s+items?|put|leave)\s*:\s*(.+)', re.IGNORECASE),
+        "room_take": re.compile(r'(?:room_take|take\s+from\s+room|pick\s+up|get)\s*:\s*(.+)', re.IGNORECASE),
+        "connect": re.compile(r'(?:connect|link)\s*:\s*(.+)', re.IGNORECASE),
+    }
+
+    state_updates = {}
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        for directive_type, pattern in patterns.items():
+            match = pattern.search(line)
+            if match:
+                value = match.group(1).strip()
+
+                if directive_type in ["add_items", "remove_items", "place_items", "room_take"]:
+                    # Parse comma-separated lists
+                    items = [item.strip().strip('"').strip("'") for item in value.split(',')]
+                    items = [item for item in items if item]  # Remove empty items
+                    if items:
+                        state_updates[directive_type] = items
+
+                elif directive_type == "change_health":
+                    try:
+                        state_updates[directive_type] = int(value)
+                    except ValueError:
+                        continue
+
+                elif directive_type == "connect":
+                    # Parse room connections like "RoomA-RoomB" or "RoomA to RoomB"
+                    connections = []
+                    parts = re.split(r'\s*(?:to|-|<>|↔)\s*', value)
+                    if len(parts) >= 2:
+                        room_a = parts[0].strip()
+                        room_b = parts[1].strip()
+                        connections.append([room_a, room_b])
+                        state_updates[directive_type] = connections
+
+                elif directive_type == "move_to":
+                    state_updates[directive_type] = value
+
+                break  # Only match first pattern per line
+
+    # Extract image prompts from lines containing image-related keywords
+    image_lines = []
+    for line in lines:
+        line_lower = line.lower()
+        if any(keyword in line_lower for keyword in ['image', 'picture', 'show', 'display', 'visual']):
+            # Extract the actual description
+            image_match = re.search(r'(?:image|picture|show|display|visual)(?:\s+of)?\s*:\s*(.+)', line, re.IGNORECASE)
+            if image_match:
+                image_lines.append(image_match.group(1).strip())
+
+    if state_updates:
+        directives["state_updates"] = state_updates
+
+    if image_lines:
+        directives["images"] = image_lines
+
+    return directives if directives else None
+
+
+def validate_and_fix_directives(directives: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """
+    Validate and fix common JSON schema issues in LLM directives.
+    Returns (fixed_directives, warning_messages)
+    """
+    if not isinstance(directives, dict):
+        return directives, ["Directives must be a dictionary"]
+
+    warnings = []
+    fixed = {}
+
+    # Validate state_updates
+    if "state_updates" in directives:
+        state_updates = directives["state_updates"]
+        if not isinstance(state_updates, dict):
+            warnings.append("state_updates should be a dictionary")
+            fixed["state_updates"] = {}
+        else:
+            fixed_updates = {}
+
+            # Validate move_to
+            if "move_to" in state_updates:
+                move_to = state_updates["move_to"]
+                if isinstance(move_to, str) and move_to.strip():
+                    fixed_updates["move_to"] = move_to.strip()
+                else:
+                    warnings.append("move_to should be a non-empty string")
+
+            # Validate arrays that should contain strings
+            array_fields = ["add_items", "remove_items", "place_items", "room_take"]
+            for field in array_fields:
+                if field in state_updates:
+                    value = state_updates[field]
+                    if isinstance(value, list):
+                        # Ensure all items are strings
+                        fixed_items = [str(item).strip() for item in value if item]
+                        fixed_updates[field] = fixed_items
+                    elif isinstance(value, str):
+                        # Convert single string to array
+                        fixed_updates[field] = [value.strip()]
+                    else:
+                        warnings.append(f"{field} should be a list of strings")
+
+            # Validate change_health
+            if "change_health" in state_updates:
+                health = state_updates["change_health"]
+                try:
+                    fixed_updates["change_health"] = int(health)
+                except (ValueError, TypeError):
+                    warnings.append("change_health should be a number")
+
+            # Validate connect
+            if "connect" in state_updates:
+                connect = state_updates["connect"]
+                if isinstance(connect, list):
+                    fixed_connections = []
+                    for conn in connect:
+                        if isinstance(conn, list) and len(conn) == 2:
+                            fixed_connections.append([str(conn[0]), str(conn[1])])
+                        else:
+                            warnings.append("connect entries should be [room_a, room_b] pairs")
+                    if fixed_connections:
+                        fixed_updates["connect"] = fixed_connections
+                else:
+                    warnings.append("connect should be a list of room pairs")
+
+            # Validate other string fields
+            string_fields = ["add_note", "set_context"]
+            for field in string_fields:
+                if field in state_updates:
+                    value = state_updates[field]
+                    if isinstance(value, str):
+                        fixed_updates[field] = value.strip()
+                    else:
+                        warnings.append(f"{field} should be a string")
+
+            # Validate set_flag
+            if "set_flag" in state_updates:
+                flag = state_updates["set_flag"]
+                if isinstance(flag, dict) and "name" in flag:
+                    fixed_updates["set_flag"] = flag
+                else:
+                    warnings.append("set_flag should be a dict with 'name' field")
+
+            # Validate mechanics
+            if "mechanics" in state_updates:
+                mech = state_updates["mechanics"]
+                if isinstance(mech, dict) and "action" in mech and "effect" in mech:
+                    fixed_updates["mechanics"] = mech
+                else:
+                    warnings.append("mechanics should have 'action' and 'effect' fields")
+
+            if fixed_updates:
+                fixed["state_updates"] = fixed_updates
+
+    # Validate images
+    if "images" in directives:
+        images = directives["images"]
+        if isinstance(images, list):
+            # Ensure all items are strings
+            fixed_images = [str(img).strip() for img in images if img]
+            fixed["images"] = fixed_images
+        elif isinstance(images, str):
+            # Convert single string to array
+            fixed["images"] = [images.strip()]
+        else:
+            warnings.append("images should be a list of strings")
+
+    # Validate advanced mechanics
+    advanced_fields = ["conditional_action", "timer_event", "chain_reaction"]
+    for field in advanced_fields:
+        if field in directives:
+            value = directives[field]
+            if isinstance(value, dict):
+                fixed[field] = value
+            else:
+                warnings.append(f"{field} should be a dictionary")
+
+    return fixed, warnings
 
 
 def validate_world_bible(world_bible: Dict[str, Any]) -> Tuple[bool, List[str]]:
@@ -1240,16 +1706,20 @@ def validate_world_bible(world_bible: Dict[str, Any]) -> Tuple[bool, List[str]]:
     return len(issues) == 0, issues
 
 
-def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str], theme: Optional[str] = None, max_tokens: int = 4000) -> Optional[Dict[str, Any]]:
     """
     SIMPLE world bible generation - just call LLM and return result.
-    If anything goes wrong, return a default plan. NO COMPLEX NESTING!
+    Returns None if generation fails or produces invalid results.
     """
-    # Default plan that always works - showing interconnected gameplay
+    # Ensure max_tokens is valid
+    if max_tokens is None or not isinstance(max_tokens, int) or max_tokens < 250:
+        max_tokens = 600  # Use safe default
+
+    # Default cave adventure - well-designed and always available
     default_plan = {
         "objectives": [
             "Light your way through the darkness",
-            "Gain passage across the underground river", 
+            "Gain passage across the underground river",
             "Unlock the ancient temple",
             "Claim the legendary treasure"
         ],
@@ -1303,11 +1773,16 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str])
         "main_arc": "A brave explorer seeks legendary treasure in mysterious caves. They must use wit and courage to overcome guardians and puzzles.",
         "win_condition": "Obtain the golden treasure and return to entrance"
     }
-    
-    # If no model, just return default
-    if not heavy_model_id:
-        print("[world_bible] No model provided, using default plan")
+
+    # If no theme provided, return the default cave adventure
+    if not theme or not theme.strip():
+        print("[world_bible] No theme specified, using default cave adventure")
         return default_plan
+
+    # If no model, fail (don't provide default)
+    if not heavy_model_id:
+        print("[world_bible] No model provided")
+        return None
     
     try:
         # Simple prompt
@@ -1316,23 +1791,29 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str])
             "rooms": list(state_mgr.state.known_map.keys())[:5]
         }
         
-        # ENFORCED THEME from UI (if any): we do NOT hard-wire.
-        # If user applied a theme via the Theme input, we carry it forward here.
-        try:
-            enforced_theme = ((WORLD_BIBLE or {}).get("global_theme"))
-        except Exception:
-            enforced_theme = None
-        if not enforced_theme:
+        # Use provided theme parameter, or fall back to existing WORLD_BIBLE theme, or default
+        enforced_theme = theme
+        if not enforced_theme or not enforced_theme.strip():
+            try:
+                if 'WORLD_BIBLE' in globals() and WORLD_BIBLE and isinstance(WORLD_BIBLE, dict):
+                    enforced_theme = WORLD_BIBLE.get("global_theme")
+            except Exception:
+                pass
+
+        # If still no theme, use default
+        if not enforced_theme or not enforced_theme.strip():
             enforced_theme = DEFAULT_IMAGE_THEME
         
         prompt = f"""Create a COMPLETE, SOLVABLE adventure game outline for: {snapshot}
 
-IMPORTANT: Design an interconnected game where:
-- Items are needed to solve puzzles/defeat monsters
-- NPCs provide crucial hints or items
-- Riddles unlock access to new areas or items
-- Everything connects to achieve the objectives
-- The game must be winnable with logical progression
+FRAMEWORK REQUIREMENTS - Every element must serve the story:
+- CONSISTENT STORY ARC: Create a logical progression where each objective builds toward the win condition
+- ALL ITEMS HAVE PURPOSE: Every key_item must be essential for solving puzzles, defeating monsters, or achieving objectives
+- ALL NPCs HAVE REASON: Every NPC must provide crucial information, items, or access that advances the story
+- INTERCONNECTED ELEMENTS: Items, NPCs, riddles, and mechanics must form a cohesive puzzle where each piece is necessary
+- WINNABLE PROGRESSION: The player must be able to logically discover and use all elements to complete the game
+
+FLEXIBLE BUT COHERENT: Be creative with the theme and setting, but ensure every element contributes to the narrative goal.
 
 
 
@@ -1361,409 +1842,197 @@ Example structure (but be creative):
 - Sword defeats guardian blocking treasure
 - Treasure contains artifact that completes quest
 
-Respond with JSON only."""
+Respond with JSON only. Do not include any explanatory text, markdown formatting, or anything else - just the raw JSON object."""
 
-        # Call LLM
-        print(f"[world_bible] Calling {heavy_model_id}")
-        response = ollama.generate(
-            model=heavy_model_id,
-            prompt=prompt,
-            options={"temperature": 0.7, "num_predict": 3000}
-        )
-        
-        # Extract JSON from response
-        text = response.get("response", "")
-        
+        # DEBUG: Show full prompt being sent to LLM
+        print(f"[world_bible] PROMPT BEING SENT TO {heavy_model_id} ({len(prompt)} chars):")
+        print("=" * 80)
+        print(prompt)
+        print("=" * 80)
+        print(f"[world_bible] Calling {heavy_model_id} with max_tokens={max_tokens}")
+
+        # Build model path (if not already a full path, look in MLX_MODELS_DIR)
+        if os.path.isdir(heavy_model_id):
+            wb_model_path = heavy_model_id
+        else:
+            wb_model_path = os.path.join(MLX_MODELS_DIR, heavy_model_id)
+
+        wb_engine = LLMEngine(model_path=wb_model_path, max_new_tokens=max_tokens, temperature=0.7)
+        system_msg = "You are a game designer. Output ONLY a single valid JSON object. No markdown fences, no commentary, no text outside the JSON."
+        raw_response = wb_engine.generate(system_msg, prompt)
+        wb_engine._unload()
+
+        print(f"[world_bible] RAW LLM RESPONSE ({len(raw_response)} chars):")
+        print("=" * 80)
+        print(raw_response)
+        print("=" * 80)
+
+        # Extract JSON from response - be very forgiving of LLM mistakes
+        text = raw_response
+
         # Remove markdown if present
         text = text.replace("```json", "").replace("```", "").strip()
-        
-        # Find JSON object
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        
-        if start >= 0 and end > start:
-            json_str = text[start:end]
-            plan = json.loads(json_str)
-            
-            # NORMALIZE THEME KEY: prefer single canonical key "global_theme" (from UI)
-            try:
-                # Always set to enforced theme from UI to avoid drift
-                plan["global_theme"] = enforced_theme
-            except Exception:
-                pass
-            
-            # Validate the generated world bible
-            is_valid, issues = validate_world_bible(plan)
-            
-            if is_valid:
-                print(f"[world_bible] Successfully generated valid {len(str(plan))} char plan")
-                return plan
-            else:
-                print(f"[world_bible] Generated plan has issues:")
-                for issue in issues[:3]:  # Show first 3 issues
-                    print(f"  - {issue}")
-                print(f"[world_bible] Using enhanced default plan instead")
-                return default_plan
-            
-    except Exception as e:
-        print(f"[world_bible] Generation failed ({e}), using default")
-    
-    return default_plan
 
+        # DEBUG: Show full raw JSON response
+        print(f"[world_bible] FULL RAW RESPONSE FROM LLM ({len(text)} chars):")
+        print("=" * 80)
+        print(text)
+        print("=" * 80)
 
-    # Minimal snapshot of current seed for better planning
-    snapshot = {
-        "start": state_mgr.state.location,
-        "known_map_keys": list(state_mgr.state.known_map.keys())[:20],
-        "inventory": list(state_mgr.state.inventory)[:10],
-    }
+        plan = None
 
-    # Simple, direct prompt that any OpenAI model should handle easily
-    system = "You are a helpful assistant that creates adventure game plans in JSON format."
-    
-    user = (
-        f"Create a story outline for this adventure game: {json.dumps(snapshot)}\n\n"
-        "Return a JSON outline with these fields (be concise but descriptive):\n"
-        "- objectives: 3-4 main goals\n"
-        "- theme: visual style description (one paragraph)\n"
-        "- key_npcs: 2-3 important characters with name, role, brief description\n"
-        "- locations: 5-6 important rooms with name and visual description\n"
-        "- key_items: 5-7 story items with name and purpose\n"
-        "- main_arc: story summary (2-3 sentences)\n\n"
-        "Example:\n"
-        "{\n"
-        '  "objectives": ["Find the lost artifact", "Defeat the guardian", "Unlock the ancient portal", "Escape the realm"],\n'
-        '  "theme": "Dark fantasy cave system with bioluminescent crystals casting ethereal blue-green light, ancient stone architecture with mysterious runes, misty atmosphere with shadows dancing on wet walls",\n'
-        '  "key_npcs": [\n'
-        '    {"name": "Elder Sage", "role": "guide", "description": "ancient keeper of cave lore"},\n'
-        '    {"name": "Stone Guardian", "role": "boss", "description": "massive golem protecting the artifact"}\n'
-        '  ],\n'
-        '  "locations": [\n'
-        '    {"name": "Entrance Cavern", "description": "vast opening with stalactites and echoing darkness"},\n'
-        '    {"name": "Crystal Gallery", "description": "chamber filled with glowing blue crystals"},\n'
-        '    {"name": "Underground Lake", "description": "dark waters reflecting crystal light"},\n'
-        '    {"name": "Ancient Temple", "description": "carved stone halls with mysterious altars"},\n'
-        '    {"name": "Guardian Chamber", "description": "massive circular arena with stone pillars"}\n'
-        '  ],\n'
-        '  "key_items": [\n'
-        '    {"name": "torch", "purpose": "light dark passages"},\n'
-        '    {"name": "crystal key", "purpose": "unlock temple doors"},\n'
-        '    {"name": "ancient map", "purpose": "reveal hidden paths"},\n'
-        '    {"name": "magic sword", "purpose": "defeat guardian"},\n'
-        '    {"name": "artifact", "purpose": "complete the quest"}\n'
-        '  ],\n'
-        '  "main_arc": "An explorer ventures into an ancient cave system seeking a legendary artifact. They must navigate treacherous passages, solve ancient puzzles, and face the Stone Guardian to claim their prize and escape."\n'
-        "}\n\n"
-        "Create a balanced outline - detailed enough for visualization but concise for quick processing. JSON only:"
-    )
+        # Strategy 1: Try to extract complete JSON objects using balanced braces
+        # NOTE: extract_json_from_text returns already-parsed dicts, not strings
+        candidates = extract_json_from_text(text)
+        if candidates:
+            plan = candidates[0]  # Already parsed by extract_json_from_text
+            print(f"[world_bible] Successfully parsed JSON candidate (from {len(candidates)} candidates)")
 
-    plan = None  # Initialize at function scope
-    
-    # Helper function to extract complete JSON objects with balanced braces
-    def extract_json_from_text(text):
-        start_idx = text.find('{')
-        if start_idx == -1:
-            return []
-        
-        candidates = []
-        brace_count = 0
-        json_start = start_idx
-        
-        for i, char in enumerate(text[start_idx:], start_idx):
-            if char == '{':
-                brace_count += 1
-            elif char == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    # Found complete JSON object
-                    candidates.append(text[json_start:i+1])
-                    # Look for next JSON object
-                    remaining = text[i+1:]
-                    next_start = remaining.find('{')
-                    if next_start != -1:
-                        json_start = i + 1 + next_start
-                        brace_count = 0
-                    else:
-                        break
-        
-        return candidates
+        # Strategy 2: If no candidates worked, try basic { } extraction as fallback
+        if plan is None:
+            start = text.find("{")
+            end = text.rfind("}") + 1
 
-    try:
-        # If no explicit model provided, fail fast with friendly behavior
-        if not heavy_model_id:
-            raise RuntimeError("No LLM model selected. Use the LLM dropdown first.")
-        
-        print(f"[world_bible] Attempting generation with model: {heavy_model_id}")
-        print(f"[world_bible] System prompt length: {len(system)} chars")
-        print(f"[world_bible] User prompt length: {len(user)} chars")
-        print(f"[world_bible] SYSTEM PROMPT: {system}")
-        print(f"[world_bible] USER PROMPT: {user}")
-        
-        # Use EXACT same pattern as main LLM engine that works
-        try:
-            print(f"[world_bible] Using same pattern as main LLM engine")
-            generate_params: Dict[str, Any] = {
-                "model": heavy_model_id,
-                "prompt": user,
-                "system": system,
-                "options": {
-                    "num_predict": 4000,  # Balanced - detailed enough for images but not too long
-                    "temperature": 0.6,
-                },
-            }
-            response = ollama.generate(**generate_params)
-            text = response.get("response", "").strip()
-            print(f"[world_bible] Raw response length: {len(text)} chars")
-            print(f"[world_bible] Raw response preview: {text[:300]}...")
-            
-            # Extract JSON from the response using balanced brace extraction
-            # First try to remove markdown code fences if present
-            cleaned_text = text
-            if "```json" in text:
-                cleaned_text = text.replace("```json", "").replace("```", "")
-            elif "```" in text:
-                cleaned_text = text.replace("```", "")
-            
-            candidates = extract_json_from_text(cleaned_text)
-            for i, c in enumerate(candidates):
+            if start >= 0 and end > start:
+                json_str = text[start:end]
+                print(f"[world_bible] Attempting to parse extracted JSON ({len(json_str)} chars):")
+                print(json_str)
                 try:
-                    plan = json.loads(c)
-                    print(f"[world_bible] Successfully parsed JSON candidate {i}")
-                    break
-                except Exception as parse_err:
-                    print(f"[world_bible] Failed to parse candidate {i}: {parse_err}")
-                    continue
-            
-            if plan is None:
-                # Try one more time with the original text
-                candidates = extract_json_from_text(text)
-                for i, c in enumerate(candidates):
-                    try:
-                        plan = json.loads(c)
-                        print(f"[world_bible] Successfully parsed JSON candidate {i} (from original)")
-                        break
-                    except:
-                        continue
-            
-            if plan is None:
-                raise ValueError("No valid JSON found in response")
-            
-            # SUCCESS! We have a plan, skip to the post-processing
-            
-        except ollama.ResponseError as e:
-            print(f"[world_bible] Ollama ResponseError in JSON mode:")
-            print(f"[world_bible] Status code: {e.status_code}")
-            print(f"[world_bible] Error message: {e.error}")
-            print(f"[world_bible] Full error details: {str(e)}")
-            raise e
-        except Exception as e:
-            print(f"[world_bible] Other error in JSON mode: {e}")
-            print(f"[world_bible] Error type: {type(e).__name__}")
-            raise e
-    except Exception as e_json:
-        # Only go to fallback if we don't already have a plan
-        if plan is not None:
-            print(f"[world_bible] Plan already generated successfully, skipping fallback")
-        else:
-            print(f"[world_bible] strict JSON mode failed: {e_json}")
-            print(f"[world_bible] Error type: {type(e_json).__name__}")
-        # Fallback: no format flag, then attempt to extract JSON blob
+                    # Try to fix common LLM JSON mistakes
+                    json_str = fix_common_json_errors(json_str)
+                    plan = json.loads(json_str)
+                    print(f"[world_bible] Successfully parsed with JSON fixes")
+                except Exception as e:
+                    print(f"[world_bible] Basic JSON parsing failed: {e}")
+                    print(f"[world_bible] Failed JSON string: {json_str}")
+
+        # Strategy 3: More aggressive JSON completion and fixing
         if plan is None:
             try:
-                print(f"[world_bible] Trying fallback mode without format=json")
-                try:
-                    response = ollama.generate(
-                        model=heavy_model_id,
-                        prompt=user,
-                        system=system,
-                        options={"temperature": 0.6, "num_predict": 24200},
-                    )
-                    text = response.get("response", "") if isinstance(response, dict) else str(response)
-                    print(f"[world_bible] Fallback response length: {len(text)} chars")
-                    print(f"[world_bible] Fallback response preview: {text[:200]}...")
-                except ollama.ResponseError as e:
-                    print(f"[world_bible] Ollama ResponseError in fallback mode:")
-                    print(f"[world_bible] Status code: {e.status_code}")
-                    print(f"[world_bible] Error message: {e.error}")
-                    print(f"[world_bible] Full error details: {str(e)}")
-                    raise e
-                except Exception as e:
-                    print(f"[world_bible] Other error in fallback mode: {e}")
-                    print(f"[world_bible] Error type: {type(e).__name__}")
-                    raise e
-                # Extract JSON-looking segment using balanced brace extraction
-                candidates = extract_json_from_text(text)
-                print(f"[world_bible] Found {len(candidates)} JSON-like candidates")
-                for i, c in enumerate(candidates):
+                # Try to extract and fix the entire response as potential JSON
+                json_str = text.strip()
+                if not json_str.startswith('{'):
+                    start = json_str.find('{')
+                    if start >= 0:
+                        json_str = json_str[start:]
+
+                # Apply multiple rounds of fixing
+                for _ in range(3):  # Try up to 3 rounds of fixing
+                    json_str = fix_common_json_errors(json_str)
                     try:
-                        plan = json.loads(c)
-                        print(f"[world_bible] Successfully parsed candidate {i}")
+                        plan = json.loads(json_str)
+                        print(f"[world_bible] Successfully parsed with aggressive JSON fixes")
                         break
-                    except Exception as parse_err:
-                        print(f"[world_bible] Failed to parse candidate {i}: {parse_err}")
+                    except json.JSONDecodeError:
                         continue
-                if plan is None:
-                    raise ValueError("No valid JSON found in LLM output")
-            except Exception as e_free:
-                print(f"[world_bible] free-form fallback failed: {e_free}")
-                print(f"[world_bible] Fallback error type: {type(e_free).__name__}")
-                print(f"[world_bible] Using hardcoded fallback plan")
-                # Last resort: build a tiny default plan so the game can continue
-                plan = {
-                    "objectives": ["Explore the dungeon", "Find a key artifact", "Reach the hidden sanctuary"],
-                    "acts": [{"title": "Emergence", "beats": ["Light a torch", "Map 3 rooms", "Acquire first tool"]}],
-                    "key_characters": [{"name": "Guide", "role": "mentor", "notes": "Offers early tips."}],
-                    "locations": [{"room": snapshot.get("start", "Start"), "theme": "gloomy caverns", "notes": "first steps"}],
-                    "riddles_and_tasks": [{"room": snapshot.get("start", "Start"), "task": "Open sealed door", "requirements": ["Rusty Key"], "hint": "Listen for hollow walls"}],
-                    "loot_progression": ["Lantern -> Rope -> Key -> Relic"],
-                    "fail_states": ["Health hits zero", "Drop key item into chasm"],
-                    "dynamic_rules": ["New exits may appear after key events"],
-                    # ensure a global theme exists for consistent imagery
-                    "global_theme": "Colossal cave fantasy with moody lighting"
-                }
-    # At this point, plan should be set (either from main try, fallback, or hardcoded)
-    if plan is None:
-        print(f"[world_bible] WARNING: plan is still None after all attempts, using emergency fallback")
-        plan = {
-            "objectives": ["Explore the mysterious caves", "Find the hidden treasure", "Defeat any guardians", "Escape safely"],
-            "theme": "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere with dancing shadows",
-            "key_npcs": [
-                {"name": "Cave Guide", "role": "helper", "description": "mysterious figure who knows the caves"},
-                {"name": "Guardian", "role": "boss", "description": "ancient protector of the treasure"}
-            ],
-            "locations": [
-                {"name": "Entrance", "description": "rocky cave mouth with cool air flowing out"},
-                {"name": "Crystal Chamber", "description": "cavern filled with glowing crystals"},
-                {"name": "Underground River", "description": "rushing water through stone channels"},
-                {"name": "Treasury", "description": "ancient vault with stone pedestals"},
-                {"name": "Exit Tunnel", "description": "narrow passage leading to daylight"}
-            ],
-            "key_items": [
-                {"name": "torch", "purpose": "light the way"},
-                {"name": "rope", "purpose": "cross chasms"},
-                {"name": "key", "purpose": "unlock doors"},
-                {"name": "map", "purpose": "navigate maze"},
-                {"name": "treasure", "purpose": "quest goal"}
-            ],
-            "main_arc": "An adventurer enters mysterious caves seeking legendary treasure. They must navigate dangerous passages and overcome the ancient guardian to claim their prize."
-        }
-    
-    # Ensure a global theme exists even if model omitted it
-    try:
-        if isinstance(plan, dict) and not plan.get("global_theme") and not plan.get("theme"):
-            first_loc = (plan.get("locations") or [{}])[0]
-            inferred = first_loc.get("theme") or "Colossal cave fantasy with moody lighting"
-            plan["global_theme"] = inferred
-    except Exception:
-        pass
-    # Pre-generate image placeholders for early content (optional, non-critical)
-    try:
-        # Get early rooms from state
-        early_rooms = list(state_mgr.state.known_map.keys())[:3]
+
+            except Exception as e:
+                print(f"[world_bible] All JSON parsing strategies failed: {e}")
+                plan = None
+
+        # If all parsing failed, return None - let user retry
+        if plan is None:
+            print("[world_bible] No valid JSON parsed from response")
+            return None
+
+        # NORMALIZE THEME KEY: prefer single canonical key "global_theme" (from UI)
+        try:
+            # Always set to enforced theme from UI to avoid drift
+            plan["global_theme"] = enforced_theme
+        except Exception:
+            pass
         
-        # Get critical items from loot_progression (new format) or riddles_and_tasks (old format)
-        critical_items: List[str] = []
+        # Validate the generated world bible
+        is_valid, issues = validate_world_bible(plan)
         
-        # Try new concise format (key_items)
-        if "key_items" in plan and isinstance(plan["key_items"], list):
-            for item in plan["key_items"][:5]:
-                if isinstance(item, str):
-                    critical_items.append(item.strip())
-        # Try comprehensive format (loot_progression) 
-        elif "loot_progression" in plan and isinstance(plan["loot_progression"], list):
-            for item in plan["loot_progression"][:5]:
-                if isinstance(item, str):
-                    # Extract item name (before any dash description)
-                    item_name = item.split(" - ")[0].strip()
-                    if item_name:
-                        critical_items.append(item_name)
-        
-        # Fallback to old format if needed
-        elif "riddles_and_tasks" in plan:
-            for task in plan.get("riddles_and_tasks", [])[:5]:
-                reqs = task.get("requirements") or []
-                for r in reqs:
-                    if isinstance(r, str) and r not in critical_items:
-                        critical_items.append(r)
-                if len(critical_items) >= 3:
-                    break
+        if is_valid:
+            print(f"[world_bible] Successfully generated valid {len(str(plan))} char plan")
+            return plan
+        else:
+            print(f"[world_bible] Generated plan has issues:")
+            for issue in issues:
+                print(f"  - {issue}")
+            print(f"[world_bible] Plan rejected - generation failed")
+            return None
+            
     except Exception as e:
-        # This is non-critical, just log and continue
-        pass
-    print(f"[world_bible] SUCCESS! Generated world bible with {len(str(plan))} characters")
-    return plan
+        print(f"[world_bible] Generation failed ({e})")
+
+    return None
 
 
+# Full-featured system instructions for capable local LLMs
 SYSTEM_INSTRUCTIONS = (
-    "You are the narrator for a text adventure. Keep responses 2-5 sentences.\n\n"
-    "STORYTELLING PRINCIPLES:\n"
-    "- Create tension: foreshadow dangers, build to climaxes\n"
-    "- Reward exploration: hide secrets, reward careful examination\n"
-    "- Fail forward: setbacks should create new opportunities, not dead ends\n"
-    "- Remember earlier events: reference past actions when relevant\n"
-    "- Multiple solutions: consider 2+ ways to overcome obstacles\n"
-    "- Use story_context to track narrative threads and intentions\n\n"
-    "WORLD BIBLE RULES:\n"
-    "- Follow the world bible for NPCs, monsters, items, and objectives\n"
-    "- Monster weaknesses are ABSOLUTE (torch defeats troll, sword defeats golem)\n"
-    "- NPCs remember last 5 turns (check recent_conversation)\n\n"
-    "GOAL ALIGNMENT:\n"
-    "- Consider win_condition in context; prefer actions that move the player toward it when reasonable.\n\n"
-    "MOVEMENT RULES:\n"
-    "- When entering NEW rooms from world bible, ALWAYS connect them:\n"
-    "  {\"move_to\": \"Underground River\", \"connect\": [[\"Dark Passage\", \"Underground River\"]]}\n"
-    "- Check known_map to avoid dead ends\n\n"
-    "COMBAT:\n"
-    "- Use change_health for damage (negative) or healing (positive)\n"
-    "- Respect monster weaknesses from world bible\n\n"
-    "JSON TOOLS (append after narration):\n"
-    "- move_to: string room name\n"
-    "- connect: [[\"RoomA\", \"RoomB\"]] pairs for bidirectional exits\n"
-    "- add_items: [\"item\"] to inventory\n"
-    "- remove_items: [\"item\"] from inventory\n"
-    "- change_health: integer (-5 for damage, +5 for heal)\n"
-    "- add_note: \"quest update\"\n"
-    "- set_context: \"narrative memory/intentions\" (track story threads)\n"
-    "- set_flag: {\"name\": \"flag_name\", \"value\": any} (track puzzles/states/timers)\n"
-    "- mechanics: {\"action\": \"block door with stone\", \"effect\": \"door stays open\", \"permanent\": true}\n"
-    "- place_items: [\"item\"] in current room\n"
-    "- room_take: [\"item\"] from room to inventory\n"
-    "- images: [\"room overview\", \"item close-up\"]\n\n"
-    "EXAMPLE JSON:\n"
+    "You are a text adventure narrator.\n\n"
+
+    "YOUR OUTPUT FORMAT (follow this EXACTLY every turn):\n"
+    "1. Write 2-5 sentences of narration describing what happens and what the player sees.\n"
+    "2. After the narration, write a JSON block inside ```json``` fences.\n"
+    "3. The JSON block MUST have this structure:\n"
+    '   ```json\n'
+    '   {"state_updates": { ... }, "images": ["short image prompt"]}\n'
+    '   ```\n\n'
+
+    "BEFORE YOU RESPOND, CHECK THE GAME STATE:\n"
+    "- location: where player is now\n"
+    "- inventory: what player carries\n"
+    "- current_room_items: what is in this room\n"
+    "- current_exits: where the player can go from here\n"
+    "- story_context: what happened before (YOUR MEMORY from previous turns)\n"
+    "- game_flags: puzzle states, timers, conditions you set\n\n"
+
+    "AVAILABLE TOOLS (put these inside state_updates):\n"
+    "  move_to: \"Room Name\"              - move player to a room\n"
+    "  connect: [[\"RoomA\", \"RoomB\"]]     - link rooms bidirectionally\n"
+    "  place_items: [\"item\"]              - put item in current room for player to find\n"
+    "  room_take: [\"item\"]               - player picks up item from room into inventory\n"
+    "  add_items: [\"item\"]               - give item directly to player inventory\n"
+    "  remove_items: [\"item\"]            - remove item from inventory\n"
+    "  change_health: -5 or +10           - damage or heal the player\n"
+    "  set_context: \"summary\"            - save what happened (YOUR MEMORY for next turn)\n"
+    "  set_flag: {\"name\": \"x\", \"value\": true} - track puzzle/event states\n"
+    "  timer_event: {\"name\": \"poison\", \"duration\": 3, \"action\": \"take_damage\", \"value\": 5}\n"
+    "  conditional_action: {\"condition\": \"has_key\", \"action\": \"unlock\", \"fallback\": \"door is locked\"}\n\n"
+
+    "IMAGE PROMPTS (put inside images array):\n"
+    "  images: [\"short visual description of the scene\"]\n"
+    "  ALWAYS include at least one image prompt that matches your narration.\n\n"
+
+    "EXAMPLE 1 - Player enters a new room:\n"
+    "The passage opens into a pitch-black chamber. You hear dripping water echoing off distant walls. Without light, you can barely see your own hand.\n\n"
     "```json\n"
-    "{\n"
-    "  \"state_updates\": {\n"
-    "    \"move_to\": \"Glowing Cavern\",\n"
-    "    \"place_items\": [\"Glowing Mushroom\"],\n"
-    "    \"set_context\": \"Player discovered the hidden cavern. The mushroom's glow hints at deeper magic.\"\n"
-    "  },\n"
-    "  \"images\": [\"Glowing Cavern overview\", \"Glowing Mushroom close-up\"]\n"
-    "}\n"
+    "{\"state_updates\": {"
+    "\"move_to\": \"Dark Chamber\", "
+    "\"connect\": [[\"Entrance Hall\", \"Dark Chamber\"]], "
+    "\"place_items\": [\"Old Torch\"], "
+    "\"set_context\": \"Player entered dark room. Old torch on ground. Needs light to explore.\"}, "
+    "\"images\": [\"pitch-black cavern chamber, faint water dripping, barely visible shadows\"]}\n"
     "```\n\n"
-    "CRITICAL ITEM RULES:\n"
-    "- ANY item you mention MUST be in place_items (unless already in room)\n"
-    "- To pick up items: use room_take (moves from room to inventory)\n"
-    "- NEVER mention items that aren't actually there\n"
-    "- If the player tries to take X, include room_take for X only if X is in the current room; otherwise, say where it is and how to reach it.\n"
-    "- When you place an item, remember where you put it. Use set_context to track item locations if needed.\n"
-    "- When inventing new mechanics, items, or behaviors, record them in set_flag (for data) and set_context (for narrative memory) so future turns can reference them.\n"
-    "- For simple cause-effect rules (e.g., 'stone blocks door'), use mechanics: {\"action\": \"what player did\", \"effect\": \"what happens\"}.\n"
-    "- New mechanics should: enhance gameplay, align with objectives, be consistent with the world's logic, and create meaningful choices (not arbitrary obstacles).\n\n"
-    "IMAGE RULES:\n"
-    "- Check rooms_with_images and items_with_images in context\n"
-    "- If player asks to see/examine an item: include its name in images array (e.g., 'Ancient Map')\n"
-    "- If item already has an image, just use the item name - system will reuse cached image\n"
-    "- Only include a ROOM image if a move_to actually happens this turn (or it's a brand new room without an image)\n"
-    "- Do NOT include images for rooms that were only discussed but not moved to\n"
-    "- The LAST image in array is what displays to player\n"
-    "- When requesting new room images: describe what makes it unique (e.g., 'dark cave with glowing crystals and underground stream')\n"
-    "- Keep prompts atmospheric and relevant to the narrative\n"
-    "- For images: use exact room/item names with spaces (e.g., 'Echo Chamber overview' not 'Echo_Chamber_overview').\n\n"
-    "JSON PLACEMENT: Always append JSON AFTER narration, never inside it."
+
+    "EXAMPLE 2 - Player uses an item:\n"
+    "You insert the rusty key into the lock. It turns with a satisfying click and the ancient door swings open, revealing a golden glow beyond.\n\n"
+    "```json\n"
+    "{\"state_updates\": {"
+    "\"remove_items\": [\"Rusty Key\"], "
+    "\"set_flag\": {\"name\": \"treasury_unlocked\", \"value\": true}, "
+    "\"move_to\": \"Treasury\", "
+    "\"connect\": [[\"Locked Corridor\", \"Treasury\"]], "
+    "\"set_context\": \"Used key to unlock treasury. Key consumed. Treasury now accessible.\"}, "
+    "\"images\": [\"ancient treasury door swinging open, golden light spilling through\"]}\n"
+    "```\n\n"
+
+    "RULES:\n"
+    "1. ALWAYS check inventory before letting player use items\n"
+    "2. ALWAYS check current_room_items before room_take\n"
+    "3. ALWAYS use connect when the player moves to a new room\n"
+    "4. ALWAYS update set_context with a summary of what happened this turn\n"
+    "5. ALWAYS include at least one image prompt in the images array\n"
+    "6. JSON goes AFTER narration text, inside ```json``` fences\n"
+    "7. Describe what the player SEES - the environment, objects, atmosphere\n"
 )
 
 
-def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["ImageGenerator"], theme: Optional[str] = None) -> Tuple[str, List[str]]:
+def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["MfluxImageGenerator"], theme: Optional[str] = None) -> Tuple[str, List[str]]:
     """Ask the LLM to produce an opening scene and seed initial state via JSON.
 
     Returns: (opening_narration, generated_image_paths)
@@ -1774,9 +2043,12 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
     except Exception:
         chosen_theme = theme or "An atmospheric fantasy in caverns and ruins beneath an ancient forest."
     kickoff = (
-        "Start a new adventure. Provide an opening scene (2-5 sentences). "
-        "Set an initial location and minimal map with sensible exits. If helpful, place a useful starting item "
-        "(e.g., Lantern, Rope, Map). If the scene mentions a notable room or object, request 1 short image prompt.\n\n"
+        "Start a new adventure. The player has just arrived.\n"
+        "DESCRIBE WHAT THE PLAYER SEES when they look around: the room, the atmosphere, "
+        "notable objects, exits, and any characters present. Write 3-5 vivid sentences.\n"
+        "Set an initial location with at least 2 exits. Place a useful starting item "
+        "(e.g., Lantern, Rope, Map) in the room.\n"
+        "IMPORTANT: You MUST include an image prompt in your JSON to illustrate this opening scene.\n\n"
         f"Theme: {chosen_theme}"
     )
     # If a world bible exists, pass key context to guide the LLM
@@ -1808,13 +2080,28 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
             elif state_mgr.state.health < 100:
                 hints.append(f"player health: {state_mgr.state.health}/100")
             
+            # Locations and their descriptions (CRITICAL for consistency)
+            if locations := WORLD_BIBLE.get("locations", []):
+                # Include all location descriptions to guide narrative
+                loc_descriptions = []
+                for loc in locations:
+                    if isinstance(loc, dict):
+                        name = loc.get("name")
+                        desc = loc.get("description")
+                        if name and desc:
+                            loc_descriptions.append(f"{name}: {desc}")
+                    elif isinstance(loc, str):
+                        loc_descriptions.append(loc)
+                if loc_descriptions:
+                    hints.append(f"Locations: {'; '.join(loc_descriptions[:3])}")  # Limit to first 3 to avoid token bloat
+
             # SIMPLE IMAGE TRACKING (belongs in game state context)
             # Direct connection to existing map/item structures
             if state_mgr.state.rooms_with_images:
                 hints.append(f"Rooms with images: {', '.join(state_mgr.state.rooms_with_images[:5])}")
             if state_mgr.state.items_with_images:
                 hints.append(f"Items with images: {', '.join(state_mgr.state.items_with_images[:5])}")
-            
+
             if hints:
                 wb_hint = f"\n\nWorld context: {'; '.join(hints)}"
     except Exception:
@@ -1826,129 +2113,93 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
     if not state_mgr.state.location:
         state_mgr.move_to("Start")
     
-    # ENSURE opening room image: If no images were generated, inject a move_to to trigger auto-generation
+    # ENSURE opening room image: If no images were generated, generate one directly
+    # Pass narrative context so image matches what was described
     if not new_images and state_mgr.state.location and image_gen:
-        # Re-process with a synthetic move_to to trigger image generation for starting location
-        synthetic_json = {"state_updates": {"move_to": state_mgr.state.location}}
-        _, start_images, _, _ = apply_llm_directives(state_mgr, f"{final_text}\n```json\n{json.dumps(synthetic_json)}\n```", image_gen)
-        new_images.extend(start_images)
+        # Generate image directly for starting room using the narrative for context
+        start_image = generate_room_image_if_needed(
+            state_mgr, image_gen, state_mgr.state.location,
+            narrative_context=final_text
+        )
+        if start_image:
+            new_images.append(start_image)
     
     return final_text or "Your journey begins...", new_images
 
 
-def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional[ImageGenerator]) -> Tuple[str, List[str], List[Dict[str, Any]], List[str]]:
+def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional[MfluxImageGenerator]) -> Tuple[str, List[str], List[Dict[str, Any]], List[str]]:
     image_paths: List[str] = []
     cleaned_text = text
     debug_lines: List[str] = []
     json_payloads: List[Dict[str, Any]] = []
 
-    # AGGRESSIVE JSON REMOVAL STRATEGY
-    # We'll find ANY text that looks like JSON and remove it
-    
+    # ENHANCED JSON EXTRACTION STRATEGY
+    # Use improved extraction that handles partial and malformed JSON
+
     # 1) Extract fenced code blocks first
     fenced_pat = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
     fenced_blocks = []
     for m in fenced_pat.finditer(text):
         fenced_blocks.append((m.start(), m.end()))
         block = m.group(1).strip()
-        try:
-            directives = json.loads(block)
-            if isinstance(directives, dict):
-                json_payloads.append(directives)
-                debug_lines.append(f"Extracted JSON from fenced block")
-        except Exception as e:
-            debug_lines.append(f"Failed to parse fenced JSON: {str(e)[:50]}")
-    
+        parsed, error = parse_json_with_fallbacks(block)
+        if parsed:
+            json_payloads.append(parsed)
+            debug_lines.append(f"Extracted JSON from fenced block")
+        else:
+            debug_lines.append(f"Failed to parse fenced JSON: {error[:50]}")
+
     # Remove all fenced blocks
     if fenced_blocks:
         fenced_blocks.sort(reverse=True)  # Remove from end to start
         for start, end in fenced_blocks:
             text = text[:start] + text[end:]
-    
-    # 2) Find ALL JSON-like structures (anything starting with { and containing our keys)
-    # This includes complete, incomplete, and malformed JSON
+
+    # 2) Extract JSON objects from remaining text using enhanced extraction
+    extracted_jsons = extract_json_from_text(text)
+    for parsed_json in extracted_jsons:
+        json_payloads.append(parsed_json)
+        debug_lines.append(f"Extracted JSON object with keys: {list(parsed_json.keys())}")
+
+    # 3) Remove all successfully extracted JSON from text
+    # This is more aggressive and comprehensive than before
     recognized_keys = ["state_updates", "images"]
-    
-    # Pattern to find any { that might start JSON with our keys
-    # This will match from { to end of text/line if JSON is incomplete
-    json_like_pattern = re.compile(
-        r'\{[^}]*?"(?:' + '|'.join(recognized_keys) + r')"[^}]*(?:\}[\s\S]*?\}|\}|[\s\S]*?$)',
-        re.MULTILINE | re.DOTALL
-    )
-    
-    json_spans = []
-    for match in json_like_pattern.finditer(text):
-        json_spans.append((match.start(), match.end()))
-        json_text = match.group(0)
-        
-        # Try to extract valid JSON by finding balanced braces
-        brace_count = 0
-        in_string = False
-        escape_next = False
-        valid_end = -1
-        
-        for i, char in enumerate(json_text):
-            if escape_next:
-                escape_next = False
-                continue
-            if char == '\\':
-                escape_next = True
-                continue
-            if char == '"' and not escape_next:
-                in_string = not in_string
-                continue
-            
-            if not in_string:
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        valid_end = i + 1
-                        break
-        
-        # If we found valid JSON, try to parse it
-        if valid_end > 0:
-            try:
-                directives = json.loads(json_text[:valid_end])
-                if isinstance(directives, dict):
-                    json_payloads.append(directives)
-                    debug_lines.append(f"Extracted valid JSON object")
-            except:
-                debug_lines.append(f"Found JSON-like structure but couldn't parse")
-        else:
-            debug_lines.append(f"Found incomplete JSON fragment")
-    
-    # Remove all JSON-like structures
-    if json_spans:
-        json_spans.sort(reverse=True)  # Remove from end to start
-        for start, end in json_spans:
-            text = text[:start] + text[end:]
-    
-    # 3) Final cleanup: Remove any remaining fragments that look like JSON
-    # This catches any { ... that wasn't caught above
+
+    # Remove complete JSON objects (balanced braces)
+    json_object_pattern = re.compile(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', re.DOTALL)
+    text = json_object_pattern.sub('', text)
+
+    # Remove JSON-like fragments containing our keys
+    for key in recognized_keys:
+        # Remove lines starting with our keys in JSON context
+        text = re.sub(rf'\n\s*"{key}"?\s*:.*?(?=\n|$)', '', text, flags=re.MULTILINE | re.DOTALL)
+        text = re.sub(rf'\n\s*{key}\s*:.*?(?=\n|$)', '', text, flags=re.MULTILINE | re.DOTALL)
+
+    # Clean up remaining JSON fragments and artifacts
     text = re.sub(r'\{\s*"(?:state_updates|images)"[^}]*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n\s*\{\s*"(?:state_updates|images)"[^\n]*', '', text)
-    
-    # Remove incomplete JSON arrays and values
     text = re.sub(r',\s*"images":\s*\[\s*"[^"]*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'"images":\s*\[\s*"[^"]*$', '', text, flags=re.MULTILINE)
-    
-    # Remove trailing commas and incomplete JSON structures
     text = re.sub(r',\s*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*,\s*"images":\s*$', '', text, flags=re.MULTILINE)
-    
-    # Also remove any standalone braces or JSON punctuation at line ends
     text = re.sub(r'\s*\{\s*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*\[\s*"[^"]*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*\]\s*,?\s*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*\}\s*,?\s*$', '', text, flags=re.MULTILINE)
-    
+
     # Clean up extra whitespace
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
-    
+
     cleaned_text = text
+
+    # FLEXIBLE DIRECTIVE FALLBACK SYSTEM
+    # If no JSON was found but text contains directive-like patterns, try to extract them
+    if not json_payloads:
+        fallback_directives = extract_fallback_directives(cleaned_text)
+        if fallback_directives:
+            json_payloads.append(fallback_directives)
+            debug_lines.append(f"Extracted fallback directives: {list(fallback_directives.keys())}")
 
     # 3) Apply directives
     last_room_moved_to = None  # Track room moves for image display
@@ -1956,28 +2207,30 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
     
     for directives in json_payloads:
         try:
+            # Validate and fix directive schema
+            fixed_directives, schema_warnings = validate_and_fix_directives(directives)
+            for warning in schema_warnings:
+                debug_lines.append(f"[schema] {warning}")
+
+            directives = fixed_directives  # Use the fixed version
             updates = directives.get("state_updates", {}) if isinstance(directives, dict) else {}
-            # Map updates
-            if isinstance(updates.get("move_to"), str):
-                state_mgr.move_to(updates["move_to"]) 
-                debug_lines.append(f"tool.move_to: {updates['move_to']}")
-                last_room_moved_to = updates["move_to"]  # Track the move
+            
+            # IMPORTANT: Process room item actions BEFORE move_to
+            # This ensures items can be placed/taken in the current room before moving
+            
+            # Room connections (can happen anytime)
             if isinstance(updates.get("connect"), list):
                 for pair in updates["connect"]:
                     if isinstance(pair, (list, tuple)) and len(pair) == 2:
                         state_mgr.connect_rooms(str(pair[0]), str(pair[1]))
                         debug_lines.append(f"tool.connect_rooms: {pair[0]} <-> {pair[1]}")
-            # Inventory updates
-            for item in updates.get("add_items", []) or []:
-                state_mgr.add_item(str(item))
-                debug_lines.append(f"tool.add_item: {item}")
-            for item in updates.get("remove_items", []) or []:
-                state_mgr.remove_item(str(item))
-                debug_lines.append(f"tool.remove_item: {item}")
-            # Room item placement/take
+            
+            # Room item placement (before take, before move)
             for item in updates.get("place_items", []) or []:
                 state_mgr.place_item_in_room(str(item))
                 debug_lines.append(f"tool.place_item_in_room: {item} @ {state_mgr.state.location}")
+            
+            # Room take (after place, before move) - so items can be placed and taken in same turn
             for item in updates.get("room_take", []) or []:
                 taken = state_mgr.remove_item_from_room(str(item))
                 if taken:
@@ -1986,6 +2239,20 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                 else:
                     debug_lines.append(f"tool.room_take: {item} (FAILED - item not in room)")
                     # Don't auto-correct - let LLM learn from its mistakes
+            
+            # Now move the player (after all room actions are complete)
+            if isinstance(updates.get("move_to"), str):
+                state_mgr.move_to(updates["move_to"]) 
+                debug_lines.append(f"tool.move_to: {updates['move_to']}")
+                last_room_moved_to = updates["move_to"]  # Track the move
+            
+            # Inventory updates (can happen anytime)
+            for item in updates.get("add_items", []) or []:
+                state_mgr.add_item(str(item))
+                debug_lines.append(f"tool.add_item: {item}")
+            for item in updates.get("remove_items", []) or []:
+                state_mgr.remove_item(str(item))
+                debug_lines.append(f"tool.remove_item: {item}")
             # Health and notes
             if updates.get("change_health") is not None:
                 try:
@@ -2012,7 +2279,7 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                     state_mgr.state.game_flags[flag_name] = flag_value
                     debug_lines.append(f"tool.set_flag: {flag_name} = {flag_value}")
             
-            # CHANGE (TRIVIAL): Game mechanics - simpler way for weak LLMs to record cause-effect rules
+            # Store game mechanics as persistent flags
             if isinstance(updates.get("mechanics"), dict):
                 mech = updates["mechanics"]
                 # Store as a flag with structured data
@@ -2027,9 +2294,77 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                         state_mgr.state.story_context = context_update
                     debug_lines.append(f"tool.mechanics: {mech['action']} -> {mech['effect']}")
 
+            # Advanced game mechanics - conditional actions, timers, chain reactions
+            if isinstance(updates.get("conditional_action"), dict):
+                cond_action = updates["conditional_action"]
+                condition = cond_action.get("condition", "")
+                action = cond_action.get("action", "")
+                fallback = cond_action.get("fallback", "")
+
+                # Simple condition evaluation (can be extended)
+                condition_met = False
+                if condition.startswith("has_"):
+                    item = condition[4:]  # Remove "has_" prefix
+                    condition_met = item in state_mgr.state.inventory
+                elif condition.startswith("at_"):
+                    room = condition[3:]  # Remove "at_" prefix
+                    condition_met = state_mgr.state.location == room
+                elif condition in state_mgr.state.game_flags:
+                    condition_met = bool(state_mgr.state.game_flags[condition])
+
+                if condition_met and action:
+                    # Execute the conditional action (simple mapping for now)
+                    if action.startswith("unlock_"):
+                        target = action[7:]
+                        debug_lines.append(f"tool.conditional_action: {condition} met -> {action}")
+                    elif action.startswith("reveal_"):
+                        target = action[7:]
+                        debug_lines.append(f"tool.conditional_action: {condition} met -> {action}")
+                    else:
+                        debug_lines.append(f"tool.conditional_action: {condition} met -> {action} (custom)")
+                elif fallback:
+                    debug_lines.append(f"tool.conditional_action: {condition} not met -> {fallback}")
+
+            # Timer events for delayed effects
+            if isinstance(updates.get("timer_event"), dict):
+                timer = updates["timer_event"]
+                timer_name = timer.get("name", f"timer_{len(state_mgr.state.game_flags)}")
+                duration = timer.get("duration", 1)
+                action = timer.get("action", "")
+                value = timer.get("value")
+
+                # Store timer as a flag with turn counter
+                timer_data = {
+                    "type": "timer",
+                    "duration": duration,
+                    "remaining": duration,
+                    "action": action,
+                    "value": value,
+                    "created_turn": len(state_mgr.state.recent_history)
+                }
+                state_mgr.state.game_flags[timer_name] = timer_data
+                debug_lines.append(f"tool.timer_event: {timer_name} set for {duration} turns -> {action}")
+
+            # Chain reactions for complex multi-step effects
+            if isinstance(updates.get("chain_reaction"), dict):
+                chain = updates["chain_reaction"]
+                trigger = chain.get("trigger", "")
+                effects = chain.get("effects", [])
+
+                # Store as a persistent mechanic that can be triggered later
+                chain_id = f"chain_{len(state_mgr.state.game_flags)}"
+                chain_data = {
+                    "type": "chain_reaction",
+                    "trigger": trigger,
+                    "effects": effects,
+                    "active": True
+                }
+                state_mgr.state.game_flags[chain_id] = chain_data
+                debug_lines.append(f"tool.chain_reaction: {trigger} -> {len(effects)} effects stored")
+
             # Images - both LLM-requested and auto-generated for new rooms and items
             img_prompts = directives.get("images", []) if isinstance(directives, dict) else []
-            # CHANGE: Track what we've already added to avoid duplicates
+            # Track processed prompts to avoid duplicates
             img_prompts_lower = [p.lower() for p in img_prompts if isinstance(p, str)]
             
             # AUTO-GENERATE IMAGE FOR NEW ROOMS (Critical Reuse Point #1)
@@ -2045,7 +2380,7 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                 if not state_mgr.state.has_room_image(new_room):
                     # Generate an atmospheric overview for this room
                     auto_prompt = f"atmospheric fantasy {new_room.lower()}, detailed environment, adventure game location"
-                    # CHANGE: Only add if LLM hasn't already requested something similar
+                    # Skip if LLM already requested this type of image
                     if not any(new_room.lower() in p for p in img_prompts_lower):
                         img_prompts = list(img_prompts) + [auto_prompt]
                         debug_lines.append(f"Auto-generating image for room: {new_room}")
@@ -2073,7 +2408,7 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                     for img in state_mgr.state.last_images
                 )
                 if not item_already_imaged and image_gen:
-                    # CHANGE: Only auto-gen if LLM hasn't already requested it
+                    # Skip if LLM already requested this image
                     if not any(item_str.lower() in p for p in img_prompts_lower):
                         items_to_image.append(item_str)
                         debug_lines.append(f"Auto-generating image for new item: {item_str}")
@@ -2089,7 +2424,7 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                     for img in state_mgr.state.last_images
                 )
                 if not item_already_imaged and image_gen:
-                    # CHANGE: Only auto-gen if LLM hasn't already requested it
+                    # Skip if LLM already requested this image
                     if not any(item_str.lower() in p for p in img_prompts_lower):
                         items_to_image.append(item_str)
                         debug_lines.append(f"Auto-generating image for picked up item: {item_str}")
@@ -2217,11 +2552,9 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                     )
                 except Exception:
                     pass
-                # CHANGE: diffuser summary (once per batch)
+                # MFLUX model summary (once per batch)
                 try:
-                    ptype = type(getattr(image_gen, "_pipeline", None)).__name__ if getattr(image_gen, "_pipeline", None) is not None else "(lazy)"
-                    est_steps = 4 if ptype == "FluxPipeline" else 10
-                    debug_lines.append(f"Diffuser: model={image_gen.model_id or '(none)'}, device={image_gen.device}, pipeline={ptype}, steps≈{est_steps}")
+                    debug_lines.append(f"MFLUX: model={image_gen.model_id or '(none)'}")
                 except Exception:
                     pass
                 # TRIVIAL FIX: prevent duplicate room images in the same turn
@@ -2274,7 +2607,7 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                                     pass
                         except Exception:
                             pass
-                        # Identify target room before spending diffuser time; skip if already done this turn
+                        # Identify target room before spending image gen time; skip if already done this turn
                         try:
                             original_prompt_lower = p.strip().lower()
                             target_room_for_prompt: Optional[str] = None
@@ -2287,7 +2620,7 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                                 continue
                         except Exception:
                             pass
-                        # Identify target item before spending diffuser time
+                        # Identify target item before spending image gen time
                         try:
                             original_prompt_lower = p.strip().lower()
                             target_item_for_prompt: Optional[str] = None
@@ -2420,108 +2753,76 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
     return cleaned_text, image_paths, json_payloads, debug_lines
 
 
-def check_ollama_running() -> bool:
-    try:
-        _ = ollama.list()
-        return True
-    except Exception as e:
-        print(f"Error: Ollama is not running or not accessible: {e}")
-        print("Please start Ollama with 'ollama serve' in a terminal")
+def check_mlx_available() -> bool:
+    if platform.system() != "Darwin":
+        print("MLX requires macOS with Apple Silicon.")
         return False
+    if not os.path.isdir(MLX_MODELS_DIR):
+        print(f"MLX models directory not found: {MLX_MODELS_DIR}")
+        return False
+    return True
 
 
-def list_ollama_models() -> List[str]:
-    try:
-        response = ollama.list()
-        models = response.get("models", []) if isinstance(response, dict) else getattr(response, "models", [])
-        names: List[str] = []
-        for m in models:
-            name = m.get("model") or m.get("name") or ""
-            if name:
-                names.append(name)
-        return names
-    except Exception as e:
-        print(f"Error getting Ollama models: {e}")
+def list_mlx_models() -> List[str]:
+    if not os.path.isdir(MLX_MODELS_DIR):
+        print(f"MLX models directory not found: {MLX_MODELS_DIR}")
         return []
+    names: List[str] = []
+    for entry in sorted(os.listdir(MLX_MODELS_DIR)):
+        full = os.path.join(MLX_MODELS_DIR, entry)
+        if os.path.isdir(full) and os.path.isfile(os.path.join(full, "config.json")):
+            names.append(entry)
+    return names
 
 
 def diffusion_models_root() -> str:
     env_root = os.environ.get("DIFFUSION_MODELS_DIR")
     if env_root and os.path.isdir(env_root):
         return env_root
+
+    # Check common locations
+    candidates = [
+        "/Users/jonathanrothberg/Diffusion_Models",  # macOS
+        "/home/jonathan/Models_Diffusers",          # Linux
+        "/data/Diffusion_Models",                   # Alternative Linux
+        "./Diffusion_Models",                       # Relative path
+    ]
+
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+
+    # Fallback
     default_model_root = "/Users/jonathanrothberg" if sys.platform == "darwin" else "/data"
     return os.path.join(default_model_root, "Diffusion_Models")
 
 
 def list_local_diffusers() -> List[str]:
+    """List FLUX models available locally for MFLUX."""
     root = diffusion_models_root()
     if not os.path.isdir(root):
         return []
     try:
-        names = [n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n)) and not n.startswith('.')]
+        names = [n for n in os.listdir(root)
+                 if os.path.isdir(os.path.join(root, n)) and n.startswith("FLUX")]
         return sorted(names)
     except Exception:
         return []
 
 
-def curated_hf_diffusers() -> List[str]:
-    # Short curated list; selectable alongside locals. Downloads happen only if ALLOW_HF_DOWNLOAD=1.
-    return [
-        "black-forest-labs/FLUX.1-schnell",
-        "stabilityai/sdxl-turbo",
-    ]
-
-
-def saved_diffusers() -> List[str]:
-    # Merge local folders with curated HF IDs, deduplicated while preserving order
-    local_models = list_local_diffusers()
-    hf_models = curated_hf_diffusers()
-
-    # Optional device/memory note (mirrors original intent)
-    if torch.cuda.is_available():
-        try:
-            total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        except Exception:
-            total_memory = 8
-        if total_memory >= 26:
-            print("Added FLUX models for high-memory CUDA")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        print("Added FLUX models optimized for Mac MPS")
-
-    combined: List[str] = []
-    seen = set()
-    for name in (local_models + hf_models):
-        if name not in seen:
-            seen.add(name)
-            combined.append(name)
-    return combined if combined else ["No diffusion models found"]
-
-
 def combined_diffuser_choices(include_skip: bool = True) -> List[str]:
-    combined: List[str] = saved_diffusers()
-    # Don't add any blank or "(none)" option - just show available models
-    return combined
+    local = list_local_diffusers()
+    return local if local else ["FLUX2-klein-9B-mlx-8bit"]
 
 
 def select_llm_interactively() -> str:
-    if not check_ollama_running():
+    if not check_mlx_available():
         raise SystemExit(1)
-    models = list_ollama_models()
+    models = list_mlx_models()
     if not models:
-        print("No Ollama models found. Install one with: ollama pull llama3.1:8b or similar")
+        print(f"No MLX models found in {MLX_MODELS_DIR}. Add model directories containing config.json.")
         raise SystemExit(1)
-    print("Select an Ollama model (same list as GUI):")
-    # Sort like Colossal Cave: common first, then rest
-    common = ['llama3.1', 'llama3', 'llama2', 'mistral', 'phi4', 'phi3', 'gemma3', 'gemma2', 'qwen3', 'qwen2.5']
-    ordered: List[str] = []
-    for c in common:
-        for m in models:
-            if m.startswith(c) and m not in ordered:
-                ordered.append(m)
-    for m in models:
-        if m not in ordered:
-            ordered.append(m)
-    models = ordered
+    print("Select an MLX model (same list as GUI):")
     for idx, name in enumerate(models, 1):
         print(f"  {idx}. {name}")
     choice = input("Enter a number (default 1): ").strip() or "1"
@@ -2533,7 +2834,7 @@ def select_llm_interactively() -> str:
 
 
 def maybe_select_diffuser_interactively() -> Optional[str]:
-    print("Image generation is optional. Select a diffuser model or press Enter to skip:")
+    print("Image generation is optional. Select an MFLUX model or press Enter to skip:")
     candidates = combined_diffuser_choices(include_skip=True)
     for i, mid in enumerate(candidates, 1):
         label = mid or "(Skip images)"
@@ -2554,38 +2855,43 @@ def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
     current_items = state.room_items.get(state.location, [])
     current_exits = state.known_map.get(state.location, {}).get("exits", [])
     visited_rooms = list(state.known_map.keys())
-    # OPTIMIZATION: Don't include full image prompts - just counts for efficiency
     
+    # Enhanced context with better structure and prioritization
     context = {
-        "player_name": state.player_name,
+        # CORE GAME STATE (always include)
         "location": state.location,
         "health": state.health,
         "inventory": state.inventory,
-        "known_map": state.known_map,
-        "notes": state.notes,
-        # Recent conversation history for NPC continuity (all stored turns)
-        "recent_conversation": state.recent_history,
-        # Story context - LLM's narrative memory
-        "story_context": state.story_context,
-        # Game flags - LLM-defined states
-        "game_flags": state.game_flags,
-        # Added LLM aids (read-only)
-        "current_room_items": current_items,
+
+        # NAVIGATION & EXPLORATION (high priority)
         "current_exits": current_exits,
+        "current_room_items": current_items,
+        "known_map": state.known_map,
         "visited_rooms": visited_rooms,
-        # CHANGE (TRIVIAL): Include game theme every turn for consistent narration & image prompts
+
+        # NARRATIVE & MEMORY (medium priority)
+        "story_context": state.story_context,
+        "recent_conversation": state.recent_history[-3:] if len(state.recent_history) > 3 else state.recent_history,  # Limit for token efficiency
+        "notes": state.notes[-5:] if len(state.notes) > 5 else state.notes,  # Most recent notes
+
+        # ADVANCED GAME STATE (contextual)
+        "game_flags": state.game_flags,
+        "player_name": state.player_name,
+
+        # WORLD BUILDING (when available)
         "world_theme": get_theme_suffix(),
-        # CHANGE (TRIVIAL): Include overall win condition each turn to keep decisions aligned
         "win_condition": (WORLD_BIBLE.get("win_condition") if 'WORLD_BIBLE' in globals() and WORLD_BIBLE else None),
-        # IMAGE REUSE INFO - simple lists for fast LLM processing
+
+        # CREATIVE AIDS (for image generation)
         "rooms_with_images": state.rooms_with_images,
         "items_with_images": state.items_with_images,
-        # DEBUG: Detailed image mapping for debugging
-        "image_debug": {
-            "room_images": {img["subject"]: os.path.basename(img["path"]) for img in state.last_images if img.get("type") == "room"},
-            "item_images": {img["subject"]: os.path.basename(img["path"]) for img in state.last_images if img.get("type") == "item"},
+
+        # DEBUG INFO (only when needed)
+        "debug_info": {
             "total_images": len(state.last_images),
-            "images_reused": state.images_reused
+            "images_reused": state.images_reused,
+            "active_timers": [k for k, v in state.game_flags.items() if isinstance(v, dict) and v.get("type") == "timer"],
+            "active_chains": [k for k, v in state.game_flags.items() if isinstance(v, dict) and v.get("type") == "chain_reaction"]
         }
     }
     # Include world bible context to guide gameplay
@@ -2596,16 +2902,18 @@ def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
             # We DO NOT send the entire world bible each turn. Instead, we derive
             # short, situational cues that are directly relevant to the current
             # location and gameplay. This keeps the prompt small while preserving
-            # design intent. As LLMs improve, these cues naturally become more useful.
-            #
-            # Cue sources:
-            # - NPCs: only those in the current room, with personality and what they provide
-            # - Monsters: only those in the current room, with difficulty and known weakness
-            # - Riddles: only those in the current room, with hint and reward
-            # - Item availability: match item_locations entries mentioning current room
-            # - Current objective: chosen from objectives based on simple inventory progress
+            # design intent.
             cues = []
-            
+
+            # Include location description if available (for narrative consistency)
+            if locations := WORLD_BIBLE.get("locations", []):
+                for loc in locations:
+                    if isinstance(loc, dict) and loc.get("name", "").lower() == state.location.lower():
+                        desc = loc.get("description")
+                        if desc:
+                            cues.append(f"Location description: {desc}")
+                            break  # Only include the current location's description
+
             # Check for NPCs in current location
             if npcs := WORLD_BIBLE.get("npcs", WORLD_BIBLE.get("key_characters", [])):
                 for npc in npcs:
@@ -2680,7 +2988,7 @@ def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
     return header + f"Player says: {player_input}"
 
 
-def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optional[ImageGenerator]) -> None:
+def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optional[MfluxImageGenerator]) -> None:
     # Opening scene
     opening_text, opening_images = start_story(state_mgr, llm, image_gen)
     print(opening_text)
@@ -2744,15 +3052,15 @@ def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     print("[debug:tool] " + line)
 
 
-def do_generate_world_bible(wb_model: str) -> str:
+def do_generate_world_bible(wb_model: str, theme: Optional[str] = None, max_tokens: int = 4000) -> str:
     """Standalone world bible generation for command line usage."""
-    success, message, _ = execute_world_bible_generation(StateManager(), wb_model)
+    success, message, _ = execute_world_bible_generation(StateManager(), wb_model, theme, max_tokens)
     if success:
         print(message)
     return message
 
 
-def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optional[ImageGenerator]) -> None:
+def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optional[MfluxImageGenerator]) -> None:
     """Simple Gradio UI that shows images, inventory, health, map, and a debug console."""
 
     # Simple closure-based UI state (avoid Gradio State issues)
@@ -2796,12 +3104,12 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
     # Generate opening scene only if an LLM is selected; otherwise show instructions
     if getattr(llm, "model_id", "").strip():
         opening_text, opening_images = start_story(state_mgr, llm, image_gen)
-        ui_data["narration"] = (opening_text + "\n\nType an action and press Send. Use the controls below to reload the LLM or diffuser.\n")
+        ui_data["narration"] = (opening_text + "\n\nType an action and press Send. Use the controls below to reload the LLM or MFLUX model.\n")
         ui_data["images"].extend(opening_images)
     else:
         ui_data["narration"] = (
-            "Welcome! Select an Ollama model in the dropdown and click 'Load/Reload LLM' to begin.\n"
-            "You can also load a diffuser for images (optional)."
+            "Welcome! Select an MLX model in the dropdown and click 'Load/Reload LLM' to begin.\n"
+            "You can also load an MFLUX model for images (optional)."
         )
 
     def do_send(user_text: str):
@@ -2809,7 +3117,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             return (
                 ui_data["narration"],  # Return plain text narration
                 ui_data["images"],
-                get_debug_view(),  # CHANGE: return structured JSON for gr.JSON
+                get_debug_view(),  # Return debug data for UI
                 str(state_mgr.state.health),
                 ", ".join(state_mgr.state.inventory) or "(empty)",
                 state_mgr.describe_map(),
@@ -2825,7 +3133,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             return (
                 ui_data["narration"] + "\nPlease load an LLM first (use the dropdown and Load/Reload LLM).",
                 ui_data["images"],
-                get_debug_view(),  # CHANGE: return structured JSON for gr.JSON
+                get_debug_view(),  # Return debug data for UI
                 str(state_mgr.state.health),
                 ", ".join(state_mgr.state.inventory) or "(empty)",
                 state_mgr.describe_map(),
@@ -2833,6 +3141,14 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 get_llm_context_view(),
                 state_mgr.state.location,
             )
+        # Process any active timers and chain reactions before LLM turn
+        timer_events = state_mgr.process_timers_and_chains()
+        if timer_events:
+            # Add timer events to narration for continuity
+            timer_narration = " ".join(timer_events)
+            ui_data["narration"] += f"\n\n{timer_narration}"
+            ui_data["debug"].extend([f"[timer] {event}" for event in timer_events])
+
         system_prompt = SYSTEM_INSTRUCTIONS
         user_prompt = build_user_prompt(state_mgr, user_text)
         llm_text = llm.generate(system_prompt, user_prompt)
@@ -2845,8 +3161,22 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
 
         final_text, new_images, payloads, tool_logs = apply_llm_directives(state_mgr, llm_text, image_gen)
         
+        # BACKUP: If no images were generated and current room has no image, generate one
+        # This ensures new games/rooms always get an image even if LLM doesn't request one
+        # Uses the narrative context so the image matches what was just described
+        if not new_images and state_mgr.state.location and image_gen:
+            if not state_mgr.state.has_room_image(state_mgr.state.location):
+                # Pass the narrative text so the image matches the description
+                backup_image = generate_room_image_if_needed(
+                    state_mgr, image_gen, state_mgr.state.location,
+                    narrative_context=final_text
+                )
+                if backup_image:
+                    new_images.append(backup_image)
+                    ui_data["debug"].append(f"[backup] Generated missing room image for: {state_mgr.state.location}")
+        
         # Save conversation history (keep last 5 turns for context)
-        # CHANGE: Include tool execution feedback so LLM knows what worked/failed
+        # Include tool results in conversation history
         tool_feedback = []
         if tool_logs:
             # Extract key feedback for LLM awareness
@@ -2863,7 +3193,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         })
         if len(state_mgr.state.recent_history) > 5:
             state_mgr.state.recent_history.pop(0)  # Remove oldest
-        # CHANGE (TRIVIAL): Log memory window status for LLM-first debugging (no logic change)
+        # Log conversation memory status
         try:
             ui_data["debug"].append(
                 f"[memory] recent={len(state_mgr.state.recent_history)} story_context={'yes' if (state_mgr.state.story_context or '').strip() else 'no'}"
@@ -2872,7 +3202,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             pass
         
         # Add JSON and tool logs to debug console only
-        # CHANGE: Don't duplicate - payloads is already the parsed JSON
+        # Payloads already contain parsed JSON
         if payloads:
             # Just log that we have JSON, not the full content (it's in tool logs)
             ui_data["debug"].append(f"[json] processed {len(payloads)} directive(s)")
@@ -2883,7 +3213,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             for line in tool_logs:
                 ui_data["debug"].append(f"[tool] {line}")
         if new_images:
-            # CHANGE (DEBUG ONLY): list basenames for consistency with gallery filename
+            # Show image filenames for gallery
             try:
                 _names = [os.path.basename(p) for p in new_images if isinstance(p, str)]
             except Exception:
@@ -3007,63 +3337,90 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             state_mgr.state.location,
         )
 
-    def do_reload_llm(ollama_model: str):
+    def do_reload_llm(model_name: str, max_tokens: int):
         # Reload just the LLM
         nonlocal llm
         # CHANGE: skip reload if model unchanged to avoid no-op reinitialization
-        if ollama_model and getattr(llm, "model_id", None) == ollama_model:
+        if model_name and getattr(llm, "model_id", None) == model_name and getattr(llm, "max_new_tokens", None) == max_tokens:
             _append_debug("[reload] LLM unchanged; skipping")
-            return f"✅ LLM unchanged: {ollama_model}"
-        if ollama_model:
-            # Clean up old LLM if needed (Ollama manages its own memory)
-            # CHANGE (TRIVIAL): allow a bit longer replies to reduce rare truncated JSON
-            llm = LLMEngine(model_id=ollama_model, max_new_tokens=2500, temperature=0.8)
-            _append_debug(f"[reload] LLM -> {ollama_model}")
-            return f"✅ LLM loaded: {ollama_model}"
+            return f"✅ LLM unchanged: {model_name}"
+        if model_name:
+            # Unload previous model to free memory
+            if llm and llm.model is not None:
+                llm._unload()
+            model_path = os.path.join(MLX_MODELS_DIR, model_name)
+            llm = LLMEngine(model_path=model_path, max_new_tokens=max_tokens, temperature=0.8)
+            _append_debug(f"[reload] LLM -> {model_name} ({max_tokens} tokens)")
+            return f"✅ LLM loaded: {model_name} ({max_tokens} tokens)"
         return "❌ No LLM model selected"
-    
+
     def do_reload_diffuser(diffuser_id: str):
-        # Reload just the diffuser with proper cleanup
+        # Reload just the MFLUX image generator with proper cleanup
         nonlocal image_gen
-        
+
         # TRIVIAL GUARD: skip reload if model unchanged to avoid unnecessary pipeline reinit
         if diffuser_id and image_gen and getattr(image_gen, "model_id", None) == diffuser_id:
-            _append_debug("[reload] Diffuser unchanged; skipping")
-            return f"✅ Diffuser unchanged: {diffuser_id}"
-        
-        # Clean up the old diffuser first
+            _append_debug("[reload] MFLUX model unchanged; skipping")
+            return f"✅ MFLUX model unchanged: {diffuser_id}"
+
+        # Clean up the old model first
         if image_gen:
             image_gen.cleanup()
-            
+
         if diffuser_id:
-            # Let ImageGenerator auto-select best GPU for multi-GPU systems
-            image_gen = ImageGenerator(model_id=diffuser_id, device_preference=None, local_root=diffusion_models_root())
-            _append_debug(f"[reload] Diffuser -> {diffuser_id}")
-            return f"✅ Diffuser loaded: {diffuser_id}"
+            # Map directory name to MFLUX model name
+            # "FLUX.1-dev" -> "dev", "FLUX2-klein-9B-mlx-8bit" -> "flux2-klein-9b"
+            mflux_name = diffuser_id
+            if diffuser_id.startswith("FLUX.1-"):
+                mflux_name = diffuser_id.replace("FLUX.1-", "").lower()
+            elif "klein-9B" in diffuser_id or "klein-9b" in diffuser_id:
+                mflux_name = "flux2-klein-9b"
+            elif "klein-4B" in diffuser_id or "klein-4b" in diffuser_id:
+                mflux_name = "flux2-klein-4b"
+            local_path = os.path.join(diffusion_models_root(), diffuser_id)
+            if not os.path.isdir(local_path):
+                local_path = None
+            image_gen = MfluxImageGenerator(model_name=mflux_name, local_path=local_path)
+            _append_debug(f"[reload] MFLUX -> {diffuser_id}")
+            return f"✅ MFLUX model loaded: {diffuser_id}"
         else:
             image_gen = None
-            _append_debug("[reload] Diffuser -> disabled")
-            return "✅ Diffuser disabled"
-
-
-    def do_generate_world_bible(selected_model: str):
+            _append_debug("[reload] MFLUX -> disabled")
+            return "✅ Image generation disabled"
+    
+    def do_generate_world_bible(selected_model: str, current_theme: str = "", max_tokens: int = 4000):
         """Generate world bible using the model string passed from the dropdown."""
         model_used = (selected_model or "").strip()
         if not model_used:
             # Leave button appearance unchanged on failure
-            # CHANGE: Always return structured JSON to the JSON component (avoid None)
-            return "❌ Select an LLM first from the dropdown, then click Generate World Bible.", get_world_bible_view(), gr.update()
+            # Returns: wb_status, world_bible_view, gen_bible_btn, narration_box, gallery, latest_image
+            return (
+                "❌ Select an LLM first from the dropdown, then click Generate World Bible.",
+                get_world_bible_view(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update()
+            )
 
         # Autosave current run before generating a new world (non-destructive)
         _autosave_if_active()
-        
-        success, message, world_bible_data = execute_world_bible_generation(state_mgr, model_used)
-        
+
+        # Get the current theme from the input field
+        theme_to_use = current_theme.strip() if current_theme and current_theme.strip() else None
+
+        # World bible generation needs MUCH more tokens than normal conversation
+        # Use a high fixed limit (6000) instead of the slider value
+        world_bible_max_tokens = 6000
+        print(f"[world_bible] Using fixed token limit: {world_bible_max_tokens} (ignoring slider value {max_tokens})")
+
+        success, message, world_bible_data = execute_world_bible_generation(state_mgr, model_used, theme_to_use, world_bible_max_tokens)
+
         if success and world_bible_data:
             # Add to debug console for troubleshooting
             ui_data["debug"].append(f"[world_bible] Generated successfully:")
             ui_data["debug"].append(f"[world_bible] {json.dumps(world_bible_data, ensure_ascii=False, indent=2)}")
-            # CHANGE (TRIVIAL): Clear current game state and UI after generating a new world bible
+            # Clear current game state and UI after generating a new world bible
             try:
                 state_mgr.state = GameState(player_name=state_mgr.state.player_name)
                 ui_data["narration"] = ""
@@ -3071,6 +3428,21 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 ui_data["debug"].append("[world_bible] Cleared current game state for new world")
             except Exception:
                 pass
+
+            # AUTO-START: Generate opening narration and image so player doesn't have to type "look around"
+            opening_text = ""
+            opening_image = None
+            try:
+                if getattr(llm, "model_id", "").strip():
+                    opening_text, opening_images = start_story(state_mgr, llm, image_gen)
+                    ui_data["narration"] = opening_text + "\n\n"
+                    ui_data["images"].extend(opening_images)
+                    if opening_images:
+                        opening_image = opening_images[-1]
+                    ui_data["debug"].append("[world_bible] Auto-started opening scene")
+            except Exception as e:
+                ui_data["debug"].append(f"[world_bible] Auto-start failed: {e}")
+
             # After success, de-emphasize the button variant
             # Return formatted world bible view data for the JSON component
             formatted_world_bible = {
@@ -3085,14 +3457,37 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 "progression_hints": world_bible_data.get("progression_hints", []),
                 "note": "This is STATIC - generated once. The turn LLM uses this for consistency but doesn't modify it."
             }
-            return f"✅ {message}", formatted_world_bible, gr.update(variant="secondary")
+            # Returns: wb_status, world_bible_view, gen_bible_btn, narration_box, gallery, latest_image
+            return (
+                f"✅ {message}",
+                formatted_world_bible,
+                gr.update(variant="secondary"),
+                ui_data["narration"],  # Update narration box
+                ui_data["images"],  # Update gallery
+                opening_image  # Update latest image
+            )
         else:
             # Keep standout variant to indicate action still needed / failed
-            # CHANGE: Always return structured JSON to the JSON component (avoid None)
-            return f"❌ {message}", get_world_bible_view(), gr.update()
+            # Returns: wb_status, world_bible_view, gen_bible_btn, narration_box, gallery, latest_image
+            return (
+                f"❌ {message} - Try generating again or check your theme prompt.",
+                get_world_bible_view(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update()
+            )
  
-    with gr.Blocks(title="JMR's LLM Adventure") as app:
-        gr.Markdown("## JMR's LLM Adventure (Ollama + Diffusers)")
+    # Note: css parameter may need to be passed differently in newer Gradio versions
+    custom_css = "#narration-box textarea { font-size: 150%; }"
+    try:
+        # Try newer Gradio API first
+        app = gr.Blocks(title="JMR's LLM Adventure (MLX + MFLUX)")
+        app.css = custom_css
+    except Exception:
+        pass
+    with gr.Blocks(title="JMR's LLM Adventure (MLX + MFLUX)") as app:
+        gr.Markdown("## JMR's LLM Adventure (MLX + MFLUX)")
  
         with gr.Row():
             with gr.Column(scale=3):
@@ -3102,11 +3497,11 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     ### Quick Start Guide
                     
                     **Starting a New Game:**
-                    1. **Select an Ollama model** from the dropdown (e.g., gpt-oss:20b)
+                    1. **Select an MLX model** from the dropdown
                     2. **Click Load/Reload LLM** (orange button) to load the model
                     3. **Optional:** Set the Theme (world/art style)
                     4. **Optional:** Pick and LLM and click "Generate World Bible" for a new adventure (or use the default)
-                    5. **Optional:** Load a diffuser for visual art (select and click Load/Reload)
+                    5. **Optional:** Load an MFLUX model for visual art (select and click Load/Reload)
                     6. **Start playing!** Type commands in the action box below
                     
                     **Loading a Saved Game:**
@@ -3130,37 +3525,60 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     """)
                 
                 # CHANGE (TRIVIAL): Initialize Latest Image so opening image shows immediately on new game
-                latest_image = gr.Image(label="Latest Image", height=300, value=(get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr) or (ui_data["images"][-1] if ui_data["images"] else None)))
+                latest_image = gr.Image(label="Latest Image", height=768, width=768, value=(get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr) or (ui_data["images"][-1] if ui_data["images"] else None)))
                 # CHANGE: Removed secondary latest-turn gallery per request; one latest image panel only
                 # CHANGE: Wrap main Image Gallery in a collapsible accordion for easy hiding
                 with gr.Accordion("Image Gallery", open=False):
                     # CHANGE (TRIVIAL): Initialize Gallery with any opening images so they display immediately
                     gallery = gr.Gallery(label="Image Gallery", height=200, columns=3, value=ui_data["images"])
-                    # SIMPLE FIX: Button to show all filenames
+                    # Toggle button to show/hide image names
                     show_names_btn = gr.Button("Show Image Names", size="sm")
-                    gallery_filenames = gr.Textbox(label="Gallery Image Filenames", interactive=False, lines=3)
+                    gallery_filenames = gr.Textbox(label="Gallery Image Filenames", interactive=False, lines=3, visible=False)
                 user_box = gr.Textbox(label="Your action", placeholder="look around, go north, pick up key ...", lines=1)  # Enter submits
                 send_btn = gr.Button("Send")
                 with gr.Row():
                     with gr.Column():
-                        ollama_models = list_ollama_models() if check_ollama_running() else []
-                        choices = ollama_models or ["(select later)"]
+                        mlx_models = list_mlx_models() if check_mlx_available() else []
+                        choices = mlx_models or ["(select later)"]
                         default_choice = choices[0]
-                        llm_drop = gr.Dropdown(choices, label="Ollama Model", value=default_choice)
+                        llm_drop = gr.Dropdown(choices, label="MLX Model", value=default_choice)
                         reload_llm_btn = gr.Button("Load/Reload Turn-LLM", variant="primary")
                         llm_status = gr.Markdown()
+                        # Save/Load/New Game buttons - grouped below LLM controls
+                        with gr.Row():
+                            restart_btn = gr.Button("New Game", variant="secondary", size="sm")
+                            save_btn = gr.Button("Save", variant="primary", size="sm")
+                        with gr.Row():
+                            game_name_input = gr.Textbox(label="Save as Name", placeholder="My_Adventure", scale=2)
+                        # Saved games dropdown and load
+                        def _list_saved_games_local():
+                            try:
+                                files = [f for f in os.listdir(SAVE_DIR) if f.startswith("Adv_") and (f.endswith('.pkl') or f.endswith('.tkl'))]
+                            except Exception:
+                                files = []
+                            return sorted(files, reverse=True)
+                        saved_choices = _list_saved_games_local() or ["(none)"]
+                        load_dropdown = gr.Dropdown(saved_choices, label="Saved Games", value=(saved_choices[0] if saved_choices else "(none)"))
+                        load_btn = gr.Button("Load Game", variant="secondary", size="sm")
+                        save_status = gr.Markdown()
+                        load_status = gr.Markdown()
+                        restart_status = gr.Markdown()
                     with gr.Column():
                         diffuser_choices = combined_diffuser_choices(include_skip=True)
                         # If no diffuser is currently loaded, default to the first available choice (like LLM dropdown)
                         current_diffuser = image_gen.model_id if image_gen else (diffuser_choices[0] if diffuser_choices else "")
                         if current_diffuser and current_diffuser not in diffuser_choices:
                             diffuser_choices = [current_diffuser] + diffuser_choices
-                        diff_drop = gr.Dropdown(diffuser_choices, label="Diffuser (local or HF)", value=current_diffuser)
-                        reload_diff_btn = gr.Button("Load/Reload Art Diffuser", variant="primary")  # Start orange
+                        diff_drop = gr.Dropdown(diffuser_choices, label="MFLUX Model", value=current_diffuser)
+                        reload_diff_btn = gr.Button("Load/Reload MFLUX Model", variant="primary")  # Start orange
                         diff_status = gr.Markdown()
             with gr.Column(scale=2):
                 # Scrollable narration window with box border - plain text display
-                narration_box = gr.Textbox(value=ui_data["narration"], label="Narration", lines=10, max_lines=10, interactive=False)
+                narration_box = gr.Textbox(value=ui_data["narration"], label="Narration", lines=10, max_lines=10, interactive=False, elem_id="narration-box")
+
+                # Max tokens slider for LLM response length control
+                max_tokens_slider = gr.Slider(minimum=250, maximum=2500, value=2500, step=50, label="LLM Max Tokens (response length)")
+
                 with gr.Row():
                     location = gr.Textbox(label="Location", value=str(state_mgr.state.location), interactive=False)
                     health = gr.Textbox(label="Health", value=str(state_mgr.state.health), interactive=False)
@@ -3172,10 +3590,17 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     _wb_theme = ((WORLD_BIBLE or {}).get("global_theme") if 'WORLD_BIBLE' in globals() else None)
                 except Exception:
                     _wb_theme = None
+                # Theme selection - dropdown with presets + custom text option
+                theme_dropdown = gr.Dropdown(
+                    choices=list(PRESET_THEMES.keys()),
+                    label="Theme Preset",
+                    value="Tolkien Cave Adventure"
+                )
                 theme_input = gr.Textbox(
-                    label="Global Theme (world/art style)",
-                    value=(_wb_theme or ""),
-                    placeholder=DEFAULT_IMAGE_THEME,
+                    label="Theme Details (edit or type custom)",
+                    value=PRESET_THEMES.get("Tolkien Cave Adventure", ""),
+                    lines=3,
+                    placeholder="Describe your adventure theme, characters, and art style..."
                 )
                 with gr.Row():
                     apply_theme_btn = gr.Button("Apply Theme", variant="secondary")
@@ -3291,39 +3716,15 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     
                     game_state_view = gr.JSON(label="🎮 GameState (Current Playthrough)", value=get_game_state_view())
                 
-                with gr.Row():
-                    # NEW: Start a fresh run using the current world bible (replay from start)
-                    restart_btn = gr.Button("New Game (same World Bible)", variant="secondary")
-                    restart_status = gr.Markdown()
-                with gr.Row():
-                    # Allow naming the game when saving
-                    game_name_input = gr.Textbox(label="Save as Name", placeholder="My_Adventure")
-                    save_btn = gr.Button("Save Game (.pkl)", variant="primary")
-                    save_status = gr.Markdown()
-                with gr.Row():
-                    # Replace drop-file with a saved-games dropdown for convenience
-                    def _list_saved_games_local():
-                        try:
-                            files = [f for f in os.listdir(SAVE_DIR) if f.startswith("Adv_") and (f.endswith('.pkl') or f.endswith('.tkl'))]
-                        except Exception:
-                            files = []
-                        return sorted(files, reverse=True)
-                    saved_choices = _list_saved_games_local() or ["(none)"]
-                    load_dropdown = gr.Dropdown(saved_choices, label="Saved Games", value=(saved_choices[0] if saved_choices else "(none)"))
-                    load_btn = gr.Button("Load Game", variant="secondary")
-                    load_status = gr.Markdown()
+                # Save/Load buttons moved to first column below LLM controls
         
-        # Image generation controls (pre-generate vs re-generate)
+        # Image generation controls - radio buttons with small generate/regenerate button
         with gr.Row():
-            # CHANGE (TRIVIAL): Rename to 'Generate images' and share between both actions
-            pregenerate_level = gr.Radio(["some", "most", "all"], value="some", label="Generate images")
-            pregenerate_btn = gr.Button("PREGENERATE", variant="secondary")
-            pregenerate_status = gr.Markdown()
-        
-        # TRIVIAL: Add a button to regenerate images for current room and nearby items
-        with gr.Row():
-            regenerate_btn = gr.Button("REGENERATE", variant="secondary")
-            regenerate_status = gr.Markdown()
+            pregenerate_level = gr.Radio(["some", "most", "all"], value="some", label="Image Coverage")
+            # Set initial button text based on whether images already exist
+            initial_button_text = "Regenerate" if (ui_data.get("images") or state_mgr.state.last_images) else "Generate Images"
+            generate_images_btn = gr.Button(initial_button_text, variant="secondary", size="sm")
+            generate_images_status = gr.Markdown()
  
         with gr.Accordion("Debug Console", open=False):
             # CHANGE: Use JSON like other windows for consistency and copy functionality
@@ -3334,7 +3735,18 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             debug_md = gr.JSON(label="Debug Logs", value=get_debug_view())
  
         # SIMPLE: Show deduped gallery names, using subject names when available
-        def show_all_filenames():
+        # Track toggle state for image names
+        _image_names_visible = {"value": False}
+        
+        def toggle_image_names():
+            """Toggle visibility of image names and return updated text + visibility + button label"""
+            _image_names_visible["value"] = not _image_names_visible["value"]
+            
+            if not _image_names_visible["value"]:
+                # Hide the textbox
+                return gr.update(visible=False), gr.update(value="Show Image Names")
+            
+            # Show the textbox with filenames
             try:
                 # Build mapping from path -> subject (room/item) if known
                 path_to_subject = {}
@@ -3344,7 +3756,6 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                         subj = img.get("subject") or ""
                         typ = img.get("type") or ""
                         if subj:
-                            # Prefer "Item: Name" or "Room: Name" labels for clarity
                             label = f"{('Item' if typ=='item' else 'Room')}: {subj}" if typ in ("item", "room") else subj
                             path_to_subject[p] = label
                 # Deduplicate ui gallery paths preserving order
@@ -3355,25 +3766,25 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                         seen.add(p)
                         deduped.append(p)
                 if not deduped:
-                    return "No images in gallery"
+                    return gr.update(value="No images in gallery", visible=True), gr.update(value="Hide Image Names")
                 # Render numbered list with simple names when known, else basename
                 lines = []
                 for idx, p in enumerate(deduped, start=1):
                     simple = path_to_subject.get(p) or os.path.basename(p)
                     lines.append(f"{idx}. {simple}")
-                return "\n".join(lines)
+                return gr.update(value="\n".join(lines), visible=True), gr.update(value="Hide Image Names")
             except Exception:
                 # Safe fallback to basenames only
                 paths = [p for p in ui_data.get("images", []) if isinstance(p, str)]
                 if not paths:
-                    return "No images in gallery"
+                    return gr.update(value="No images in gallery", visible=True), gr.update(value="Hide Image Names")
                 deduped = []
                 seen = set()
                 for p in paths:
                     if p not in seen:
                         seen.add(p)
                         deduped.append(p)
-                return "\n".join(f"{i+1}. {os.path.basename(p)}" for i, p in enumerate(deduped))
+                return gr.update(value="\n".join(f"{i+1}. {os.path.basename(p)}" for i, p in enumerate(deduped)), visible=True), gr.update(value="Hide Image Names")
         
         send_btn.click(
             fn=do_send,
@@ -3392,20 +3803,12 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         
         # Wire the show names button
         show_names_btn.click(
-            fn=show_all_filenames,
-            outputs=[gallery_filenames],
+            fn=toggle_image_names,
+            outputs=[gallery_filenames, show_names_btn],
         )
         
-        # Also auto-update filenames when gallery changes
-        send_btn.click(
-            fn=show_all_filenames,
-            outputs=[gallery_filenames],
-        )
-        user_box.submit(
-            fn=show_all_filenames,
-            outputs=[gallery_filenames],
-        )
-        
+        # Note: Removed auto-update of filenames when gallery changes to preserve toggle state
+
         # Update GameState view after each turn
         def refresh_game_state():
             return get_game_state_view()
@@ -3422,19 +3825,19 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         )
  
         # Update button handlers to change color after first use
-        def do_reload_llm_with_color(ollama_model: str):
-            result = do_reload_llm(ollama_model)
+        def do_reload_llm_with_color(model_name: str, max_tokens: int):
+            result = do_reload_llm(model_name, max_tokens)
             # Return status and update button to grey
             return result, gr.Button(variant="secondary")
-        
+
         def do_reload_diffuser_with_color(diffuser_id: str):
             result = do_reload_diffuser(diffuser_id)
             # Return status and update button to grey
             return result, gr.Button(variant="secondary")
-        
+
         reload_llm_btn.click(
             fn=do_reload_llm_with_color,
-            inputs=[llm_drop],
+            inputs=[llm_drop, max_tokens_slider],
             outputs=[llm_status, reload_llm_btn],
         )
         reload_diff_btn.click(
@@ -3444,9 +3847,9 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         )
         gen_bible_btn.click(
             fn=do_generate_world_bible,
-            inputs=[llm_drop],
-            # CHANGE: also update the button variant after successful generation
-            outputs=[wb_status, world_bible_view, gen_bible_btn],
+            inputs=[llm_drop, theme_input, max_tokens_slider],
+            # Auto-start story after world bible generation - updates narration, gallery, and image
+            outputs=[wb_status, world_bible_view, gen_bible_btn, narration_box, gallery, latest_image],
         )
         
         # Update World Bible view when it changes
@@ -3511,7 +3914,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
 
                 # Replay opening scene using existing LLM/image settings
                 opening_text, opening_images = start_story(state_mgr, llm, image_gen)
-                ui_data["narration"] = (opening_text + "\n\nType an action and press Send. Use the controls below to reload the LLM or diffuser.\n")
+                ui_data["narration"] = (opening_text + "\n\nType an action and press Send. Use the controls below to reload the LLM or MFLUX model.\n")
                 # Add any newly generated opening images to the existing gallery
                 ui_data["images"].extend(opening_images)
 
@@ -3522,7 +3925,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     "✅ New game started",
                     ui_data["narration"],  # Return plain text narration
                     ui_data["images"],
-                    get_debug_view(),  # CHANGE: return structured JSON for gr.JSON
+                    get_debug_view(),  # Return debug data for UI
                     str(state_mgr.state.health),
                     ", ".join(state_mgr.state.inventory) or "(empty)",
                     state_mgr.describe_map(),
@@ -3541,18 +3944,29 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             try:
                 global WORLD_BIBLE
                 if not theme_text.strip():
-                    return "❌ Provide a theme first"
+                    return "❌ Provide a theme first", theme_text
                 if WORLD_BIBLE is None:
                     WORLD_BIBLE = {"global_theme": theme_text.strip()}
                 else:
                     WORLD_BIBLE["global_theme"] = theme_text.strip()
-                return f"✅ Theme set: {theme_text.strip()}"
+                return f"✅ Theme set: {theme_text.strip()}", theme_text.strip()
             except Exception as e:
-                return f"❌ Theme update failed: {e}"
+                return f"❌ Theme update failed: {e}", theme_text
+        # When theme dropdown changes, update the text box with the preset
+        def on_theme_dropdown_change(selected_theme):
+            preset_text = PRESET_THEMES.get(selected_theme, "")
+            return preset_text
+        
+        theme_dropdown.change(
+            fn=on_theme_dropdown_change,
+            inputs=[theme_dropdown],
+            outputs=[theme_input],
+        )
+        
         apply_theme_btn.click(
             fn=do_apply_theme,
             inputs=[theme_input],
-            outputs=[theme_status],
+            outputs=[theme_status, theme_input],
         )
         def do_pregenerate(level: str):
             # Pre-generate images for speed: some/most/all
@@ -3612,7 +4026,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 
                 # Log active models to make runs auditable
                 try:
-                    ui_data["debug"].append(f"[tool] Models: LLM={getattr(llm, 'model_id', 'None')}, Diffuser={(getattr(image_gen, 'model_id', None) or 'None')}")
+                    ui_data["debug"].append(f"[tool] Models: LLM={getattr(llm, 'model_id', 'None')}, MFLUX={(getattr(image_gen, 'model_id', None) or 'None')}")
                 except Exception:
                     pass
                 # Generate room overviews - directly linked to map
@@ -3645,66 +4059,29 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 latest_img = (get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr))
                 
                 # CHANGE: Also return updated debug console as structured JSON so gr.JSON can render
-                return f"✅ Pre-generated {made} images (new: {newly_generated}, reused: {newly_reused}, level={level})", ui_data["images"], get_debug_view(), latest_img
+                return f"✅ Generated {made} images (new: {newly_generated}, reused: {newly_reused}, level={level})", ui_data["images"], get_debug_view(), latest_img
             except Exception as e:
-                return f"❌ Pre-generate failed: {e}", [], get_debug_view(), None  # CHANGE: structured JSON for gr.JSON
-        pregenerate_btn.click(
-            fn=do_pregenerate,
-            inputs=[pregenerate_level],
-            # CHANGE: Update Debug Console when pregenerating so logging is visible without sending a turn
-            # CHANGE: Also refresh the Latest Image thumbnail
-            outputs=[pregenerate_status, gallery, debug_md, latest_image],
-        )
-        
-        def do_regenerate_current():
-            """Force-regenerate images that already exist (no expansion of scope).
-            - Replaces images for tracked rooms/items only (rooms_with_images/items_with_images)
-            - Does NOT delete files; only clears tracking so fresh images are generated.
+                return f"❌ Generate failed: {e}", [], get_debug_view(), None  # CHANGE: structured JSON for gr.JSON
+
+        def do_generate_images(level: str):
             """
-            try:
-                if not image_gen:
-                    return "❌ No diffuser loaded", ui_data["images"], get_debug_view(), (get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr))
-                # Targets: only those already tracked as having images
-                rooms_sel = list(state_mgr.state.rooms_with_images)
-                items_sel = list(state_mgr.state.items_with_images)
-                # Helper to clear tracking for a subject
-                def _clear_tracking(subject: str, typ: str) -> None:
-                    try:
-                        state_mgr.state.last_images = [img for img in state_mgr.state.last_images if not (img.get("type") == typ and img.get("subject") == subject)]
-                        if typ == "room":
-                            state_mgr.state.rooms_with_images = [r for r in state_mgr.state.rooms_with_images if r != subject]
-                        elif typ == "item":
-                            state_mgr.state.items_with_images = [i for i in state_mgr.state.items_with_images if i != subject]
-                    except Exception:
-                        pass
-                # Clear and regenerate rooms
-                new_room_count = 0
-                first_room_img = None
-                for r in rooms_sel:
-                    _clear_tracking(r, "room")
-                    p = generate_room_image_if_needed(state_mgr, image_gen, r, ui_data["debug"])
-                    if p:
-                        ui_data["images"].append(p)
-                        new_room_count += 1
-                        if not first_room_img:
-                            first_room_img = p
-                # Clear and regenerate items
-                new_item_count = 0
-                for it in items_sel:
-                    _clear_tracking(it, "item")
-                    p = generate_item_image_if_needed(state_mgr, image_gen, it, ui_data["debug"])
-                    if p:
-                        ui_data["images"].append(p)
-                        new_item_count += 1
-                latest_img = first_room_img or get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr)
-                status = f"✅ Regenerated images: rooms={new_room_count}, items={new_item_count}"
-                return status, ui_data["images"], get_debug_view(), latest_img
-            except Exception as e:
-                return f"❌ Regenerate failed: {e}", ui_data["images"], get_debug_view(), (get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr))
-        regenerate_btn.click(
-            fn=do_regenerate_current,
-            inputs=[],
-            outputs=[regenerate_status, gallery, debug_md, latest_image],
+            Generate images for ALL world bible rooms and items based on level.
+            Always includes world bible content - doesn't just regenerate existing.
+            """
+            # ALWAYS use full pregenerate logic - it handles both new and existing
+            # This ensures all world bible rooms/items get images, not just already-tracked ones
+            status, images, debug, latest = do_pregenerate(level)
+
+            # Update button text based on whether images were generated
+            has_images = bool(ui_data.get("images") or state_mgr.state.last_images)
+            button_text = "Regenerate" if has_images else "Generate Images"
+
+            return status, images, debug, latest, button_text
+
+        generate_images_btn.click(
+            fn=do_generate_images,
+            inputs=[pregenerate_level],
+            outputs=[generate_images_status, gallery, debug_md, latest_image, generate_images_btn],
         )
         def do_load_game_dropdown(file_name: str):
             try:
@@ -3714,7 +4091,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                         "❌ No saved game selected",
                         ui_data["images"],
                         ui_data["narration"],  # Return plain text narration
-                        get_debug_view(),  # CHANGE: return structured JSON for gr.JSON
+                        get_debug_view(),  # Return debug data for UI
                         str(state_mgr.state.health),
                         ", ".join(state_mgr.state.inventory) or "(empty)",
                         state_mgr.describe_map(),
@@ -3772,7 +4149,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     f"✅ Loaded: {file_name}",
                     ui_data["images"],
                     narration_value,  # Return plain text narration
-                    get_debug_view(),  # CHANGE: return structured JSON for gr.JSON
+                    get_debug_view(),  # Return debug data for UI
                     str(state_mgr.state.health),
                     ", ".join(state_mgr.state.inventory) or "(empty)",
                     safe_map_text,
@@ -3786,7 +4163,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     f"❌ Load failed: {e}",
                     ui_data.get("images", []),
                     ui_data.get("narration", ""),  # Return plain text narration
-                    get_debug_view(),  # CHANGE: return structured JSON for gr.JSON
+                    get_debug_view(),  # Return debug data for UI
                     str(state_mgr.state.health),
                     ", ".join(state_mgr.state.inventory) or "(empty)",
                     state_mgr.describe_map(),
@@ -3810,42 +4187,51 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
 def main(argv: Optional[List[str]] = None) -> int:
     ensure_directories_exist()
 
-    parser = argparse.ArgumentParser(description="Minimal LLM-centered text adventure")
+    parser = argparse.ArgumentParser(description="LLM Adventure — MLX-LM + MFLUX on Apple Silicon")
     parser.add_argument("--player", type=str, default="Adventurer", help="Player name")
-    parser.add_argument("--model", type=str, default=None, help="Ollama model name (e.g., llama3.1:8b)")
-    parser.add_argument("--device", type=str, default=None, help="Preferred device for images: cuda|mps|cpu")
-    parser.add_argument("--max_tokens", type=int, default=1500, help="Max new tokens per turn")
-    parser.add_argument("--diffuser", type=str, default=None, help="Diffusers model id (optional)")
+    parser.add_argument("--model", type=str, default=None, help="MLX model name (directory name in MLX_Models)")
+    parser.add_argument("--max_tokens", type=int, default=600, help="Max new tokens per turn")
+    parser.add_argument("--no-images", action="store_true", help="Disable image generation entirely")
+    parser.add_argument("--cli", action="store_true", help="Run in command-line mode instead of Gradio UI")
     args = parser.parse_args(argv)
 
     state_mgr = StateManager(GameState(player_name=args.player))
 
     # No interactive console prompts; UI handles model selection/reload
-    model_id = args.model or ""
-    image_model_id = args.diffuser
+    model_name = args.model or ""
 
-    image_gen = ImageGenerator(model_id=image_model_id, device_preference=args.device, local_root=diffusion_models_root()) if image_model_id else None
-
-    if model_id:
-        print(f"Using LLM (Ollama): {model_id}")
+    # MFLUX image generation (FLUX.2-klein-9B on Apple Silicon)
+    if args.no_images:
+        image_gen = None
+        print("Images: disabled (--no-images flag)")
     else:
-        print("Using LLM (Ollama): (select in UI)")
-    if image_gen and image_gen.model_id:
-        print(f"Images: enabled via '{image_gen.model_id}' on {image_gen.device}")
-    else:
-        print("Images: disabled")
+        image_gen = MfluxImageGenerator(model_name="flux2-klein-9b")
+        print("Images: enabled via MFLUX (FLUX.2-klein-9B)")
 
-    llm = LLMEngine(model_id=model_id, max_new_tokens=args.max_tokens, temperature=0.7)
+    # Build full model path for MLX
+    if model_name:
+        model_path = os.path.join(MLX_MODELS_DIR, model_name) if not os.path.isdir(model_name) else model_name
+        print(f"Using LLM (MLX): {model_name}")
+    else:
+        model_path = ""
+        print("Using LLM (MLX): (select in UI)")
+
+    llm = LLMEngine(model_path=model_path, max_new_tokens=args.max_tokens, temperature=0.7)
 
     # World bible is loaded from .pkl files now, not separate files
     global WORLD_BIBLE
     WORLD_BIBLE = None
     print("\nWelcome to the Minimal LLM Adventure!")
-    print("The world is driven by your chosen LLM. Keep inputs concise for best results.")
+    print("The world is driven by your chosen LLM. Images use MFLUX (FLUX.2-klein-9B).")
 
-    # Always launch the Gradio UI (you can still use reloads to change LLMs)
-    launch_gradio_ui(state_mgr, llm, image_gen)
-    return 0
+    if args.cli:
+        # Run in command-line mode
+        interactive_loop(state_mgr, llm, image_gen)
+        return 0
+    else:
+        # Launch the Gradio UI (you can still use reloads to change LLMs)
+        launch_gradio_ui(state_mgr, llm, image_gen)
+        return 0
 
 
 if __name__ == "__main__":

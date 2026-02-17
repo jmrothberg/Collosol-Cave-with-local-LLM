@@ -43,7 +43,11 @@ if torch.cuda.is_available():
 # Server functionality removed - only local generation now
 
 # Import diffusers components
-from diffusers import DiffusionPipeline, FluxPipeline, StableDiffusion3Pipeline, StableDiffusionXLPipeline, ZImagePipeline
+from diffusers import DiffusionPipeline, FluxPipeline, StableDiffusion3Pipeline, StableDiffusionXLPipeline
+try:
+    from diffusers import ZImagePipeline
+except ImportError:
+    ZImagePipeline = None
 
 
 
@@ -212,6 +216,8 @@ class ImageGenerator:
 
             print(f"Loading Z-Image pipeline from: {model_path}")
             try:
+                if ZImagePipeline is None:
+                    raise ImportError("ZImagePipeline not available in this diffusers version")
                 # Load Z-Image with correct parameters for Blackwell GPU
                 self._pipeline = ZImagePipeline.from_pretrained(
                     model_path,
@@ -397,7 +403,7 @@ class ImageGenerator:
         except Exception as e:
             print(f"[image] Failed to initialize pipeline '{self.model_id}': {e}")
             # Try fallback to Z-Image-Turbo if available
-            if self.model_id != "Z-Image-Turbo" and os.path.isdir('/data/Diffusion_Models/Z-Image-Turbo'):
+            if self.model_id != "Z-Image-Turbo" and ZImagePipeline is not None and os.path.isdir('/data/Diffusion_Models/Z-Image-Turbo'):
                 print(f"[image] Attempting fallback to Z-Image-Turbo")
                 try:
                     self._pipeline = ZImagePipeline.from_pretrained(

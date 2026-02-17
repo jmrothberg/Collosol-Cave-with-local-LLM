@@ -1,6 +1,6 @@
 # Colossal Cave Adventure with Local LLM
 
-An interactive text-based adventure game inspired by the classic "Colossal Cave Adventure", enhanced with local Language Models (LLMs) for natural language processing and diffusion models for dynamic AI-generated artwork.
+An interactive text-based adventure game inspired by the classic "Colossal Cave Adventure", enhanced with local Language Models (LLMs) for natural language processing and FLUX image generation for dynamic AI-generated artwork — all running natively on Apple Silicon via MLX.
 
 **Author:** Jonathan M. Rothberg (@jmrothberg)
 
@@ -9,19 +9,18 @@ An interactive text-based adventure game inspired by the classic "Colossal Cave 
 ## Features
 
 - **Two Adventure Games:**
-  - `LMM_adventure_Dec_7_25.py` - Fully LLM-driven adventure where the AI acts as game master
+  - `LMM_adventure_Feb_15_26.py` - Fully LLM-driven adventure where the AI acts as game master (MLX-LM + MFLUX)
   - `Colossal_Cave_Aug_2_25.py` - Classic adventure with AI-generated images and videos
 
-- **AI-Generated Art:** Diffusion models create room artwork and item illustrations on demand
-- **Video Generation:** Generate atmospheric videos for rooms using Pyramid Flow or Wan2.2
+- **AI-Generated Art:** MFLUX (FLUX on Apple Silicon) creates room artwork and item illustrations on demand
 - **Natural Language Commands:** Talk naturally with NPCs and issue commands in plain English
-- **Local LLM Integration:** Uses Ollama for fully private, local AI inference
-- **Web Interface:** Beautiful Gradio-based UI for easy gameplay
+- **Local LLM Integration:** Uses MLX-LM for fully private, local AI inference on Apple Silicon
+- **Web Interface:** Gradio-based UI for easy gameplay
 - **Classic Gameplay:** Explore caverns, collect treasures, solve puzzles, battle monsters
 
 ---
 
-## Quick Start
+## Quick Start (Apple Silicon Mac)
 
 ### 1. Clone the Repository
 
@@ -33,229 +32,108 @@ cd Collosol-Cave-with-local-LLM
 ### 2. Create Virtual Environment
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# OR
-.venv\Scripts\activate     # Windows
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
 ### 3. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install mlx-lm mflux gradio
 ```
 
-### 4. Install Ollama (Required for LLM)
+### 4. Download Models
 
-See [Setting Up Local LLMs](#setting-up-local-llms-with-ollama) section below.
+**LLM models** (place in `~/MLX_Models/`):
+```bash
+# Example: download a quantized Qwen model
+huggingface-cli download Qwen/Qwen3-30B-A3B-8bit --local-dir ~/MLX_Models/Qwen3-30B-A3B-8bit
+```
+
+**Image generation model** (place in `~/Diffusion_Models/`):
+```bash
+# FLUX.2-klein-9B MLX 8-bit (recommended — fast, 4-step distilled)
+huggingface-cli download AITRADER/FLUX2-klein-9B-mlx-8bit --local-dir ~/Diffusion_Models/FLUX2-klein-9B-mlx-8bit
+```
 
 ### 5. Run the Game
 
 ```bash
-# LLM-driven adventure (recommended)
-python LMM_adventure_Dec_7_25.py
-
-# Classic adventure with video support
-python Colossal_Cave_Aug_2_25.py
+python LMM_adventure_Feb_15_26.py
 ```
 
 ---
 
 ## System Requirements
 
-### Minimum Requirements
-- **Python:** 3.10 or 3.11 (3.12 has some compatibility issues)
-- **RAM:** 16GB (32GB+ recommended for video generation)
-- **Storage:** 10GB for code + dependencies, 20-100GB for models
-
-### For Image Generation
-- **GPU:** NVIDIA GPU with 8GB+ VRAM, or Apple Silicon Mac with MPS
-- **CUDA:** 11.8+ for NVIDIA GPUs
-
-### For Video Generation
-- **GPU:** NVIDIA GPU with 24GB+ VRAM, or Apple Silicon Mac with 32GB+ unified memory
-- **CUDA:** 12.4+ recommended for video generation
+- **Hardware:** Apple Silicon Mac (M1/M2/M3/M4)
+- **RAM:** 32GB+ unified memory recommended (16GB minimum)
+- **Python:** 3.10 or 3.11
+- **Storage:** ~20GB for FLUX.2-klein-9B-mlx-8bit, plus LLM models
 
 ---
 
-## Setting Up Local LLMs with Ollama
+## Setting Up LLMs with MLX-LM
 
-The games use [Ollama](https://ollama.ai) to run local LLMs. Ollama provides a simple way to run various open-source language models locally.
+The game uses [MLX-LM](https://github.com/ml-explore/mlx-lm) to run local LLMs natively on Apple Silicon.
 
-### Installing Ollama
+### Downloading MLX Models
 
-#### Linux
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-```
-
-#### macOS
-```bash
-# Using Homebrew
-brew install ollama
-
-# Or download from https://ollama.com/download
-```
-
-#### Windows
-Download the installer from [ollama.com/download](https://ollama.com/download)
-
-### Starting Ollama
-
-After installation, start the Ollama service:
+Place MLX-format models in `~/MLX_Models/`. The game auto-discovers any directory containing a `config.json`.
 
 ```bash
-ollama serve
+# Recommended models (choose based on your RAM)
+# 16GB Mac:
+huggingface-cli download Qwen/Qwen3-4B-MLX --local-dir ~/MLX_Models/Qwen3-4B-MLX
+
+# 32GB+ Mac:
+huggingface-cli download Qwen/Qwen3-30B-A3B-8bit --local-dir ~/MLX_Models/Qwen3-30B-A3B-8bit
+
+# 64GB+ Mac:
+huggingface-cli download mlx-community/Qwen2.5-32B-Instruct-8bit --local-dir ~/MLX_Models/Qwen2.5-32B-Instruct-8bit
 ```
 
-Or on macOS/Windows, the Ollama app runs in the background automatically.
+### In-Game Model Selection
 
-### Downloading LLM Models
-
-Download models that work well with the adventure games:
-
-```bash
-# Recommended models for gameplay (choose one or more)
-ollama pull llama3.2:3b      # Fast, good for quick responses (3GB)
-ollama pull llama3.1:8b      # Balanced quality and speed (5GB)
-ollama pull qwen2.5:7b       # Good for world bible generation (4GB)
-ollama pull mistral:7b       # Another good option (4GB)
-
-# For world bible generation (needs more capacity)
-ollama pull llama3.1:70b     # Best quality but requires 40GB+ VRAM
-ollama pull qwen2.5:32b      # High quality alternative (20GB)
-```
-
-### Recommended Model Combinations
-
-| Use Case | Fast Model (Gameplay) | Heavy Model (World Bible) |
-|----------|----------------------|---------------------------|
-| Low VRAM (8GB) | llama3.2:3b | qwen2.5:7b |
-| Medium VRAM (16GB) | llama3.1:8b | qwen2.5:14b |
-| High VRAM (24GB+) | llama3.1:8b | qwen2.5:32b |
-| Apple Silicon (16GB) | llama3.2:3b | llama3.1:8b |
-| Apple Silicon (32GB+) | llama3.1:8b | qwen2.5:14b |
-
-### Verifying Ollama Setup
-
-```bash
-# Check available models
-ollama list
-
-# Test a model
-ollama run llama3.2:3b "Hello, are you ready for an adventure?"
-```
+The Gradio UI provides a dropdown to select and load any MLX model at runtime. No restart needed.
 
 ---
 
-## Setting Up Diffusion Models for Image Generation
+## Setting Up Image Generation with MFLUX
 
-The games can generate AI artwork using various diffusion models. You have several options:
+The game uses [MFLUX](https://github.com/filipstrand/mflux) to run FLUX image generation natively on Apple Silicon via MLX.
 
-### Option 1: Z-Image-Turbo (Recommended for Speed)
+### Recommended: FLUX.2-klein-9B (MLX 8-bit)
 
-Z-Image-Turbo generates high-quality images in just 9 inference steps.
-
-```bash
-# Download using Python
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('Tongyi-MAI/Z-Image-Turbo', 
-                  local_dir='./Z-Image-Turbo',
-                  local_dir_use_symlinks=False)
-"
-```
-
-Or place in your models directory:
-```
-/data/Diffusion_Models/Z-Image-Turbo/  (Linux)
-~/Diffusion_Models/Z-Image-Turbo/       (Mac)
-```
-
-### Option 2: FLUX.1-dev (High Quality)
-
-FLUX produces exceptional image quality but requires more VRAM.
+The distilled FLUX.2-klein-9B model generates high-quality images in just **4 inference steps** — fast enough for real-time gameplay.
 
 ```bash
-# Requires Hugging Face account and accepting model license
-# Set HF_TOKEN environment variable first
-export HF_TOKEN=your_token_here
-
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('black-forest-labs/FLUX.1-dev',
-                  local_dir='/data/Diffusion_Models/FLUX.1-dev',
-                  local_dir_use_symlinks=False)
-"
+huggingface-cli download AITRADER/FLUX2-klein-9B-mlx-8bit \
+  --local-dir ~/Diffusion_Models/FLUX2-klein-9B-mlx-8bit
 ```
 
-### Option 3: Stable Diffusion XL (SD XL)
+### Alternative: FLUX.1-dev
 
-A good balance of quality and speed.
+Higher quality but slower (20 steps):
 
 ```bash
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('stabilityai/stable-diffusion-xl-base-1.0',
-                  local_dir='/data/Diffusion_Models/SDXL',
-                  local_dir_use_symlinks=False)
-"
+# Requires accepting the license at huggingface.co/black-forest-labs/FLUX.1-dev
+huggingface-cli download black-forest-labs/FLUX.1-dev \
+  --local-dir ~/Diffusion_Models/FLUX.1-dev
 ```
 
-### Where to Place Models
+### Where Models Are Found
 
-The games look for models in these locations (in order):
-
-1. Environment variable: `DIFFUSION_MODELS_DIR`
-2. `/data/Diffusion_Models/` (Linux)
-3. `/Users/<username>/Diffusion_Models/` (macOS)
-4. `./Diffusion_Models/` (relative to game directory)
+The game looks for FLUX models in `~/Diffusion_Models/` and lists any directory starting with `FLUX` in the MFLUX Model dropdown.
 
 ---
 
-## Setting Up Video Generation (Optional)
+## Running the Game
 
-Video generation creates atmospheric clips for game rooms. This requires significant GPU resources.
-
-### Pyramid Flow (Recommended for Mac)
+### LMM Adventure (LLM-Driven) — Main Game
 
 ```bash
-# Download the miniflux version (smaller, works on Mac)
-python miniflux_download.py
-
-# Or the full SD3 version (higher quality, more VRAM needed)
-python huggingfacesnapshotpyramid.py
-```
-
-Models will be downloaded to `/data/pyramid-flow-miniflux/` or `/data/pyramid-flow-sd3/`.
-
-### Wan2.2 (Best Quality)
-
-Wan2.2 models require manual download due to license requirements:
-
-1. Visit [Alibaba Wan on Hugging Face](https://huggingface.co/alibaba-pai)
-2. Accept the model license
-3. Download to `/data/Wan2.2-T2V-A14B/` or similar
-
-### Video Generation Requirements
-
-| Model | VRAM Required | Video Length |
-|-------|--------------|--------------|
-| Pyramid-Flow-Miniflux | 16GB+ | 5-10 sec |
-| Pyramid-Flow-SD3 | 24GB+ | 5-10 sec |
-| Wan2.2-TI2V-5B | 24GB+ | 5-10 sec |
-| Wan2.2-T2V-A14B | 40GB+ | 5-10 sec |
-
----
-
-## Running the Games
-
-### LMM Adventure (LLM-Driven)
-
-This is the main game where the LLM acts as game master:
-
-```bash
-python LMM_adventure_Dec_7_25.py
+python LMM_adventure_Feb_15_26.py
 ```
 
 Features:
@@ -264,31 +142,28 @@ Features:
 - The LLM dynamically creates NPCs, locations, puzzles, and narrative
 - AI-generated artwork for every room and important item
 
+### Command Line Options
+
+```bash
+# Specify LLM model
+python LMM_adventure_Feb_15_26.py --model Qwen3-30B-A3B-8bit
+
+# Disable image generation
+python LMM_adventure_Feb_15_26.py --no-images
+
+# Run in CLI mode (no Gradio UI)
+python LMM_adventure_Feb_15_26.py --cli
+
+# Set player name
+python LMM_adventure_Feb_15_26.py --player "Gandalf"
+```
+
 ### Colossal Cave (Classic)
 
 The original-style adventure with enhanced AI features:
 
 ```bash
 python Colossal_Cave_Aug_2_25.py
-```
-
-Features:
-- Classic room-based exploration
-- Pre-defined puzzles and riddles
-- Video generation for immersive room experiences
-- Compatible with Mac MPS for video generation
-
-### Command Line Options
-
-```bash
-# Specify LLM model
-python LMM_adventure_Dec_7_25.py --model llama3.1:8b
-
-# Specify max tokens for responses
-python LMM_adventure_Dec_7_25.py --max_tokens 800
-
-# Enable debug output
-python LMM_adventure_Dec_7_25.py --debug
 ```
 
 ---
@@ -314,55 +189,9 @@ python LMM_adventure_Dec_7_25.py --debug
 |---------|-------------|
 | `details` | Get LLM description of current room |
 | `draw` | Generate new artwork for current room |
-| `video` | Generate video for current room (if enabled) |
 | `help` | Show all commands |
 | `inventory` | Show your items |
 | `map` | Display the game map |
-
-### Puzzle Commands
-
-| Command | Description |
-|---------|-------------|
-| `solve <item1> and <item2>` | Solve puzzles with magic items |
-
-### Cheat Commands
-
-| Command | Description |
-|---------|-------------|
-| `xyzzy` | Activate cheat mode |
-| `magicword <room>` | Open magical passages |
-| `health <value>` | Set health value |
-
----
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file (copy from `.env.example`):
-
-```bash
-# Hugging Face token for downloading gated models
-HF_TOKEN=your_huggingface_token_here
-
-# Custom model directories
-DIFFUSION_MODELS_DIR=/path/to/your/models
-
-# GPU selection for diffusion
-DIFFUSION_GPU=0
-
-# Ollama API key (only for remote servers)
-OLLAMA_API_KEY=your_key_here
-```
-
-### In-Game Settings
-
-The Gradio UI provides controls for:
-- LLM model selection
-- Image generation model selection
-- Theme/style for generated artwork
-- Max tokens for LLM responses
-- Debug output toggle
 
 ---
 
@@ -370,103 +199,59 @@ The Gradio UI provides controls for:
 
 ```
 Colossal_Cave/
-├── LMM_adventure_Dec_7_25.py    # Main LLM-driven adventure game
-├── Colossal_Cave_Aug_2_25.py    # Classic adventure with video
-├── diffusion_manager.py         # Unified diffusion model interface
-├── complete_instruction.py      # Game help system
-├── adventure_dataRA.json        # Game data (rooms, items, NPCs)
+├── LMM_adventure_Feb_15_26.py  # Main LLM-driven adventure (MLX-LM + MFLUX)
+├── mflux_image_gen.py          # MFLUX image generator (FLUX.1 + FLUX.2)
+├── Colossal_Cave_Aug_2_25.py   # Classic adventure with video
+├── diffusion_manager.py        # Legacy diffusion interface (CUDA-based)
+├── complete_instruction.py     # Game help system
 │
-├── # Download helpers
-├── downloader_ltx.py            # Download LTX-Video model
-├── miniflux_download.py         # Download Pyramid-Flow-Miniflux
-├── huggingfacesnapshotpyramid.py # Download Pyramid-Flow-SD3
+├── Generated_Art/              # AI-generated images
+├── Adventure_Game_Saved/       # Saved games
 │
-├── # Test scripts
-├── Z_image_TestCode.py          # Test Z-Image-Turbo
-├── flux1_test_mini_dec_19_24.py # Test FLUX model
-├── vidiofromtext_pyramid_Dec_25_24.py # Pyramid Flow video UI
-├── generate_1_5B_gradio_lightning_8_19_25.py # Wan2.2 video UI
-│
-├── # Video generation libraries (do not modify)
-├── Pyramid_Flow/                # Pyramid Flow model code
-├── LTX-Video/                   # LTX Video model code
-├── wan/                         # Wan2.2 model code
-│
-├── # Generated content
-├── Generated_Art/               # AI-generated images
-├── Adventure_Art/               # Pre-generated game art
-├── Adventure_Game_Saved/        # Saved games
-├── temp_videos/                 # Generated videos
-│
-├── # Configuration
-├── requirements.txt             # Python dependencies
-├── .env.example                 # Environment variables template
-├── .gitignore                   # Git ignore rules
-└── README.md                    # This file
+├── .venv/                      # Python virtual environment
+├── requirements.txt            # Python dependencies
+└── README.md                   # This file
 ```
 
 ---
 
 ## Troubleshooting
 
-### Ollama Issues
+### Import Errors
 
-**"Ollama not running"**
+**"numpy.dtype size changed"** or **"_ARRAY_API not found"**
 ```bash
-# Start Ollama service
-ollama serve
-
-# Or check if it's already running
-curl http://localhost:11434/api/tags
+# Upgrade numpy-dependent packages
+pip install --upgrade numpy scipy scikit-learn pandas
 ```
 
-**"Model not found"**
+**"ModuleNotFoundError"**
 ```bash
-# List installed models
-ollama list
-
-# Pull the required model
-ollama pull llama3.1:8b
+source .venv/bin/activate
+pip install mlx-lm mflux gradio
 ```
-
-### GPU/CUDA Issues
-
-**"CUDA out of memory"**
-- Use a smaller model (e.g., llama3.2:3b instead of llama3.1:8b)
-- Close other GPU-using applications
-- Reduce image resolution in settings
-- Enable CPU offloading in the code
-
-**"MPS not available" (Mac)**
-- Update to macOS 12.3 or later
-- Update PyTorch: `pip install --upgrade torch`
 
 ### Image Generation Issues
 
 **"Model not found"**
-- Check that models are in the correct directory
-- Verify with: `ls /data/Diffusion_Models/` or equivalent
+- Check that FLUX models are in `~/Diffusion_Models/`
+- Directory names should start with `FLUX` (e.g., `FLUX2-klein-9B-mlx-8bit`)
 
-**"Low quality images"**
-- Try Z-Image-Turbo or FLUX for better quality
-- Increase inference steps in settings
+**Images are slow**
+- Use FLUX.2-klein-9B (4 steps) instead of FLUX.1-dev (20 steps)
+- Reduce resolution in `mflux_image_gen.py` (default: 768x768)
 
-### Import Errors
+### LLM Issues
 
-**"ModuleNotFoundError"**
-```bash
-# Ensure virtual environment is activated
-source .venv/bin/activate
-
-# Reinstall dependencies
-pip install -r requirements.txt
-```
+**"No MLX models found"**
+- Place MLX model directories in `~/MLX_Models/`
+- Each model directory must contain a `config.json`
 
 ---
 
 ## Tips for Best Experience
 
-1. **Start with a good LLM:** llama3.1:8b offers a great balance for gameplay
+1. **Start with a good LLM:** Qwen3-30B-A3B-8bit is an excellent balance of quality and speed
 2. **Generate a World Bible first:** This creates consistent story, NPCs, and objectives
 3. **Use themes:** The preset themes provide better artwork and narrative consistency
 4. **Save often:** Use the save game feature before dangerous encounters
@@ -483,20 +268,9 @@ MIT License
 ## Acknowledgments
 
 - Inspired by the original "Colossal Cave Adventure" by Will Crowther and Don Woods
-- Uses [Ollama](https://ollama.ai) for local LLM inference
-- Image generation powered by [Diffusers](https://huggingface.co/docs/diffusers)
-- Video generation using Pyramid-Flow and Wan2.2 models
+- LLM inference powered by [MLX-LM](https://github.com/ml-explore/mlx-lm)
+- Image generation powered by [MFLUX](https://github.com/filipstrand/mflux) (FLUX on Apple Silicon)
 - Web UI built with [Gradio](https://gradio.app)
-
----
-
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
 
 ---
 
