@@ -1,75 +1,98 @@
-# Colossal Cave Adventure with Local LLM
+# Colossal Cave Adventure with Local LLMs
 
-An interactive text-based adventure game inspired by the classic "Colossal Cave Adventure", enhanced with local Language Models (LLMs) for natural language processing and FLUX image generation for dynamic AI-generated artwork — all running natively on Apple Silicon via MLX.
+Two interactive text-based adventure games inspired by the classic "Colossal Cave Adventure", enhanced with local Language Models for natural language processing and AI-generated artwork.
 
 **Author:** Jonathan M. Rothberg (@jmrothberg)
 
 ---
 
-## Features
+## Two Adventure Games
 
-- **Two Adventure Games:**
-  - `LMM_adventure_Feb_15_26.py` - Fully LLM-driven adventure where the AI acts as game master (MLX-LM + MFLUX)
-  - `Colossal_Cave_Aug_2_25.py` - Classic adventure with AI-generated images and videos
+### 1. LMM Adventure (LLM-Driven) — `LMM_adventure_Feb_15_26.py`
 
-- **AI-Generated Art:** MFLUX (FLUX on Apple Silicon) creates room artwork and item illustrations on demand
-- **Natural Language Commands:** Talk naturally with NPCs and issue commands in plain English
-- **Local LLM Integration:** Uses MLX-LM for fully private, local AI inference on Apple Silicon
-- **Web Interface:** Gradio-based UI for easy gameplay
-- **Classic Gameplay:** Explore caverns, collect treasures, solve puzzles, battle monsters
+A fully procedural adventure where the LLM acts as game master. The AI dynamically creates the entire world — rooms, NPCs, items, puzzles, and narrative — based on a "World Bible" theme you choose or create.
+
+- **LLM:** [MLX-LM](https://github.com/ml-explore/mlx-lm) — runs local LLMs natively on Apple Silicon via MLX
+- **Images:** [MFLUX](https://github.com/filipstrand/mflux) — FLUX image generation on Apple Silicon via MLX
+- **Platform:** Apple Silicon Mac only (M1/M2/M3/M4)
+- **UI:** Gradio web interface
+- Preset themes: Tolkien, Star Wars, Cyberpunk, and more
+- AI-generated artwork for every room and important item
+
+### 2. Colossal Cave Classic — `Colossal_Cave_Aug_2_25.py`
+
+A traditional adventure with pre-defined rooms, NPCs, monsters, riddles, and treasures loaded from `adventure_dataRA.json`. Uses LLMs for natural language command parsing and NPC conversations, plus AI-generated images and videos.
+
+- **LLM:** [Ollama](https://ollama.com) — local LLM server for command parsing and NPC dialogue
+- **Images:** [Diffusers](https://github.com/huggingface/diffusers) (PyTorch) — supports FLUX, Stable Diffusion 3.5, SDXL
+- **Video:** [Pyramid Flow](https://github.com/jy0205/Pyramid-Flow) — AI-generated room videos (Mac MPS or Linux CUDA)
+- **Command parsing:** [sentence-transformers](https://www.sbert.net/) for vector embeddings + fuzzy matching
+- **Platform:** Apple Silicon Mac (MPS) or Linux with NVIDIA GPU (CUDA); supports multi-GPU configurations
+- **UI:** Gradio web interface
+- 25+ pre-defined cave rooms with monsters, treasures, and riddles
+- NPC trading, combat, and puzzle-solving
 
 ---
 
-## Quick Start (Apple Silicon Mac)
+## Quick Start
 
-### 1. Clone the Repository
+### Clone the Repository
 
 ```bash
 git clone https://github.com/jmrothberg/Collosol-Cave-with-local-LLM.git
 cd Collosol-Cave-with-local-LLM
-```
-
-### 2. Create Virtual Environment
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Install Dependencies
+### Option A: LMM Adventure (Apple Silicon Mac)
 
 ```bash
+# Install dependencies
 pip install mlx-lm mflux gradio
-```
 
-### 4. Download Models
-
-**LLM models** (place in `~/MLX_Models/`):
-```bash
-# Example: download a quantized Qwen model
+# Download an LLM (place in ~/MLX_Models/)
 huggingface-cli download Qwen/Qwen3-30B-A3B-8bit --local-dir ~/MLX_Models/Qwen3-30B-A3B-8bit
-```
 
-**Image generation model** (place in `~/Diffusion_Models/`):
-```bash
-# FLUX.2-klein-9B MLX 8-bit (recommended — fast, 4-step distilled)
+# Download FLUX image model (place in ~/Diffusion_Models/)
 huggingface-cli download AITRADER/FLUX2-klein-9B-mlx-8bit --local-dir ~/Diffusion_Models/FLUX2-klein-9B-mlx-8bit
-```
 
-### 5. Run the Game
-
-```bash
+# Run
 python LMM_adventure_Feb_15_26.py
 ```
+
+### Option B: Colossal Cave Classic (Mac or Linux)
+
+```bash
+# Install Ollama (https://ollama.com)
+# Then pull a model:
+ollama pull llama3.1
+
+# Install Python dependencies
+pip install torch diffusers sentence-transformers fuzzywuzzy gradio ollama Pillow
+
+# Run
+python Colossal_Cave_Aug_2_25.py
+```
+
+For video generation, also install Pyramid Flow (see Pyramid-Flow/ directory).
 
 ---
 
 ## System Requirements
 
+### LMM Adventure (MLX-LM + MFLUX)
 - **Hardware:** Apple Silicon Mac (M1/M2/M3/M4)
 - **RAM:** 32GB+ unified memory recommended (16GB minimum)
 - **Python:** 3.10 or 3.11
 - **Storage:** ~20GB for FLUX.2-klein-9B-mlx-8bit, plus LLM models
+
+### Colossal Cave Classic (Ollama + Diffusers)
+- **Hardware:** Apple Silicon Mac (MPS) or Linux with NVIDIA GPU (CUDA)
+- **RAM:** 16GB+ recommended
+- **Python:** 3.10 or 3.11
+- **Ollama:** Required for LLM inference
+- **Video generation:** PyTorch 2.9.0+ on Mac; CUDA on Linux
 
 ---
 
@@ -128,9 +151,9 @@ The game looks for FLUX models in `~/Diffusion_Models/` and lists any directory 
 
 ---
 
-## Running the Game
+## Running the Games
 
-### LMM Adventure (LLM-Driven) — Main Game
+### LMM Adventure
 
 ```bash
 python LMM_adventure_Feb_15_26.py
@@ -142,29 +165,28 @@ Features:
 - The LLM dynamically creates NPCs, locations, puzzles, and narrative
 - AI-generated artwork for every room and important item
 
-### Command Line Options
+Command line options:
 
 ```bash
-# Specify LLM model
-python LMM_adventure_Feb_15_26.py --model Qwen3-30B-A3B-8bit
-
-# Disable image generation
-python LMM_adventure_Feb_15_26.py --no-images
-
-# Run in CLI mode (no Gradio UI)
-python LMM_adventure_Feb_15_26.py --cli
-
-# Set player name
-python LMM_adventure_Feb_15_26.py --player "Gandalf"
+python LMM_adventure_Feb_15_26.py --model Qwen3-30B-A3B-8bit   # Specify LLM model
+python LMM_adventure_Feb_15_26.py --no-images                    # Disable image generation
+python LMM_adventure_Feb_15_26.py --cli                          # CLI mode (no Gradio UI)
+python LMM_adventure_Feb_15_26.py --player "Gandalf"             # Set player name
 ```
 
-### Colossal Cave (Classic)
-
-The original-style adventure with enhanced AI features:
+### Colossal Cave Classic
 
 ```bash
 python Colossal_Cave_Aug_2_25.py
 ```
+
+Features:
+- Pre-defined cave with 25+ rooms, monsters, treasures, and riddles (from `adventure_dataRA.json`)
+- Ollama LLM parses natural language commands and drives NPC conversations
+- Multiple diffuser models: FLUX, Stable Diffusion 3.5, SDXL
+- Optional AI-generated video for each room via Pyramid Flow
+- NPC trading, combat, riddle-solving, and magic items
+- Supports Mac MPS and Linux CUDA (including multi-GPU setups)
 
 ---
 
@@ -199,18 +221,22 @@ python Colossal_Cave_Aug_2_25.py
 
 ```
 Colossal_Cave/
-├── LMM_adventure_Feb_15_26.py  # Main LLM-driven adventure (MLX-LM + MFLUX)
-├── mflux_image_gen.py          # MFLUX image generator (FLUX.1 + FLUX.2)
-├── Colossal_Cave_Aug_2_25.py   # Classic adventure with video
-├── diffusion_manager.py        # Legacy diffusion interface (CUDA-based)
-├── complete_instruction.py     # Game help system
+├── LMM_adventure_Feb_15_26.py      # LLM-driven adventure (MLX-LM + MFLUX)
+├── mflux_image_gen.py              # MFLUX image generator (FLUX.1 + FLUX.2)
+├── Colossal_Cave_Aug_2_25.py       # Classic adventure (Ollama + Diffusers + Video)
+├── adventure_dataRA.json           # Room/NPC/monster/item data for Classic game
+├── data_generator_adventure_Aug_2_25.py  # Generates adventure_dataRA.json
+├── diffusion_manager.py            # Diffusers image interface (for Classic game)
+├── complete_instruction.py         # Game help system
 │
-├── Generated_Art/              # AI-generated images
-├── Adventure_Game_Saved/       # Saved games
+├── Pyramid-Flow/                   # Pyramid Flow video generation module
+├── pyramid-flow-miniflux/          # Pyramid Flow model weights (Mac)
+├── Generated_Art/                  # AI-generated images
+├── Adventure_Game_Saved/           # Saved games
 │
-├── .venv/                      # Python virtual environment
-├── requirements.txt            # Python dependencies
-└── README.md                   # This file
+├── .venv/                          # Python virtual environment
+├── requirements.txt                # Python dependencies
+└── README.md                       # This file
 ```
 
 ---
@@ -268,8 +294,8 @@ MIT License
 ## Acknowledgments
 
 - Inspired by the original "Colossal Cave Adventure" by Will Crowther and Don Woods
-- LLM inference powered by [MLX-LM](https://github.com/ml-explore/mlx-lm)
-- Image generation powered by [MFLUX](https://github.com/filipstrand/mflux) (FLUX on Apple Silicon)
+- LMM Adventure: [MLX-LM](https://github.com/ml-explore/mlx-lm) for LLM inference, [MFLUX](https://github.com/filipstrand/mflux) for image generation
+- Classic Game: [Ollama](https://ollama.com) for LLM inference, [Diffusers](https://github.com/huggingface/diffusers) for image generation, [Pyramid Flow](https://github.com/jy0205/Pyramid-Flow) for video generation
 - Web UI built with [Gradio](https://gradio.app)
 
 ---
