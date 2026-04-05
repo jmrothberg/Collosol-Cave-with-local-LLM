@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Transformers.js LLM compare (test harness)</title>
+  <!--
+    LLM: Use the jsDelivr +esm endpoint for @huggingface/transformers. It bundles its own onnxruntime-web
+    and onnxruntime-common via jsDelivr's ESM rewriting — no import map needed, no bare specifier errors.
+  -->
+  <style>
+    :root {
+      --bg: #12121a;
+      --panel: #1c1c28;
+      --border: #2a2a3d;
+      --text: #e8e8ef;
+      --muted: #9898a8;
+      --accent: #6eb5ff;
+      --ok: #7dffb2;
+      --warn: #ffc46e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, Segoe UI, Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0 0 8px; font-size: 1.15rem; font-weight: 600; }
+    header p { margin: 0; color: var(--muted); font-size: 0.85rem; max-width: 900px; }
+    main { padding: 16px 20px 32px; max-width: 1400px; margin: 0 auto; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+    input[type="text"], textarea, select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    textarea { min-height: 72px; resize: vertical; }
+    button {
+      background: var(--border);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary { background: #2a3f5c; border-color: var(--accent); }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel);
+    }
+    .panel h2 { margin: 0 0 10px; font-size: 0.95rem; color: var(--accent); }
+    .status { font-size: 12px; color: var(--muted); min-height: 1.2em; margin-top: 6px; }
+    .status.loading { color: var(--warn); }
+    .status.err { color: #ff8a8a; }
+    .out {
+      margin-top: 10px;
+      padding: 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      min-height: 120px;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .meta { font-size: 11px; color: var(--muted); margin-top: 8px; }
+    .weights-source {
+      font-size: 11px;
+      margin: -4px 0 8px;
+      line-height: 1.35;
+      min-height: 1.35em;
+    }
+    .weights-source.local { color: var(--ok); }
+    .weights-source.remote { color: var(--muted); }
+    #gpu-banner {
+      padding: 10px 20px;
+      background: #3a2a1a;
+      color: var(--warn);
+      font-size: 13px;
+      display: none;
+    }
+    #gpu-banner.visible { display: block; }
+    select.model-select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    /* Local catalog entries: bold in Chrome/Edge select dropdowns (datalist cannot do this). */
+    select.model-select option.model-opt-local {
+      font-weight: 700;
+    }
+    select.model-select optgroup {
+      font-weight: 600;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div id="gpu-banner"></div>
+  <header>
+    <h1>Transformers.js browser test — two-model compare. v 1.0 Jonathan Rothberg 2026</h1>
+    <p>
+      In-browser <strong>Transformers.js</strong> + ONNX Runtime Web (WebGPU when available); compare two Hub models side by side.<br>
+      Default pair: <code>onnx-community/gemma-4-E2B-it-ONNX</code> vs <code>onnx-community/gemma-4-E4B-it-ONNX</code>.<br>
+      <strong>Qwen3.5 text:</strong> <code>onnx-community/Qwen3.5-0.8B-Text-ONNX</code> — not <code>Qwen3.5-0.8B-ONNX</code> (multimodal).<br>
+      Put ONNX under <code>transformersjs-assets/&lt;model_id&gt;/</code> at the site root for local loads; optional <code>_catalog.json</code> (see <code>scripts/refresh-onnx-transformers-catalog.mjs</code>) fills the dropdown with more ids.<br>
+      Otherwise weights load from the Hub. Details: <code>TEST_webLLM/README.md</code>.
+    </p>
+  </header>
+  <main>
+    <div class="row">
+      <div style="flex:1; min-width:200px">
+        <label for="model-a">Model A ID</label>
+        <select id="model-a" class="model-select" aria-describedby="model-catalog-note"></select>
+      </div>
+      <div style="flex:1; min-width:200px">
+        <label for="model-b">Model B ID</label>
+        <select id="model-b" class="model-select" aria-describedby="model-catalog-note"></select>
+      </div>
+    </div>
+    <p id="model-catalog-note" style="font-size:12px;color:var(--muted);margin:-4px 0 12px"></p>
+    <div class="row">
+      <button type="button" id="btn-load-a">Load model A</button>
+      <button type="button" id="btn-load-b">Load model B</button>
+      <button type="button" class="primary" id="btn-run-a">Run prompt on A</button>
+      <button type="button" class="primary" id="btn-run-b">Run prompt on B</button>
+    </div>
+
+    <div class="row" style="align-items:stretch">
+      <div style="flex:1; min-width:240px">
+        <label for="system">System (optional)</label>
+        <textarea id="system" placeholder="e.g. You help parse player commands for a text adventure. Reply with compact JSON only."></textarea>
+      </div>
+    </div>
+    <div class="row">
+      <div style="flex:1; min-width:240px">
+        <label for="user-prompt">User message</label>
+        <textarea id="user-prompt">Player typed: "open the chest". Room has a chest and a key. Output JSON: {"verb":"","object":"","target":""}</textarea>
+      </div>
+    </div>
+    <div class="row" style="align-items:flex-end">
+      <div style="width:160px; flex-shrink:0">
+        <label for="max-tokens">Max tokens (completion)</label>
+        <input type="number" id="max-tokens" min="1" max="16384" value="512" step="1"
+          title="Upper bound on new tokens per reply">
+      </div>
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+        <input type="checkbox" id="stream-chk" checked>
+        Stream tokens (recommended)
+      </label>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Model A output</h2>
+        <div class="weights-source" id="weights-source-a" aria-live="polite"></div>
+        <div class="status" id="status-a"></div>
+        <div class="out" id="out-a"></div>
+        <div class="meta" id="meta-a"></div>
+      </div>
+      <div class="panel">
+        <h2>Model B output</h2>
+        <div class="weights-source" id="weights-source-b" aria-live="polite"></div>
+        <div class="status" id="status-b"></div>
+        <div class="out" id="out-b"></div>
+        <div class="meta" id="meta-b"></div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    /**
+     * Transformers.js standalone compare page — not integrated with index.html / game.
+     * Uses ONNX models from the Hub (ONNX Runtime Web + optional WebGPU).
+     */
+    // LLM: Gemma 4 ONNX needs Gemma4ForConditionalGeneration in MODEL_TYPE_MAPPING — present from @huggingface/transformers 4.0.1+, not 4.0.0.
+    import { pipeline, TextStreamer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.1/+esm";
+
+    /** Curated ONNX text-generation models (expand as needed). */
+    const MODEL_CATALOG = [
+      // Qwen3.5 text-only (use this for small Qwen3.5 in browser). Avoid Qwen3.5-0.8B-ONNX without "Text" — that repo is multimodal (image-text-to-text).
+      "onnx-community/Qwen3.5-0.8B-Text-ONNX",
+      // Qwen3.5 2B: only onnx-community slug is Qwen3.5-2B-ONNX (no …-Text-ONNX yet); architecture is ForConditionalGeneration — try it; may use more RAM than 0.8B Text.
+      "onnx-community/Qwen3.5-2B-ONNX",
+      "onnx-community/Qwen3-0.6B-ONNX",
+      "onnx-community/Qwen2.5-0.5B-Instruct",
+      "onnx-community/Qwen2.5-Coder-0.5B-Instruct",
+      "onnx-community/Qwen2.5-1.5B-Instruct",
+      "onnx-community/Qwen2.5-Coder-1.5B-Instruct",
+      "onnx-community/Llama-3.2-1B-Instruct",
+      // Gemma 4 instruct (onnx-community ONNX). E2B ≈2B / E4B ≈4B — may need more RAM than Qwen2.5 0.5B.
+      "onnx-community/gemma-4-E2B-it-ONNX",
+      "onnx-community/gemma-4-E4B-it-ONNX",
+    ];
+
+    /**
+     * LLM: Local HF ONNX mirrors live at site/repo root `transformersjs-assets/` (parallel to
+     * `webllm-assets/` for webllm-compare-test). Relative path from /TEST_webLLM/ is wrong — use siteRootBaseUrl().
+     */
+    /** @type {string} Symlink this folder at repo root to your Hugging Face–layout download directory. */
+    const LOCAL_WEIGHTS_DIR = "transformersjs-assets/";
+
+    /**
+     * Site root as a real URL (works for http(s) and file://). Do not use new URL(path, origin) on
+     * file: pages — location.origin is the string "null" and throws, so the model list never fills.
+     */
+    function siteRootBaseUrl() {
+      const u = new URL(window.location.href);
+      let path = u.pathname;
+      const marker = "/TEST_webLLM/";
+      const i = path.indexOf(marker);
+      if (i >= 0) {
+        path = path.slice(0, i) + "/";
+      } else {
+        path = path.replace(/[^/]*$/, "");
+      }
+      u.pathname = path;
+      u.hash = "";
+      u.search = "";
+      return u;
+    }
+
+    function modelsDirUrl() {
+      const u = new URL(LOCAL_WEIGHTS_DIR, siteRootBaseUrl());
+      // LLM: base must be a directory URL — if pathname lacks trailing /, new URL("id/config.json", base) drops the last segment (wrong Hub path).
+      if (!u.pathname.endsWith("/")) {
+        u.pathname += "/";
+      }
+      return u;
+    }
+
+    /** LLM: ONNX repos vary file names; try a few so "local" means at least one weight shard is on disk (not just config.json from minimal setup). */
+    const LOCAL_WEIGHT_SENTINELS = [
+      "onnx/model_q4.onnx",
+      "onnx/model_q4f16.onnx",
+      "onnx/decoder_model_merged_q4.onnx",
+      "onnx/decoder_model_merged_q4f16.onnx",
+    ];
+
+    async function probeAssetExists(absUrl) {
+      try {
+        let r = await fetch(absUrl, { method: "HEAD", cache: "no-cache" });
+        if (r.ok) return true;
+        if (r.status === 405 || r.status === 501) {
+          r = await fetch(absUrl, { method: "GET", cache: "no-cache", headers: { Range: "bytes=0-0" } });
+          return r.ok;
+        }
+      } catch (err) {
+        /* file://, CORS, or offline */
+      }
+      return false;
+    }
+
+    async function hasLocalOnnxWeights(modelId) {
+      const base = modelsDirUrl();
+      for (const rel of LOCAL_WEIGHT_SENTINELS) {
+        const href = new URL(modelId + "/" + rel, base).href;
+        if (await probeAssetExists(href)) return true;
+      }
+      return false;
+    }
+
+    let pristineIds = [...MODEL_CATALOG];
+    /** @type {Map<string, 'local'|'remote'>} */
+    const resolutionMemo = new Map();
+
+    /**
+     * LLM: Merge transformersjs-assets/_catalog.json when present (same idea as WebLLM optional extras).
+     * Always try fetch — on GitHub Pages the file 404s and we keep the built-in list only.
+     */
+    async function loadExtendedCatalog() {
+      try {
+        const u = new URL("_catalog.json", modelsDirUrl()).href;
+        const r = await fetch(u, { cache: "no-cache" });
+        if (!r.ok) return;
+        const j = await r.json();
+        const extra = Array.isArray(j.model_ids) ? j.model_ids : [];
+        const seen = new Set(pristineIds);
+        for (const id of extra) {
+          if (typeof id === "string" && id.trim().length > 0 && !seen.has(id)) {
+            seen.add(id);
+            pristineIds.push(id);
+          }
+        }
+        pristineIds.sort();
+      } catch (err) {
+        console.warn("[Transformers.js compare] Optional _catalog.json not loaded", err);
+      }
+    }
+
+    /**
+     * LLM: Local only if config.json exists AND at least one known ONNX sentinel is present — otherwise Transformers.js
+     * would still pull missing shards from the Hub while the UI said LOCAL (confusing). Same probe pattern as
+     * webllm-compare-test for http(s); GitHub Pages → remote.
+     */
+    async function resolveModelEntry(modelId) {
+      if (resolutionMemo.has(modelId)) return resolutionMemo.get(modelId);
+      try {
+        const cfgUrl = new URL(modelId + "/config.json", modelsDirUrl()).href;
+        const r = await fetch(cfgUrl, { cache: "no-cache" });
+        if (!r.ok) {
+          resolutionMemo.set(modelId, "remote");
+          return "remote";
+        }
+        const weightsOk = await hasLocalOnnxWeights(modelId);
+        const kind = weightsOk ? "local" : "remote";
+        resolutionMemo.set(modelId, kind);
+        return kind;
+      } catch (err) {
+        /* expected on missing folders */
+      }
+      resolutionMemo.set(modelId, "remote");
+      return "remote";
+    }
+
+    function sourceLabels(kind) {
+      if (kind === "local") {
+        return {
+          short: "LOCAL",
+          status: "local transformersjs-assets/ (this origin — same path segments as the Hub repo id)",
+          panel: "Weights: LOCAL — transformersjs-assets/ on this server (ONNX)",
+        };
+      }
+      return {
+        short: "NET",
+        status: "network — Hugging Face Hub (no folder on this site)",
+        panel: "Weights: NETWORK — Hugging Face Hub (typical on GitHub Pages)",
+      };
+    }
+
+    /** LLM: align post-run meta line with webllm-compare-test (Weights | backend | incl. load | time | tokens | tok/s). */
+    function transformersBackendSuffix(backendLabel) {
+      return " | backend " + backendLabel;
+    }
+
+    function encodeTokenLen(enc) {
+      if (enc == null) return "?";
+      if (Array.isArray(enc)) return enc.length;
+      if (typeof enc.length === "number") return enc.length;
+      if (enc.data && typeof enc.data.length === "number") return enc.data.length;
+      return "?";
+    }
+
+    /**
+     * LLM: best-effort prompt/completion token counts (Transformers.js has no OpenAI-style usage object).
+     * Completion should be assistant-only text (stream path); matches WebLLM-style reporting.
+     */
+    async function countPromptCompletionTokens(gen, messages, completionText) {
+      const tok = gen && gen.tokenizer;
+      if (!tok || typeof tok.encode !== "function") {
+        return { prompt_tokens: "?", completion_tokens: "?" };
+      }
+      try {
+        let promptStr;
+        if (typeof tok.apply_chat_template === "function") {
+          promptStr = await tok.apply_chat_template(messages, { tokenize: false, add_generation_prompt: true });
+        } else {
+          promptStr = messages.map((m) => m.role + ": " + m.content).join("\n\n");
+        }
+        const pEnc = await tok.encode(promptStr);
+        const cEnc = await tok.encode(completionText);
+        return {
+          prompt_tokens: encodeTokenLen(pEnc),
+          completion_tokens: encodeTokenLen(cEnc),
+        };
+      } catch (e) {
+        console.warn("[countPromptCompletionTokens]", e);
+        return { prompt_tokens: "?", completion_tokens: "?" };
+      }
+    }
+
+    function setWeightsSourceHint(side, kind, modelId) {
+      const el = document.getElementById("weights-source-" + side);
+      if (!el) return;
+      el.classList.remove("local", "remote");
+      el.classList.add(kind === "local" ? "local" : "remote");
+      const { panel } = sourceLabels(kind);
+      el.textContent = panel + " — model_id " + modelId;
+    }
+
+    function clearWeightsSourceHint(side) {
+      const el = document.getElementById("weights-source-" + side);
+      if (!el) return;
+      el.textContent = "";
+      el.classList.remove("local", "remote");
+    }
+
+    const DEFAULT_MODEL_A = "onnx-community/gemma-4-E2B-it-ONNX";
+    const DEFAULT_MODEL_B = "onnx-community/gemma-4-E4B-it-ONNX";
+
+    /** LLM: one probe per catalog model at startup — fills resolutionMemo; splits UI into local vs network. */
+    async function scanAllModelsForLocal() {
+      const batch = 8;
+      for (let i = 0; i < pristineIds.length; i += batch) {
+        const chunk = pristineIds.slice(i, i + batch);
+        await Promise.all(chunk.map((id) => resolveModelEntry(id)));
+      }
+    }
+
+    function fillModelSelect(selectId, localIdsSorted, remoteIdsSorted, preferredValue) {
+      const sel = document.getElementById(selectId);
+      if (!sel) return;
+      sel.innerHTML = "";
+
+      const ogLoc = document.createElement("optgroup");
+      ogLoc.label = "Local (fast) — transformersjs-assets";
+      if (localIdsSorted.length === 0) {
+        const o = document.createElement("option");
+        o.disabled = true;
+        o.value = "";
+        o.textContent = "None — weights not on this server";
+        ogLoc.appendChild(o);
+      } else {
+        for (const id of localIdsSorted) {
+          const o = document.createElement("option");
+          o.value = id;
+          o.textContent = id;
+          o.className = "model-opt-local";
+          o.setAttribute("style", "font-weight:700");
+          ogLoc.appendChild(o);
+        }
+      }
+
+      const ogRem = document.createElement("optgroup");
+      ogRem.label = "Catalog — first run uses network";
+      for (const id of remoteIdsSorted) {
+        const o = document.createElement("option");
+        o.value = id;
+        o.textContent = id;
+        o.className = "model-opt-remote";
+        ogRem.appendChild(o);
+      }
+
+      sel.appendChild(ogLoc);
+      sel.appendChild(ogRem);
+
+      const all = new Set([...localIdsSorted, ...remoteIdsSorted]);
+      if (preferredValue && all.has(preferredValue)) sel.value = preferredValue;
+      else if (remoteIdsSorted[0]) sel.value = remoteIdsSorted[0];
+      else if (localIdsSorted[0]) sel.value = localIdsSorted[0];
+    }
+
+    async function initModelSelectors() {
+      const note = document.getElementById("model-catalog-note");
+      const btnA = document.getElementById("btn-load-a");
+      const btnB = document.getElementById("btn-load-b");
+      const btnRunA = document.getElementById("btn-run-a");
+      const btnRunB = document.getElementById("btn-run-b");
+      const lockLoads = (on) => {
+        if (btnA) btnA.disabled = on;
+        if (btnB) btnB.disabled = on;
+        if (btnRunA) btnRunA.disabled = on;
+        if (btnRunB) btnRunB.disabled = on;
+      };
+      lockLoads(true);
+      try {
+        await loadExtendedCatalog();
+        resolutionMemo.clear();
+        if (note) note.textContent = "Checking transformersjs-assets/ for each catalog entry…";
+        await scanAllModelsForLocal();
+        const ids = [...pristineIds].sort();
+        const local = ids.filter((id) => resolutionMemo.get(id) === "local");
+        const remote = ids.filter((id) => resolutionMemo.get(id) !== "local");
+        fillModelSelect("model-a", local, remote, DEFAULT_MODEL_A);
+        fillModelSelect("model-b", local, remote, DEFAULT_MODEL_B);
+        if (note) {
+          note.textContent =
+            ids.length +
+            " models (curated ONNX list for Transformers.js " +
+            "4.0.0) — " +
+            local.length +
+            " on disk (bold). Put each Hub repo under transformersjs-assets/org/name/ or symlink transformersjs-assets to your download folder.";
+        }
+      } catch (err) {
+        console.error(err);
+        if (note) {
+          note.textContent =
+            "Model list setup failed: " +
+            (err && err.message ? err.message : String(err)) +
+            " — showing built-in catalog only.";
+        }
+        // LLM: Never leave <select>s empty; a throw (e.g. bad file:// base URL) skipped fillModelSelect.
+        const fb = [...MODEL_CATALOG].sort();
+        fillModelSelect("model-a", [], fb, DEFAULT_MODEL_A);
+        fillModelSelect("model-b", [], fb, DEFAULT_MODEL_B);
+      } finally {
+        lockLoads(false);
+      }
+    }
+
+    initModelSelectors();
+
+    function messageOf(err) {
+      if (err == null) return "Unknown error";
+      if (typeof err === "string") return err;
+      return err.message || String(err);
+    }
+
+    /** LLM: user-friendly copy when GPU RAM / WebGPU rejects a model (avoid raw stack / silent crash). */
+    function friendlyLoadError(err) {
+      const full = messageOf(err);
+      const m = full.toLowerCase();
+      if (
+        m.includes("memory") ||
+        m.includes("oom") ||
+        m.includes("out of memory") ||
+        m.includes("allocation") ||
+        m.includes("too large") ||
+        m.includes("insufficient") ||
+        m.includes("rangeerror") ||
+        m.includes("array buffer")
+      ) {
+        return (
+          "Model too large or not enough GPU/RAM for this device. Try a smaller model_id, unload the other slot, or reload the page. Details: " +
+          full
+        );
+      }
+      if (m.includes("device lost") || m.includes("devicelost") || m.includes("webgpu") || m.includes("gpu")) {
+        return "WebGPU/GPU error while loading. Try WASM (no WebGPU), a smaller model, or refresh. Details: " + full;
+      }
+      if (m.includes("abort")) {
+        return "Load aborted. Details: " + full;
+      }
+      return "Load failed: " + full;
+    }
+
+    function friendlyChatError(err) {
+      const full = messageOf(err);
+      const m = full.toLowerCase();
+      if (m.includes("memory") || m.includes("oom") || m.includes("device lost")) {
+        return "Generation failed (GPU/memory). Try a smaller model or reload. Details: " + full;
+      }
+      return "Generation failed: " + full;
+    }
+
+    const banner = document.getElementById("gpu-banner");
+    if (!navigator.gpu) {
+      banner.textContent =
+        "WebGPU not available. Transformers.js will use ONNX Runtime Web (e.g. WASM). For WebGPU, use a supported Chromium build and serve over http(s) (not file://) if modules fail.";
+      banner.classList.add("visible");
+    }
+
+    /** @type {Awaited<ReturnType<typeof pipeline>> | null} */
+    let pipeA = null;
+    /** @type {Awaited<ReturnType<typeof pipeline>> | null} */
+    let pipeB = null;
+    let loadedIdA = "";
+    let loadedIdB = "";
+    let backendA = "wasm";
+    let backendB = "wasm";
+
+    /** LLM: after failed load/reload, clear slot so the next attempt uses a fresh pipeline (best effort). */
+    async function resetPipelineSide(side) {
+      clearWeightsSourceHint(side);
+      if (side === "a") {
+        if (pipeA && typeof pipeA.dispose === "function") {
+          try {
+            await pipeA.dispose();
+          } catch (e) {
+            console.warn(e);
+          }
+        }
+        pipeA = null;
+        loadedIdA = "";
+        backendA = "wasm";
+      } else {
+        if (pipeB && typeof pipeB.dispose === "function") {
+          try {
+            await pipeB.dispose();
+          } catch (e) {
+            console.warn(e);
+          }
+        }
+        pipeB = null;
+        loadedIdB = "";
+        backendB = "wasm";
+      }
+    }
+
+    function setStatus(side, text, kind) {
+      const el = document.getElementById("status-" + side);
+      el.textContent = text;
+      el.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function setMeta(side, text) {
+      document.getElementById("meta-" + side).textContent = text;
+    }
+
+    function getMessages() {
+      const sys = document.getElementById("system").value.trim();
+      const user = document.getElementById("user-prompt").value;
+      const messages = [];
+      if (sys) messages.push({ role: "system", content: sys });
+      messages.push({ role: "user", content: user });
+      return messages;
+    }
+
+    // LLM: max completion tokens from UI; clamp 1–16384, default 512 if invalid.
+    function getMaxTokens() {
+      const el = document.getElementById("max-tokens");
+      const raw = parseInt(String(el && el.value != null ? el.value : "512"), 10);
+      const lo = 1;
+      const hi = 16384;
+      if (!Number.isFinite(raw)) return 512;
+      // LLM: integer — Transformers.js generation merge must not see floats/NaN as undefined-skipped pick() values.
+      return Math.trunc(Math.min(hi, Math.max(lo, raw)));
+    }
+
+    function applyEnvForKind(kind) {
+      if (kind === "local") {
+        env.allowLocalModels = true;
+        // LLM: must be a pathname (e.g. "/transformersjs-assets/"), NOT a full URL. Transformers.js
+        // get_file_metadata checks isValidUrl(localPath) and SKIPS local when localPath is an http URL,
+        // falling through to the Hub for metadata + files. A bare pathname makes fetch() resolve relative
+        // to the page origin (same HTTP server), so both metadata and file loading stay local.
+        env.localModelPath = modelsDirUrl().pathname;
+      } else {
+        // LLM: Remote Hub never use site /models/… — on GitHub Pages that fetch 404s every file (noisy, confusing). Skip local try; go straight to huggingface.co.
+        env.allowLocalModels = false;
+        env.localModelPath = "/models/";
+      }
+    }
+
+    function inferDevice() {
+      return navigator.gpu ? "webgpu" : "wasm";
+    }
+
+    /** @returns {Promise<Awaited<ReturnType<typeof pipeline>> | null>} */
+    async function ensurePipeline(side, modelId, initProgressCallback) {
+      if (!modelId) {
+        setStatus(side, "Pick a model_id from the list.", "err");
+        return null;
+      }
+      const existing = side === "a" ? pipeA : pipeB;
+      const loadedId = side === "a" ? loadedIdA : loadedIdB;
+
+      const kind = await resolveModelEntry(modelId);
+      const labels = sourceLabels(kind);
+      setWeightsSourceHint(side, kind, modelId);
+
+      if (existing && loadedId === modelId) {
+        setStatus(side, "Ready: " + modelId + " — " + labels.status, "");
+        return existing;
+      }
+
+      const wrapProgress = (report) => {
+        let line = "";
+        if (report && typeof report === "object") {
+          const s = report.status || "";
+          const f = report.file ? " " + report.file : "";
+          if (s === "progress" && typeof report.progress === "number") {
+            const pct = report.progress.toFixed(1);
+            const loaded = report.loaded ? (report.loaded / 1e6).toFixed(1) + " MB" : "";
+            const total = report.total ? " / " + (report.total / 1e6).toFixed(1) + " MB" : "";
+            line = "downloading" + f + "  " + pct + "%" + (loaded ? "  (" + loaded + total + ")" : "");
+          } else {
+            line = s + f;
+          }
+        } else {
+          line = String(report);
+        }
+        initProgressCallback({ text: "[" + labels.short + "] " + line });
+      };
+
+      setStatus(side, "Loading " + modelId + " — " + labels.status + "…", "loading");
+      try {
+        if (existing) {
+          await resetPipelineSide(side);
+        }
+        applyEnvForKind(kind);
+        let device = inferDevice();
+        const tryLoad = async (dev) =>
+          pipeline("text-generation", modelId, {
+            dtype: "q4",
+            device: dev,
+            progress_callback: wrapProgress,
+          });
+        let gen;
+        try {
+          gen = await tryLoad(device);
+        } catch (e1) {
+          if (device === "webgpu") {
+            wrapProgress({ status: "webgpu failed, retrying wasm", file: messageOf(e1) });
+            device = "wasm";
+            gen = await tryLoad("wasm");
+          } else {
+            throw e1;
+          }
+        }
+        if (side === "a") {
+          pipeA = gen;
+          loadedIdA = modelId;
+          backendA = device;
+        } else {
+          pipeB = gen;
+          loadedIdB = modelId;
+          backendB = device;
+        }
+        setStatus(side, "Ready: " + modelId + " — " + labels.status + " | backend " + device, "");
+        return gen;
+      } catch (e) {
+        console.error(e);
+        await resetPipelineSide(side);
+        setStatus(side, friendlyLoadError(e), "err");
+        return null;
+      }
+    }
+
+    function scrollOutToEnd(outEl) {
+      outEl.scrollTop = outEl.scrollHeight;
+    }
+
+    /** LLM: same shape as webllm-compare-test formatGenMeta(usage, genMs). */
+    function formatGenMeta(usage, genMs) {
+      const pt = usage && usage.prompt_tokens != null ? usage.prompt_tokens : "?";
+      const ct = usage && usage.completion_tokens != null ? usage.completion_tokens : "?";
+      const tps =
+        typeof ct === "number" &&
+        ct > 0 &&
+        genMs > 0
+          ? (ct / (genMs / 1000)).toFixed(1)
+          : null;
+      let u = " time " + genMs + " ms | tokens prompt " + pt + " / completion " + ct;
+      if (tps != null) u += " | " + tps + " tok/s";
+      return u;
+    }
+
+    async function runOne(side, modelId) {
+      const outEl = document.getElementById("out-" + side);
+      outEl.textContent = "";
+      setMeta(side, "");
+
+      const stream = document.getElementById("stream-chk").checked;
+      const maxTokens = getMaxTokens();
+      const messages = getMessages();
+
+      const initProgressCallback = (report) => {
+        setStatus(side, report.text, "loading");
+      };
+
+      const t0 = performance.now();
+      const gen = await ensurePipeline(side, modelId, initProgressCallback);
+      if (!gen) return;
+
+      try {
+        const tGenStart = performance.now();
+        const backendLabel = side === "a" ? backendA : backendB;
+
+        // LLM: Pass max_new_tokens both top-level and inside generation_config so each pipeline (A/B) applies
+        // the UI cap the same way; model.generate() merges explicit generation_config before flat kwargs.
+        const genOptsBase = {
+          max_new_tokens: maxTokens,
+          generation_config: { max_new_tokens: maxTokens },
+          temperature: 0.2,
+          do_sample: true,
+          // LLM: >1.0 discourages repeating n-grams (Qwen3.5 etc. looping after long runs)
+          repetition_penalty: 1.15,
+        };
+        if (stream) {
+          let text = "";
+          const streamer = new TextStreamer(gen.tokenizer, {
+            skip_prompt: true,
+            callback_function: (piece) => {
+              text += piece;
+              outEl.textContent = text;
+              scrollOutToEnd(outEl);
+            },
+          });
+          await gen(messages, {
+            ...genOptsBase,
+            streamer,
+          });
+          const genMs = Math.round(performance.now() - tGenStart);
+          const usage = await countPromptCompletionTokens(gen, messages, text);
+          const u = formatGenMeta(usage, genMs);
+          const srcTag = resolutionMemo.get(modelId) === "local" ? "local transformersjs-assets" : "network";
+          const wall = Math.round(performance.now() - t0);
+          setMeta(
+            side,
+            "Weights: " +
+              srcTag +
+              transformersBackendSuffix(backendLabel) +
+              " | max_new_tokens " +
+              maxTokens +
+              " (UI) | incl. load " +
+              wall +
+              " ms wall |" +
+              u
+          );
+        } else {
+          const result = await gen(messages, { ...genOptsBase });
+          const genMs = Math.round(performance.now() - tGenStart);
+          const c = result && result[0] ? result[0].generated_text : "";
+          outEl.textContent = c ?? "";
+          scrollOutToEnd(outEl);
+          const usage = await countPromptCompletionTokens(gen, messages, c || "");
+          const u = formatGenMeta(usage, genMs);
+          const srcTag = resolutionMemo.get(modelId) === "local" ? "local transformersjs-assets" : "network";
+          const wall = Math.round(performance.now() - t0);
+          setMeta(
+            side,
+            "Weights: " +
+              srcTag +
+              transformersBackendSuffix(backendLabel) +
+              " | max_new_tokens " +
+              maxTokens +
+              " (UI) | incl. load " +
+              wall +
+              " ms wall |" +
+              u
+          );
+        }
+      } catch (e) {
+        console.error(e);
+        setStatus(side, friendlyChatError(e), "err");
+      }
+    }
+
+    function busy(on) {
+      document.getElementById("btn-load-a").disabled = on;
+      document.getElementById("btn-load-b").disabled = on;
+      document.getElementById("btn-run-a").disabled = on;
+      document.getElementById("btn-run-b").disabled = on;
+    }
+
+    document.getElementById("btn-load-a").addEventListener("click", async () => {
+      busy(true);
+      try {
+        const id = document.getElementById("model-a").value.trim();
+        await ensurePipeline("a", id, (r) => setStatus("a", r.text, "loading"));
+      } catch (e) {
+        console.error(e);
+        await resetPipelineSide("a");
+        setStatus("a", friendlyLoadError(e), "err");
+      } finally {
+        busy(false);
+      }
+    });
+
+    document.getElementById("btn-load-b").addEventListener("click", async () => {
+      busy(true);
+      try {
+        const id = document.getElementById("model-b").value.trim();
+        await ensurePipeline("b", id, (r) => setStatus("b", r.text, "loading"));
+      } catch (e) {
+        console.error(e);
+        await resetPipelineSide("b");
+        setStatus("b", friendlyLoadError(e), "err");
+      } finally {
+        busy(false);
+      }
+    });
+
+    document.getElementById("btn-run-a").addEventListener("click", async () => {
+      const idA = document.getElementById("model-a").value.trim();
+      busy(true);
+      try {
+        await runOne("a", idA);
+      } catch (e) {
+        console.error(e);
+        setStatus("a", friendlyChatError(e), "err");
+      } finally {
+        busy(false);
+      }
+    });
+
+    document.getElementById("btn-run-b").addEventListener("click", async () => {
+      const idB = document.getElementById("model-b").value.trim();
+      busy(true);
+      try {
+        await runOne("b", idB);
+      } catch (e) {
+        console.error(e);
+        setStatus("b", friendlyChatError(e), "err");
+      } finally {
+        busy(false);
+      }
+    });
+  </script>
+</body>
+</html>

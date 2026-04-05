@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU text-to-image compare (ONNX / web-txt2img)</title>
+  <!--
+    LLM: web-txt2img is vendored under vendor/web-txt2img/ so Worker(host.js) is same-origin as this page;
+    browsers block cross-origin Worker URLs (cdn.jsdelivr.net) when the page is localhost.
+    Bare specifiers inside the worker still resolve via this document import map where supported.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.bundle.min.mjs",
+      "onnxruntime-web/webgpu": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.webgpu.bundle.min.mjs",
+      "onnxruntime-web/wasm": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.bundle.min.mjs",
+      "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.1/+esm",
+      "@xenova/transformers": "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm"
+    }
+  }
+  </script>
+  <style>
+    :root {
+      --bg: #12121a;
+      --panel: #1c1c28;
+      --border: #2a2a3d;
+      --text: #e8e8ef;
+      --muted: #9898a8;
+      --accent: #6eb5ff;
+      --ok: #7dffb2;
+      --warn: #ffc46e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, Segoe UI, Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0 0 8px; font-size: 1.15rem; font-weight: 600; }
+    header p { margin: 0; color: var(--muted); font-size: 0.85rem; max-width: 960px; }
+    main { padding: 16px 20px 32px; max-width: 1400px; margin: 0 auto; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+    input[type="text"], textarea, select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    textarea { min-height: 72px; resize: vertical; }
+    button {
+      background: var(--border);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary { background: #2a3f5c; border-color: var(--accent); }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel);
+    }
+    .panel h2 { margin: 0 0 10px; font-size: 0.95rem; color: var(--accent); }
+    .status { font-size: 12px; color: var(--muted); min-height: 1.2em; margin-top: 6px; }
+    .status.loading { color: var(--warn); }
+    .status.err { color: #ff8a8a; }
+    .img-wrap {
+      margin-top: 10px;
+      padding: 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      min-height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .img-wrap img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+      display: none;
+    }
+    .img-wrap img.visible { display: block; }
+    .meta { font-size: 11px; color: var(--muted); margin-top: 8px; }
+    .weights-source {
+      font-size: 11px;
+      margin: -4px 0 8px;
+      line-height: 1.35;
+      min-height: 1.35em;
+      color: var(--muted);
+    }
+    #gpu-banner {
+      padding: 10px 20px;
+      background: #3a2a1a;
+      color: var(--warn);
+      font-size: 13px;
+      display: none;
+    }
+    #gpu-banner.visible { display: block; }
+    select.model-select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .hint { font-size: 12px; color: var(--muted); margin: -4px 0 12px; }
+    a.dl { font-size: 12px; color: var(--accent); margin-top: 6px; display: inline-block; }
+  </style>
+</head>
+<body>
+  <div id="gpu-banner"></div>
+  <header>
+    <h1>WebGPU diffusion compare — two models (browser ONNX). v 1.0 Jonathan Rothberg 2026</h1>
+    <p>
+      <strong>No Python server:</strong> inference runs in your browser via <code>web-txt2img</code> (workers + ONNX Runtime Web / WebGPU).
+      Models: fast single-step <code>sd-turbo</code>, <code>janus-pro-1b</code> (Transformers.js ONNX on WebGPU), and <code>sd-1.5</code> (25-step, higher quality, ~2GB).<br>
+      Serve this file over <strong>http(s)</strong> (not <code>file://</code>) so workers, WASM, and Hub downloads work. First run downloads ~2.3GB per model (cached).<br>
+      <strong>VRAM:</strong> each column uses a <em>separate</em> worker; loading both models at once may exceed GPU memory — unload one side or use one model at a time.
+    </p>
+  </header>
+  <main>
+    <div class="row">
+      <div style="flex:1; min-width:200px">
+        <label for="model-a">Model A</label>
+        <select id="model-a" class="model-select" aria-describedby="catalog-note"></select>
+      </div>
+      <div style="flex:1; min-width:200px">
+        <label for="model-b">Model B</label>
+        <select id="model-b" class="model-select" aria-describedby="catalog-note"></select>
+      </div>
+    </div>
+    <p id="catalog-note" class="hint"></p>
+    <div class="row">
+      <button type="button" id="btn-load-a">Load model A</button>
+      <button type="button" id="btn-unload-a">Unload A</button>
+      <button type="button" id="btn-load-b">Load model B</button>
+      <button type="button" id="btn-unload-b">Unload B</button>
+      <button type="button" class="primary" id="btn-run-a">Generate on A</button>
+      <button type="button" class="primary" id="btn-run-b">Generate on B</button>
+    </div>
+
+    <div class="row">
+      <div style="flex:1; min-width:240px">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt">A cozy stone chamber in an underground cave, torch light, fantasy adventure game screenshot</textarea>
+      </div>
+    </div>
+    <div class="row" style="align-items:flex-end">
+      <div style="width:180px; flex-shrink:0">
+        <label for="seed">Seed (SD-Turbo &amp; SD 1.5; Janus ignores)</label>
+        <input type="number" id="seed" value="42" step="1" title="Integer seed for sd-turbo / sd-1.5">
+      </div>
+      <div style="width:120px; flex-shrink:0">
+        <label for="steps">Steps (SD 1.5 only)</label>
+        <select id="steps">
+          <option value="20">20</option>
+          <option value="25" selected>25</option>
+        </select>
+      </div>
+      <div style="width:140px; flex-shrink:0">
+        <label for="cfg-scale">Guidance scale (SD 1.5)</label>
+        <input type="number" id="cfg-scale" value="7.5" step="0.5" min="1" max="20" title="CFG scale for SD 1.5">
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Model A output</h2>
+        <div class="weights-source" id="weights-a" aria-live="polite"></div>
+        <div class="status" id="status-a"></div>
+        <div class="img-wrap" id="img-wrap-a">
+          <img id="img-a" alt="Model A output" width="512" height="512" />
+        </div>
+        <a class="dl" id="dl-a" href="#" download="compare-a.png" style="display:none">Download PNG</a>
+        <div class="meta" id="meta-a"></div>
+      </div>
+      <div class="panel">
+        <h2>Model B output</h2>
+        <div class="weights-source" id="weights-b" aria-live="polite"></div>
+        <div class="status" id="status-b"></div>
+        <div class="img-wrap" id="img-wrap-b">
+          <img id="img-b" alt="Model B output" width="512" height="512" />
+        </div>
+        <a class="dl" id="dl-b" href="#" download="compare-b.png" style="display:none">Download PNG</a>
+        <div class="meta" id="meta-b"></div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    /**
+     * LLM: Standalone compare harness — local vendor/web-txt2img + import map for worker bare specifiers.
+     * Two Txt2ImgWorkerClient instances so each column can hold a different loaded model
+     * (host.js keeps a single loadedModel per worker).
+     */
+    import { Txt2ImgWorkerClient } from "./vendor/web-txt2img/index.js";
+
+    /** Curated ids from web-txt2img registry — append here when the library adds models. */
+    const MODEL_CATALOG = [
+      { id: "sd-turbo", label: "sd-turbo — SD-Turbo ONNX (WebGPU / wasm fallback)" },
+      { id: "janus-pro-1b", label: "janus-pro-1b — Janus-Pro-1B ONNX (WebGPU only)" },
+      { id: "sd-1.5", label: "sd-1.5 — SD 1.5 multi-step 25 steps (MS WebNN ONNX, ~2GB)" },
+    ];
+
+    const DEFAULT_A = "sd-turbo";
+    const DEFAULT_B = "janus-pro-1b";
+
+    const $ = (id) => document.getElementById(id);
+
+    function setStatus(side, text, cls) {
+      const el = $(`status-${side}`);
+      if (!el) return;
+      el.textContent = text || "";
+      el.classList.remove("loading", "err");
+      if (cls) el.classList.add(cls);
+    }
+
+    function setWeightsHint(side, modelId, loaded, backend) {
+      const el = $(`weights-${side}`);
+      if (!el) return;
+      if (!modelId) {
+        el.textContent = "";
+        return;
+      }
+      const net = "Weights download from Hugging Face (cached in browser)";
+      el.textContent = loaded
+        ? `${net} — loaded: ${modelId}${backend ? ` (${backend})` : ""}`
+        : `${net} — not loaded: ${modelId}`;
+    }
+
+    function showGpuBanner(msg) {
+      const b = $("gpu-banner");
+      if (!b) return;
+      b.textContent = msg;
+      b.classList.add("visible");
+    }
+
+    function fillSelect(selId, preferred) {
+      const sel = $(selId);
+      if (!sel) return;
+      sel.innerHTML = "";
+      for (const m of MODEL_CATALOG) {
+        const o = document.createElement("option");
+        o.value = m.id;
+        o.textContent = m.label;
+        sel.appendChild(o);
+      }
+      if (MODEL_CATALOG.some((x) => x.id === preferred)) sel.value = preferred;
+    }
+
+    function backendPreferenceFor(modelId) {
+      return modelId === "janus-pro-1b" ? ["webgpu"] : ["webgpu", "wasm"];
+    }
+
+    function setImage(side, blob, timeMs) {
+      const img = $(`img-${side}`);
+      const dl = $(`dl-${side}`);
+      if (!img) return;
+      const prev = img.dataset.objUrl;
+      if (prev) URL.revokeObjectURL(prev);
+      const url = URL.createObjectURL(blob);
+      img.dataset.objUrl = url;
+      img.src = url;
+      img.classList.add("visible");
+      if (dl) {
+        dl.href = url;
+        dl.style.display = "inline-block";
+      }
+      const meta = $(`meta-${side}`);
+      if (meta) meta.textContent = timeMs != null ? `Last generate: ${Math.round(timeMs)} ms` : "";
+    }
+
+    function clearImage(side) {
+      const img = $(`img-${side}`);
+      const dl = $(`dl-${side}`);
+      if (img && img.dataset.objUrl) {
+        URL.revokeObjectURL(img.dataset.objUrl);
+        delete img.dataset.objUrl;
+      }
+      if (img) {
+        img.removeAttribute("src");
+        img.classList.remove("visible");
+      }
+      if (dl) {
+        dl.removeAttribute("href");
+        dl.style.display = "none";
+      }
+      const meta = $(`meta-${side}`);
+      if (meta) meta.textContent = "";
+    }
+
+    fillSelect("model-a", DEFAULT_A);
+    fillSelect("model-b", DEFAULT_B);
+
+    const note = $("catalog-note");
+    if (note) {
+      note.textContent =
+        MODEL_CATALOG.length +
+        " models in catalog — extend MODEL_CATALOG when web-txt2img adds registry entries.";
+    }
+
+    if (!navigator.gpu) {
+      showGpuBanner(
+        "WebGPU not exposed (navigator.gpu missing). Janus-Pro will not run; SD-Turbo may fall back to WASM if supported. Try Chrome/Edge 113+ or enable WebGPU in your browser."
+      );
+    }
+
+    /** @type {Txt2ImgWorkerClient | null} */
+    let clientA = null;
+    /** @type {Txt2ImgWorkerClient | null} */
+    let clientB = null;
+    let loadedA = null;
+    let loadedB = null;
+    let busyA = false;
+    let busyB = false;
+
+    function ensureClients() {
+      if (!clientA) clientA = Txt2ImgWorkerClient.createDefault();
+      if (!clientB) clientB = Txt2ImgWorkerClient.createDefault();
+    }
+
+    async function detectOnce() {
+      ensureClients();
+      return clientA.detect();
+    }
+
+    const caps = await detectOnce().catch(() => ({}));
+    const capsText = Object.entries(caps)
+      .filter(([, v]) => v)
+      .map(([k]) => k)
+      .join(", ");
+    if (note && capsText) {
+      note.textContent += " Detected: " + capsText + ".";
+    }
+
+    async function loadSide(side) {
+      const sel = side === "a" ? $("model-a") : $("model-b");
+      const model = sel && sel.value;
+      if (!model) return;
+      ensureClients();
+      const client = side === "a" ? clientA : clientB;
+      setStatus(side, "Loading…", "loading");
+      const wasmBase = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+      const opts = {
+        backendPreference: backendPreferenceFor(model),
+        wasmPaths: wasmBase,
+        wasmNumThreads: navigator.hardwareConcurrency ? Math.min(4, navigator.hardwareConcurrency) : 2,
+        wasmSimd: true,
+      };
+      const res = await client.load(model, opts, (p) => {
+        const pct = p?.pct != null ? ` ${p.pct}%` : "";
+        setStatus(side, (p?.message || "Loading") + pct, "loading");
+      });
+      if (res && res.ok) {
+        if (side === "a") loadedA = model;
+        else loadedB = model;
+        setStatus(side, "Ready", "");
+        setWeightsHint(side, model, true, res.backendUsed);
+      } else {
+        const why = res && (res.message || res.reason) ? `${res.message || ""} ${res.reason || ""}`.trim() : "Load failed";
+        setStatus(side, why, "err");
+        setWeightsHint(side, model, false, null);
+      }
+    }
+
+    async function unloadSide(side) {
+      const client = side === "a" ? clientA : clientB;
+      if (!client) return;
+      const model = side === "a" ? loadedA : loadedB;
+      if (!model) {
+        setStatus(side, "Nothing loaded", "");
+        return;
+      }
+      await client.unload();
+      if (side === "a") loadedA = null;
+      else loadedB = null;
+      setStatus(side, "Unloaded", "");
+      const sid = side === "a" ? "model-a" : "model-b";
+      setWeightsHint(side, $(sid).value, false, null);
+      clearImage(side);
+    }
+
+    async function generateSide(side) {
+      const sel = side === "a" ? $("model-a") : $("model-b");
+      const model = sel && sel.value;
+      const promptEl = $("prompt");
+      const prompt = (promptEl && promptEl.value.trim()) || "test prompt";
+      const seedRaw = $("seed") && $("seed").value;
+      const seed = seedRaw === "" ? undefined : Number(seedRaw);
+
+      if (side === "a" && busyA) return;
+      if (side === "b" && busyB) return;
+
+      const loaded = side === "a" ? loadedA : loadedB;
+      if (!loaded || loaded !== model) {
+        setStatus(side, 'Load this model first (or load changed selection).', "err");
+        return;
+      }
+
+      ensureClients();
+      const client = side === "a" ? clientA : clientB;
+      if (side === "a") busyA = true;
+      else busyB = true;
+
+      setStatus(side, "Generating…", "loading");
+      const params = { model, prompt };
+      if ((model === "sd-turbo" || model === "sd-1.5") && seed != null && !Number.isNaN(seed)) params.seed = seed;
+      if (model === "sd-1.5") {
+        params.steps = Number($("steps").value) || 25;
+        params.guidanceScale = Number($("cfg-scale").value) || 7.5;
+      }
+
+      const { promise } = client.generate(
+        params,
+        (e) => {
+          const name = typeof e.phase === "string" ? e.phase : "working";
+          const pct = e.pct != null ? ` ${e.pct}%` : "";
+          const stepInfo = e.count != null && e.total != null ? ` (step ${e.count}/${e.total})` : "";
+          setStatus(side, `Generate: ${name}${stepInfo}${pct}`, "loading");
+        },
+        { busyPolicy: "queue", debounceMs: 200 }
+      );
+
+      const res = await promise;
+      if (side === "a") busyA = false;
+      else busyB = false;
+
+      if (res && res.ok && res.blob) {
+        setImage(side, res.blob, res.timeMs);
+        setStatus(side, "Done", "");
+      } else {
+        setStatus(side, (res && (res.message || res.reason)) || "Generation failed", "err");
+      }
+    }
+
+    $("btn-load-a").onclick = () => loadSide("a");
+    $("btn-load-b").onclick = () => loadSide("b");
+    $("btn-unload-a").onclick = () => unloadSide("a");
+    $("btn-unload-b").onclick = () => unloadSide("b");
+    $("btn-run-a").onclick = () => generateSide("a");
+    $("btn-run-b").onclick = () => generateSide("b");
+  </script>
+</body>
+</html>

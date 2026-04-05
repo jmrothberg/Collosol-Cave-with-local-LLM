@@ -10,44 +10,14 @@
 # Date 2/3/2024 Changes processing of commands to use sentece transformers for vector match.
 # July 26 use proper format for Llama 3.1 to ask questions. Undersanding improved greatly.
 # Rooms is a dictionary of room objects not a list with the key being the room number.
-# pip install sentence_transformers
-# export LLAMA_METAL=on
-# echo $LLAMA_METAL
-# CMAKE_ARGS="-DLLAMA_METAL=on" FORCE_CMAKE=1 pip install -U llama-cpp-python --no-cache-dir
-# export LLAMA_CUBLAS=1
-# echo $LLAMA_CUBLAS
-# for UNIX with CUDA
-#updated Aug 31 2024 with ubunto 24.04 now needs prebuilt wheel
-#pip install llama-cpp-python   --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 --no-cache-dir llama-cpp-python
-# pip install llama-cpp-python   --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 --no-cache-dir llama-cpp-python
-# each time you update diffusers for Open you need to edit this file.
-# /Users/jonathanrothberg/Colossal_Cave/.venv/lib/python3.11/site-packages/diffusers/schedulers/scheduling_k_dpm_2_ancestral_discrete.py", line 280
-# looks fixed in diffusers that now check for MPS and do this so not needed -line 279 timesteps = timesteps.astype('float32')TypeError: Cannot convert a MPS Tensor to float64
-# got requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/api/models/all-mpnet-base-v2/revision/main - fixed with
-# pip install git+https://github.com/huggingface/diffusers.git
 # Sept 7 2024 - added FluxPipeline 
 # Oct 11 2024 - added video generation to rooms. Updated to use video_data instead of video_path so saves standalone
 # Oct 12 2024 - added code to shut off pyramid flow and dit for video generation on mac. cleaned up some variable names
 # Dec 19 2024 - added code to use Hugging Face Hub for diffusers models and cached models, as the downloaded do not work with new diffusers
 # Dec 22 use updated requirements.txt huggingface-hub diffusers 
-#from huggingface_hub import snapshot_download
-#Dec 22 2024 - added code to download pyramid flow sd3 from huggingface otherwise old format
-#model_path = '/data/pyramid-flow-sd3'   # The local directory to save downloaded checkpoint
-#snapshot_download("rain1011/pyramid-flow-sd3", local_dir=model_path, local_dir_use_symlinks=False, repo_type='model')
-#plays vidieos only when on 2 gpus.
-#Dec 30 2024 - cleaned up LLM parsing instructions 
-#Jan 8 2025 - added code to use stable-diffusion-3.5-large for images
-#Jan 9 2025 - Pyramid_dit_for_video_gen_pipelines.py
-#import torch
-#from diffusers import StableDiffusion3Pipeline
-#pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3.5-large", torch_dtype=torch.bfloat16)
-#pipe = pipe.to("cuda")
-#   image = pipe(
-#    "A capybara holding a sign that reads Hello World",
-#    num_inference_steps=28,
-#    guidance_scale=3.5,
-#).images[0]
-#image.save("capybara.png")
+# Dec 22 2024 - download pyramid flow sd3 from huggingface
+# Dec 30 2024 - cleaned up LLM parsing instructions
+# Jan 8 2025 - added stable-diffusion-3.5-large support
 # July 9 2025 - added code to help with questions about the game.
 # July 21 2025 - MAJOR UPDATE: Added Mac MPS video generation support! 
 #   - Video generation now works on Mac with Apple Silicon using MPS acceleration
@@ -85,10 +55,15 @@ CORE GAME LOOP:
 4. Generate images/videos if needed
 5. Return updated game state to UI
 """
+
+###############################################################################
+# ═══════════════════════ IMPORTS & DEVICE SETUP ═══════════════════════════ #
+###############################################################################
+
 import os
 import sys
 import re
-import gc   
+import gc
 import random
 import torch
 import json
@@ -98,7 +73,24 @@ import platform
 from datetime import datetime
 import subprocess
 import importlib.util
-# Removed subprocess import - was only used by removed speak() function
+
+###############################################################################
+# ═══════════════════════ GAME CONSTANTS ═══════════════════════════════════ #
+###############################################################################
+
+MAX_ROOMS = 81
+DEFAULT_ROOMS = 25
+PLAYER_START_HEALTH = 300
+FUZZY_MATCH_THRESHOLD = 60
+NPC_MEMORY_LIMIT = 10
+DIFFICULTY_ATTACK_FREQ = {"cheat": 1, "easy": 1, "medium": 2, "hard": 3}
+FLUX_INFERENCE_STEPS = 4
+FLUX_GUIDANCE_SCALE = 0.0
+DEFAULT_IMAGE_SIZE = 1024
+VIDEO_WIDTH_MAC = 640
+VIDEO_HEIGHT_MAC = 384
+
+###############################################################################
 
 def ensure_mflux_installed():
     """
@@ -161,11 +153,9 @@ if torch.backends.mps.is_available():  # macOS with Apple Silicon
     x = torch.ones(1, device=diffuser_device)
     print (x)
     dtype = torch.float32
-    # Set llm_device and video_device for Mac
     llm_device = "mps"
-    # Updated: Mac now supports video generation with MPS and Conv3D support!
-    video_device = "mps"  # Video generation now supported on Mac with PyTorch 2.9.0+
-    num_gpus = 0  # No CUDA GPUs on Mac
+    video_device = "mps"
+    num_gpus = 0
 else:
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     print(f"Number of available GPUs: {num_gpus}")
@@ -179,7 +169,6 @@ else:
         print(f"Total Memory: {total_memory:.1f}GB")
         print(f"Free Memory:  {free_memory:.1f}GB")
 
-    # Assign devices using existing logic
     if num_gpus >= 4:
         # Check if GPU 0 is being used significantly
         try:
@@ -235,8 +224,7 @@ print ("Video device:", video_device)
 if video_device == "mps":
     print ("🎬 Video generation now supported on Mac with MPS acceleration!")
 
-# Updated: Now supports video generation on Mac with MPS
-# Import video generation modules for CUDA systems AND Mac with MPS
+# Import video generation modules for CUDA and Mac with MPS
 if platform.system() != 'Darwin' or torch.backends.mps.is_available():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -283,32 +271,28 @@ def get_video_model():
     if video_device == "mps":
         print("Setting up video model for Mac MPS...")
         
-        # Use mini-flux model with auto-download for Mac (same as your working test)
+        # Auto-download mini-flux model for Mac
         model_path = './pyramid-flow-miniflux'
         if not os.path.exists(model_path):
             print("Downloading Pyramid-Flow miniflux model for Mac...")
             from huggingface_hub import snapshot_download
-            snapshot_download("rain1011/pyramid-flow-miniflux", local_dir=model_path, 
+            snapshot_download("rain1011/pyramid-flow-miniflux", local_dir=model_path,
                              local_dir_use_symlinks=False, repo_type='model')
             print("Model downloaded successfully!")
-        
-        # Use same settings as your working test
-        model_dtype = 'fp32'  # Use fp32 like your working test
+
+        model_dtype = 'fp32'
         torch_dtype = torch.float32
-        
-        # Get memory info for model variant selection
+
         import psutil
         total_memory_gb = psutil.virtual_memory().total / (1024**3)
         print(f"Detected Mac memory: {total_memory_gb:.1f}GB")
-        
-        # Use the proven working settings from mac_pyramid.py
-        model_variant = 'diffusion_transformer_384p'  # Use 384p variant - proven to work
-        print(f"Using 384p model variant (proven stable settings)")
-        
-        # Set up MPS compatibility fixes (same as your working test)
+
+        model_variant = 'diffusion_transformer_384p'
+        print(f"Using 384p model variant")
+
+        # MPS compatibility: force float32 and patch float64 operations
         torch.set_default_dtype(torch.float32)
-        
-        # Monkey patch torch functions to avoid float64 on MPS (same as your working test)
+
         original_from_numpy = torch.from_numpy
         original_arange = torch.arange
         
@@ -329,19 +313,16 @@ def get_video_model():
         
         torch.from_numpy = mps_safe_from_numpy
         torch.arange = mps_safe_arange
-        
-        # MPS memory management (same as your working test)
+
         os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-        
+
     else:
-        # CUDA configuration (existing logic)
         print("Setting up video model for CUDA...")
         model_path = '/data/pyramid-flow-sd3/'
         model_dtype = 'bf16'
         torch_dtype = torch.bfloat16
         model_variant = 'diffusion_transformer_768p'
 
-    # Initialize the model (same as your working test)
     video_model = PyramidDiTForVideoGeneration(
         model_path,
         model_name="pyramid_flux",
@@ -356,7 +337,6 @@ def get_video_model():
         video_model.dit = video_model.dit.to(video_device)
         video_model.text_encoder = video_model.text_encoder.to(video_device)
     else:
-        # CUDA setup (existing logic)
         video_model.vae.to(video_device)
         video_model.dit.to(video_device)
         video_model.text_encoder.to(video_device)
@@ -386,12 +366,18 @@ def ask_for_folder():
     folder_path = filedialog.askdirectory()
     return folder_path
 
+###############################################################################
+# ═══════════════════════ CONFIGURATION & PATHS ══════════════════════════ #
+###############################################################################
+
 # Determine paths based on the operating system
+# default_data_path points to this script's directory (colossal_cave/) so that
+# adventure_dataRA.json, saved games, and art are found relative to the script.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+default_data_path = _SCRIPT_DIR
 if platform.system() == 'Darwin':  # macOS
-    default_data_path = "/Users/jonathanrothberg/Colossal_Cave"
     default_model_path = "/Users/jonathanrothberg"
 else:  # Linux
-    default_data_path = "/home/jonathan/Colossal_Cave"
     default_model_path = "/data"
 
 # Check if paths exist, if not, ask user to select
@@ -410,7 +396,10 @@ else:
 # Load the SentenceTransformer model
 vector_model = SentenceTransformer('all-mpnet-base-v2', cache_folder=model_path)
 
-# === GAME DATA MANAGEMENT ===
+###############################################################################
+# ═══════════════════════ DATA LOADING ═══════════════════════════════════ #
+###############################################################################
+
 def load_adventure_data():
     """
     Loads all game content from adventure_dataRA.json including:
@@ -470,8 +459,9 @@ def load_adventure_data():
     
     return True
 
-def speak(text):
-    subprocess.call(['say', text])
+###############################################################################
+# ═══════════════════════ UTILITY FUNCTIONS ══════════════════════════════ #
+###############################################################################
 
 def sanitize_filename(filename):
     return re.sub(r'[^a-zA-Z0-9\-\_\.]', '_', filename)
@@ -514,7 +504,7 @@ def saved_llms():
             try:
                 for model in response:
                     llm_names.append(str(model))
-            except:
+            except Exception:
                 print(f"Unknown response format: {type(response)}")
                     
         # Sort models and put common ones first
@@ -585,6 +575,10 @@ def saved_diffusers():
      
     return unique_names if unique_names else ["No diffusion models found"]
 
+###############################################################################
+# ═══════════════════════ SAVE / LOAD ════════════════════════════════════ #
+###############################################################################
+
 def save_game_state(name_of_game = None):
     if name_of_game == None:
         name_of_game = (f"{datetime.now().strftime('%d-%H%M')}")
@@ -597,130 +591,103 @@ def save_game_state(name_of_game = None):
         name_of_game = "Error saving game state", e
     return name_of_game
 
+def _migrate_legacy_videos(rooms):
+    """Load video data from legacy video_path attributes in old saves."""
+    needs_video = False
+    for room in rooms.values():
+        if hasattr(room, 'video_data') and room.video_data is not None:
+            pass
+        elif hasattr(room, 'video_path') and room.video_path:
+            try:
+                with open(room.video_path, 'rb') as vf:
+                    room.video_data = vf.read()
+            except FileNotFoundError:
+                print(f"Video file not found for room {room.number}: {room.video_path}")
+                room.video_data = None
+                needs_video = True
+        else:
+            room.video_data = None
+            needs_video = True
+
+    if not needs_video:
+        return
+    user_input = input("Some rooms don't have videos. Generate videos for all rooms? (y/n): ").lower()
+    if user_input != 'y':
+        print("Skipping video generation.")
+        return
+    print("Starting video generation for all rooms...")
+    successful = 0
+    total = len(rooms)
+    for room in rooms.values():
+        try:
+            print(f"Generating video for room {room.number}/{total}...")
+            room.generate_and_save_video_self()
+            if room.video_data is not None:
+                successful += 1
+                print(f"✓ Room {room.number} video generated")
+            else:
+                print(f"✗ Room {room.number} video failed")
+        except Exception as e:
+            print(f"✗ Room {room.number} video error: {e}")
+            continue
+    print(f"Video generation complete: {successful}/{total} successful")
+
+
+def _ensure_master_beast(rooms):
+    """Ensure Master Beast exists in room 1 with all required attributes."""
+    if 1 not in rooms:
+        return
+    if rooms[1].npc and hasattr(rooms[1].npc, 'is_master_beast'):
+        return  # MB already present and tagged
+    # MB missing — create her
+    print("Master Beast not found in saved game. Adding her to Room 1...")
+    if rooms[1].npc:
+        old_npc = rooms[1].npc
+        for room_num in range(2, len(rooms) + 1):
+            if room_num in rooms and not rooms[room_num].npc:
+                rooms[room_num].npc = old_npc
+                old_npc.current_room = room_num
+                print(f"Moved {old_npc.name} to room {room_num}")
+                break
+    has_llm = any(
+        room.npc and hasattr(room.npc, 'image') and room.npc.image is not None
+        for room in rooms.values()
+    )
+    rooms[1].npc = MasterBeast(current_room=1, llm_npc=has_llm)
+    print("Master Beast (MB) added to Room 1!")
+
+
+def _patch_all_npcs(rooms):
+    """Call _ensure_attributes() on every NPC once after loading a saved game.
+
+    This single call replaces the scattered _ensure_attributes() guards
+    throughout NPC methods — backward-compat patching happens here, once.
+    """
+    for room in rooms.values():
+        if room.npc:
+            room.npc._ensure_attributes()
+
+
 def load_game_state(name):
     path_fullname = os.path.join(game_dir, f'Adv_{name}.pkl')
     try:
         with open(path_fullname, 'rb') as f:
-            rooms, playerOne, old_room = pickle.load(f)   
-        
-        needs_video = False
-        for room in rooms.values():
-            if hasattr(room, 'video_data') and room.video_data is not None:
-                # Video data already exists, no need to do anything
-                pass
-            elif hasattr(room, 'video_path') and room.video_path:
-                # Only a path exists, need to load video data
-                try:
-                    with open(room.video_path, 'rb') as f:
-                        room.video_data = f.read()
-                except FileNotFoundError:
-                    print(f"Video file not found for room {room.number}: {room.video_path}")
-                    room.video_data = None
-                    needs_video = True
-            else:
-                # No video data or path
-                room.video_data = None
-                needs_video = True
-        
-        # Video generation now supported on Mac with MPS!
-        if needs_video:
-            user_input = input("Some rooms don't have videos. Do you want to generate videos for all rooms? (y/n): ").lower()
-            generate_videos = user_input == 'y'
-            
-            if generate_videos:
-                print("Starting video generation for all rooms...")
-                successful_videos = 0
-                total_rooms = len(rooms)
-                
-                for room in rooms.values():
-                    try:
-                        print(f"Generating video for room {room.number}/{total_rooms}...")
-                        room.generate_and_save_video_self()
-                        if room.video_data is not None:
-                            successful_videos += 1
-                            print(f"✓ Successfully generated video for room {room.number}")
-                        else:
-                            print(f"✗ Failed to generate video for room {room.number}")
-                    except Exception as e:
-                        print(f"✗ Error generating video for room {room.number}: {e}")
-                        # Continue with next room instead of crashing
-                        continue
-                
-                print(f"Video generation complete: {successful_videos}/{total_rooms} videos generated successfully")
-            else:
-                print("Skipping video generation.")
-        
-        # Check if MB exists in room 1, add her if missing
-        if 1 in rooms:  # Make sure room 1 exists
-            if not rooms[1].npc or not hasattr(rooms[1].npc, 'is_master_beast'):
-                # MB is missing, add her
-                print("Master Beast not found in saved game. Adding her to Room 1...")
-                
-                # If room 1 has a different NPC, move them elsewhere
-                if rooms[1].npc:
-                    old_npc = rooms[1].npc
-                    # Find a room without an NPC
-                    for room_num in range(2, len(rooms) + 1):
-                        if room_num in rooms and not rooms[room_num].npc:
-                            rooms[room_num].npc = old_npc
-                            old_npc.current_room = room_num
-                            print(f"Moved {old_npc.name} to room {room_num}")
-                            break
-                
-                # Create and add MB to room 1
-                # Check if the game has LLM features enabled by looking at any NPC
-                has_llm = False
-                for room in rooms.values():
-                    if room.npc and hasattr(room.npc, 'image') and room.npc.image is not None:
-                        has_llm = True
-                        break
-                
-                rooms[1].npc = MasterBeast(current_room=1, llm_npc=has_llm)
-                print("Master Beast (MB) has been added to Room 1 to help adventurers!")
-            else:
-                # MB exists but might be missing new attributes - fix them
-                mb = rooms[1].npc
-                if not hasattr(mb, 'personality_traits'):
-                    print("Updating Master Beast with new personality traits...")
-                    mb.personality_traits = {
-                        "helpfulness": "extremely helpful",
-                        "knowledge": "knows everything about spells and game mechanics",
-                        "trading_style": "generous teacher",
-                        "mood": "wise and patient"
-                    }
-                # Ensure all required attributes exist
-                if not hasattr(mb, 'memory'):
-                    mb.memory = []
-                if not hasattr(mb, 'player_trades'):
-                    mb.player_trades = []
-                if not hasattr(mb, 'times_talked'):
-                    mb.times_talked = 0
-                if not hasattr(mb, 'is_master_beast'):
-                    mb.is_master_beast = True
-                print("Master Beast attributes updated successfully!")
-        
-        # Also fix any other NPCs that might be missing personality traits
-        for room in rooms.values():
-            if room.npc and not hasattr(room.npc, 'personality_traits'):
-                print(f"Updating NPC {room.npc.name} with personality traits...")
-                room.npc.personality_traits = room.npc._generate_personality()
-                # Ensure all required attributes exist
-                if not hasattr(room.npc, 'memory'):
-                    room.npc.memory = []
-                if not hasattr(room.npc, 'player_trades'):
-                    room.npc.player_trades = []
-                if not hasattr(room.npc, 'times_talked'):
-                    room.npc.times_talked = 0
-        
+            rooms, playerOne, old_room = pickle.load(f)
+        _migrate_legacy_videos(rooms)
+        _ensure_master_beast(rooms)
+        _patch_all_npcs(rooms)
     except Exception as e:
         print("Error loading game state:", e)
         import traceback
         traceback.print_exc()
         return None, None, None
-
     print("Loading:", name)
     return rooms, playerOne, old_room
 
+
+###############################################################################
+# ═══════════════════════ WORLD GENERATION ═══════════════════════════════ #
+###############################################################################
 
 def new_game(num_rooms=25, runllm_diff=False, runllm_mon=False, runllm_item=False, name_of_game=None, generate_videos=False):
     global playerOne, old_room
@@ -728,12 +695,12 @@ def new_game(num_rooms=25, runllm_diff=False, runllm_mon=False, runllm_item=Fals
     if name_of_game == None:
         name_of_game = (f"{datetime.now().strftime('%d-%H%M')}")
     try:
-        if int(num_rooms) > 81:
-            num_rooms = 81
-        print ("Resetting rooms to ", num_rooms)
-    except:
-        num_rooms = 25
-        print ("Resetting rooms to ", num_rooms)
+        if int(num_rooms) > MAX_ROOMS:
+            num_rooms = MAX_ROOMS
+        print("Resetting rooms to", num_rooms)
+    except Exception:
+        num_rooms = DEFAULT_ROOMS
+        print("Resetting rooms to", num_rooms)
     num_rooms = int(int(num_rooms)**.5)**2 # make sure it is a square number        
     
     generating_rooms(num_rooms)
@@ -806,7 +773,6 @@ def distributing_riddle_magic_items(runllm_items): # adding riddle_magic_items t
         for item in list_of_magic_items:
             chosen = random.choice(list_of_monsters + list_of_npcs + list_of_rooms)
             chosen.add_magic(runllm_items,item)
-            #random.choice(list_of_monsters + list_of_npcs + list_of_rooms).add_magic(runllm_items,item)
             print (f'Adding riddle_magic {item} to {chosen.name}') 
     else:
         print ("No NPCs or riddle_magic_items")
@@ -879,7 +845,9 @@ def resize_with_padding(img, expected_size):
     return ImageOps.expand(img, padding)
 
 
-# === CORE GAME CLASSES ===
+###############################################################################
+# ═══════════════════════ BASE CLASS: AdventureGame ══════════════════════ #
+###############################################################################
 
 class AdventureGame:
     """
@@ -931,7 +899,6 @@ class AdventureGame:
                 width=1024,
                 num_inference_steps=num_inf_steps,
                 guidance_scale=guidance_scale,
-                #decoder_guidance_scale=7,
                 num_images_per_prompt=1,
                         ).images[0]
             print("✓ Image generation completed successfully")
@@ -1064,6 +1031,10 @@ class AdventureGame:
             return self.description
 
 
+###############################################################################
+# ═══════════════════════ ROOM ═══════════════════════════════════════════ #
+###############################################################################
+
 class Room(AdventureGame):
     """
     ROOM CLASS represents a game location.
@@ -1104,16 +1075,13 @@ class Room(AdventureGame):
         
         # Room inhabitants
         self.monsters = []  # List of Monster objects
-        self.npcs = []      # Legacy - not used
         self.npc = None     # Single NPC per room
-        
+
         # Player interaction tracking
         self.explored = False  # Has player visited this room?
-        
+
         # Media content
-        self.video = None       # Legacy
-        self.video_path = None  # Legacy
-        self.video_data = None  # Binary video content for room  
+        self.video_data = None  # Binary video content for room
 
     def generate_and_save_video_self(self):
         global video_model
@@ -1126,33 +1094,25 @@ class Room(AdventureGame):
         if video_model is None:
             video_model = get_video_model()
 
-        # Simplified two-tier memory settings based on your 512GB system
         import psutil
         total_memory_gb = psutil.virtual_memory().total / (1024**3)
-        
+
         if video_device == "mps":
             print(f"Generating video on Mac with MPS acceleration... (Memory: {total_memory_gb:.1f}GB)")
-            
-            # Use proven working settings from mac_pyramid.py for 5-second video
-            width, height = 640, 384  # Same as your working test
-            temp = 16  # temp=16 gives 5 seconds for 384p model
-            print(f"Using proven stable settings: {width}x{height}, temp={temp} for 5-second video")
-            
-            # Consistent MPS settings matching your working test
-            num_inference_steps = [5, 5, 5]  # Fast inference like your test
-            video_guidance_scale = 4.0  # Same as your working test
-            save_memory = False  # Same as your working test for speed
-            
-            # Use simple context manager like your working test
+
+            # MPS settings: 384p, 5-second video
+            width, height = 640, 384
+            temp = 16
+            num_inference_steps = [5, 5, 5]
+            video_guidance_scale = 4.0
+            save_memory = False
             context_manager = torch.no_grad()
-            
-            # Clear MPS cache before generation
+
             if hasattr(torch.mps, 'empty_cache'):
                 torch.mps.empty_cache()
-            
+
         else:
             print("Generating video on CUDA...")
-            # CUDA settings (existing)
             width, height = 1280, 768
             temp = 16
             num_inference_steps = [20, 20, 20]
@@ -1173,11 +1133,11 @@ class Room(AdventureGame):
                     frames = video_model.generate(
                         prompt=prompt,
                         num_inference_steps=num_inference_steps,
-                        video_num_inference_steps=num_inference_steps,  # Use same as num_inference_steps
+                        video_num_inference_steps=num_inference_steps,
                         height=height,     
                         width=width,
                         temp=temp,
-                        guidance_scale=7.0,  # Standard guidance scale
+                        guidance_scale=7.0,
                         video_guidance_scale=video_guidance_scale,
                         output_type="pil",
                         save_memory=save_memory,
@@ -1276,8 +1236,9 @@ class Room(AdventureGame):
         return console
     
 
-# === ITEM TYPE SYSTEM ===
-# Items are the core objects players collect, trade, and use
+###############################################################################
+# ═══════════════════════ ITEMS ══════════════════════════════════════════ #
+###############################################################################
 
 class Item(AdventureGame):
     """
@@ -1338,11 +1299,14 @@ class Magic(Item):
         if self.description == None:
             self.description = (f"magic that can heal {self.healing}.")
 
+###############################################################################
+# ═══════════════════════ LIVING THINGS ══════════════════════════════════ #
+###############################################################################
+
 class LivingThing(AdventureGame):
     def __init__(self, name = "jack", current_room = None, description = None, health = None):
         super().__init__(name=name, description=description, current_room = current_room, )
         self.health = health
-        #self.embeded_name = vector_model.encode(name) #could just put in adventer game class
         self.armors = []
 
     def add_item(self, item):
@@ -1419,6 +1383,10 @@ class LivingThing(AdventureGame):
         return response
 
 
+###############################################################################
+# ═══════════════════════ PLAYER ═════════════════════════════════════════ #
+###############################################################################
+
 class Player(LivingThing):
     """
     PLAYER CLASS represents the human player character.
@@ -1447,7 +1415,7 @@ class Player(LivingThing):
         super().__init__(name = name, description= description, current_room = current_room)
         
         # Player statistics
-        self.health = 300  # Starting health
+        self.health = PLAYER_START_HEALTH
         self.points = 0    # Game score
         self.wealth = 0    # Total treasure value
         self.kills = 0     # Monsters defeated
@@ -1485,8 +1453,6 @@ class Player(LivingThing):
         console = riddle_create_connections(room_number)
         return console
 
-    # Removed redundant _find_item - use _find_item_smart instead
-    
     def _find_item_smart(self, item_name, items):
         """Find item using intelligent partial matching prioritizing substring matches"""
         if not item_name or not items:
@@ -1923,7 +1889,7 @@ Provide a helpful hint.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
     
     def _find_character(self, name, characters):
         for character in characters:
-            if fuzz.ratio(character.name.lower(), name.lower()) > 60 or name.lower() in character.name.lower():
+            if fuzz.ratio(character.name.lower(), name.lower()) > FUZZY_MATCH_THRESHOLD or name.lower() in character.name.lower():
                 return character
         return None
     
@@ -1952,10 +1918,7 @@ Provide a helpful hint.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
         npc = self.current_room.npc
         if not npc:
             return ""
-        
-        # Ensure NPC has all attributes
-        npc._ensure_attributes()
-        
+
         # Check various game states and provide relevant quests
         unsolved_riddles = [r for r in rooms.values() if r.riddles and not r.riddle_solved]
         remaining_treasures = [r for r in rooms.values() if any(isinstance(i, Treasure) for i in r.items)]
@@ -1983,10 +1946,7 @@ Provide a helpful hint.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
         npc = self.current_room.npc
         if not npc:
             return "No one here to trade with.\n"
-        
-        # Ensure NPC has all attributes
-        npc._ensure_attributes()
-        
+
         console = f"{npc.name} is a {npc.personality_traits['trading_style']}.\n"
         
         # Analyze what the NPC might want
@@ -2045,7 +2005,6 @@ Provide a helpful hint.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
                         npc.items.append(my_item)
                         
                         # Remember the trade
-                        npc._ensure_attributes()  # Ensure NPC has all attributes
                         npc.player_trades.append({"gave": their_item.name, "received": my_item.name})
                         npc._remember_interaction("trade", f"Traded {their_item.name} for {my_item.name}")
                         
@@ -2167,8 +2126,12 @@ Suggest what they might have meant in 1-2 sentences.
         
         suggestion = ollama_generate(prompt, max_tokens=80, temperature=0.3)
         return f"No '{attempted_name}' here.\n{suggestion}\n"
-    
-    
+
+
+###############################################################################
+# ═══════════════════════ NPC ════════════════════════════════════════════ #
+###############################################################################
+
 class NPC(LivingThing):
     def __init__(self, name, desc, current_room, llm_npc = False):
         super().__init__(name = name, description = desc, current_room = current_room)
@@ -2201,8 +2164,6 @@ class NPC(LivingThing):
 
     def _remember_interaction(self, interaction_type, details):
         """Store interaction in NPC memory"""
-        # Ensure attributes exist
-        self._ensure_attributes()
         memory_entry = {
             "type": interaction_type,
             "details": details,
@@ -2218,8 +2179,6 @@ class NPC(LivingThing):
 
     def _get_memory_context(self):
         """Get formatted memory for LLM context"""
-        # Ensure attributes exist
-        self._ensure_attributes()
         if not self.memory:
             return "This is our first meeting."
         
@@ -2397,7 +2356,6 @@ class NPC(LivingThing):
                 connections_info.append(f"Room {room.number} has no connections (solve riddle to open passages)")
         return connections_info
 
-    #could use our get entities to get list of items to trade
     def _ensure_attributes(self):
         """Ensure all new attributes exist for backward compatibility"""
         if not hasattr(self, 'memory'):
@@ -2417,7 +2375,6 @@ class NPC(LivingThing):
 
     def set_pending_action(self, action_type, offer_details, context=None):
         """Set a pending action that awaits player confirmation"""
-        self._ensure_attributes()
         self.conversation_state = {
             "pending_action": action_type,
             "last_offer": offer_details,
@@ -2427,7 +2384,6 @@ class NPC(LivingThing):
 
     def clear_pending_action(self):
         """Clear any pending action"""
-        self._ensure_attributes()
         self.conversation_state = {
             "pending_action": None,
             "last_offer": None,
@@ -2436,13 +2392,10 @@ class NPC(LivingThing):
 
     def has_pending_action(self):
         """Check if there's a pending action waiting for confirmation"""
-        self._ensure_attributes()
         return self.conversation_state.get("pending_action") is not None
 
     def handle_conversation_response(self, response):
         """Handle player's response to pending conversation using LLM interpretation"""
-        self._ensure_attributes()
-        
         if not self.has_pending_action():
             return None
         
@@ -2577,10 +2530,8 @@ What is the player's intent?"""
             return self.llM_generate_self_dialogue(response, playerOne.get_item_names())
 
     def llM_generate_self_dialogue(self, dialogue="what do you have to trade", my_stuff=None):
-        # Ensure all attributes exist for backward compatibility
-        self._ensure_attributes()
         self.times_talked += 1
-        
+
         # Get comprehensive context
         game_knowledge = self._get_game_knowledge()
         memory_context = self._get_memory_context()
@@ -2938,9 +2889,6 @@ Return JSON only."""
     
     def evaluate_trade(self, offered_item, requested_item):
         """Evaluate if a trade is fair based on NPC personality and item values"""
-        # Ensure all attributes exist for backward compatibility
-        self._ensure_attributes()
-            
         # Calculate item values
         offered_value = self._calculate_item_value(offered_item)
         requested_value = self._calculate_item_value(requested_item)
@@ -2975,10 +2923,8 @@ Return JSON only."""
         return 50  # Default value
 
     def llM_generate_self_info(self, dialogue="Which rooms have the riddles"):
-        # Ensure all attributes exist for backward compatibility
-        self._ensure_attributes()
         self.times_talked += 1
-        
+
         # Get full game knowledge
         game_knowledge = self._get_game_knowledge()
         memory_context = self._get_memory_context()
@@ -3051,9 +2997,6 @@ If you're not very helpful, be vague or demand something in return for informati
 
     def decide_action(self, player_in_room=False):
         """Enhanced NPC decision making"""
-        # Ensure all attributes exist for backward compatibility
-        self._ensure_attributes()
-        
         # More intelligent movement based on personality and game state
         if player_in_room and "friendly" in self.personality_traits['mood']:
             # Friendly NPCs are more likely to stay with the player
@@ -3073,6 +3016,10 @@ If you're not very helpful, be vague or demand something in return for informati
         
         return None
 
+
+###############################################################################
+# ═══════════════════════ MASTER BEAST ═══════════════════════════════════ #
+###############################################################################
 
 class MasterBeast(NPC):
     """Master Beast (MB) - A special assistant NPC that helps players with the game"""
@@ -3102,8 +3049,6 @@ class MasterBeast(NPC):
     
     def llM_generate_self_dialogue(self, dialogue="what do you have to trade", my_stuff=None):
         """Override dialogue generation for MB to be more helpful"""
-        # Ensure all attributes exist for backward compatibility
-        self._ensure_attributes()
         self.times_talked += 1
         
         # Get comprehensive context
@@ -3355,8 +3300,6 @@ Always be specific and actionable in your advice."""
     
     def llM_generate_self_info(self, dialogue="Which rooms have the riddles"):
         """MB shares complete knowledge freely"""
-        # Ensure all attributes exist for backward compatibility
-        self._ensure_attributes()
         self.times_talked += 1
         
         # MB knows everything!
@@ -3405,6 +3348,10 @@ You know EVERYTHING about this game and want players to win!"""
         return None  # MB stays in her room to help
 
 
+###############################################################################
+# ═══════════════════════ MONSTER ════════════════════════════════════════ #
+###############################################################################
+
 class Monster(LivingThing):
     def __init__(self, name, health, damage, runllm_mon = False):
         super().__init__(name = name, health = health)
@@ -3425,8 +3372,11 @@ class Monster(LivingThing):
         else:
             player.health = player.health - protected_damage
             console = (f"** The {self.name} hit you for {protected_damage} damage! Your health is now {player.health}\n")
-        return console        
-    
+        return console
+
+###############################################################################
+# ═══════════════════════ MAP & RIDDLE UTILITIES ═════════════════════════ #
+###############################################################################
 
 def draw_map_png(cheat_mode=False):
     num_rooms = len(rooms)
@@ -3450,8 +3400,7 @@ def draw_map_png(cheat_mode=False):
             if room.image:
                 imagetopaste = room.image.resize((room_size,room_size), Image.LANCZOS)
                 image.paste(imagetopaste, (x, y))
-        #draw.rectangle([x, y, x + room_size, y + room_size], outline="black", )
-        
+
     # Draw connections (if rooms are explored or in cheat mode)
     for number, room in rooms.items():
         x = ((number - 1) % num_rooms_side) * room_size
@@ -3475,7 +3424,6 @@ def draw_map_png(cheat_mode=False):
                                (x + room_size / 2 , y + room_size * 1.2 - room_size)], 
                               fill="orange", width=connection_size)
         draw.text((x + (room_size - w) / 2, y + (room_size - h) / 2), str(number), fill="black", font=font)
-    #image.show()
     image.save(f"map.png")
     return image
 
@@ -3509,7 +3457,7 @@ def cheat_code(cheat_code=None): #called by xyzzy
     return "Cheat mode enabled. To create connections: " + magicword + " <room number>. To increase health: Health <quantity>.\n"
     
 def get_help():
-    console = help
+    console = HELP_TEXT
     console = console + get_complete_instructions()
     return console
 
@@ -3598,7 +3546,11 @@ What type of magic item should I look for?<|eot_id|><|start_header_id|>assistant
     
     return console
 
-def initalize_game_varables():
+###############################################################################
+# ═══════════════════════ GAME STATE HELPERS ═════════════════════════════ #
+###############################################################################
+
+def initialize_game_variables():
     """
     Initialize all global game state variables.
     Called at start of new game or when loading existing game.
@@ -3632,7 +3584,10 @@ def initalize_game_varables():
     art_style_g = ""         # Global art style for image generation
     magicword = random.choice(["abbracadabra", "alakazam", "hocuspocus", "opensesame", "shazam", "presto", "ivy", "blackjack","titi", "nikki", "versace"])  # Random cheat code
 
-   
+###############################################################################
+# ═══════════════════════ LLM INTEGRATION ═══════════════════════════════ #
+###############################################################################
+
 def set_up_llm_diffuser(diff_name, llm_name):
     global pipe, model
     print(f"Setting up LLM and Diffuser for {llm_name} and {diff_name}")
@@ -3736,11 +3691,7 @@ def set_up_llm_diffuser(diff_name, llm_name):
                 torch_dtype=dtype,
                 device_map="balanced"  # Keep balanced mapping for non-FLUX models
             )
-    
-    # Ollama handles model loading internally, no need to initialize here
 
-    
-# Embeddings for Trade Actions used to find key words in NPC dialogue
 def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None):
     """Helper function to call Ollama API"""
     global model
@@ -3829,7 +3780,6 @@ Current game state:
         # Get NPC-specific information
         if playerOne.current_room.npc:
             npc = playerOne.current_room.npc
-            npc._ensure_attributes()
             additional_context += f"\nNPC Context:\n"
             additional_context += f"- NPC personality: {npc.personality_traits['mood']}, {npc.personality_traits['helpfulness']}\n"
             additional_context += f"- NPC trading style: {npc.personality_traits['trading_style']}\n"
@@ -3914,15 +3864,9 @@ Focus on what they're specifically asking about. Give actionable advice based on
     
     return console
 
-# Simplified: Removed complex embeddings system - trade detection now handled by LLM
-def embedings_for_actions():
-    # Keep minimal structure for backward compatibility
-    global dict_actions, dict_action_embeddings
-    dict_actions = {"trade": ["trade", "exchange", "swap"]}
-    dict_action_embeddings = {"trade": None}  # Placeholder, not actually used
-
-# === COMMAND PROCESSING SYSTEM ===
-# This is the core LLM integration system that processes natural language commands
+###############################################################################
+# ═══════════════════════ COMMAND PROCESSING ═════════════════════════════ #
+###############################################################################
 
 def process_command(command, player, current_room):
     """
@@ -4057,8 +4001,6 @@ def preprocess_command(command):
             command = command.replace(typo.capitalize(), correct.capitalize())
     
     return command.strip()
-
-# Removed build_smart_context - was redundant, now done inline in llm_process_command
 
 def llm_process_command(command, player, current_room):
     """
@@ -4437,6 +4379,10 @@ Player command: "{command}"
     explanation = ollama_generate(prompt, max_tokens=100, temperature=0.3)
     return f"Something went wrong: {explanation}\n"
 
+###############################################################################
+# ═══════════════════════ TROPHY & WIN CONDITIONS ═══════════════════════ #
+###############################################################################
+
 def riddles_and_magic(): 
     room_riddles = ""
     for room_i in rooms.values(): 
@@ -4497,50 +4443,60 @@ def check_trophy(trophy, condition, victory_message, victory_action):
             console = console +temp_console + f"Your trophies: {', '.join(trophies)}\n"
     
     player_image = [player_image] if player_image is not None else []
-    #trophiie images are a list since take returns lists
     return console, player_image, trophie_images
 
 
-def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_name, number_of_rooms, llm_diff, llm_mon, 
+###############################################################################
+# ═══════════════════════ MAIN GAME LOOP ════════════════════════════════ #
+###############################################################################
+
+def _get_npc_intro_dialogue(npc):
+    """Generate appropriate introduction dialogue based on NPC personality."""
+    mood = npc.personality_traits['mood']
+    if mood == 'friendly':
+        return "Hello there, traveler! I'm glad to see a friendly face in these dark caves."
+    elif mood == 'grumpy':
+        return "What do you want? Can't a person get some peace in these caves?"
+    elif mood == 'mysterious':
+        return "Ah, another seeker of secrets wanders into my presence..."
+    elif mood == 'suspicious':
+        return "Who are you and what are you doing here? State your business!"
+    else:
+        return "Greetings, adventurer. What brings you to this place?"
+
+
+def _make_output_tuple(images, map_img, room_desc, riddles, contents, console,
+                       status, visited, inventory, long_desc, state, video):
+    """Build the standard 11-value Gradio output tuple."""
+    return (images, map_img,
+            (room_desc.strip() + "\n" + riddles.strip()).strip(),
+            contents.strip(), console.strip(), status,
+            visited.strip(), inventory.strip(),
+            long_desc, state, video)
+
+
+def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_name, number_of_rooms, llm_diff, llm_mon,
                       llm_item, name_of_llm, name_of_diffuser, art_style, generate_videos):
     """
     MAIN GAME LOOP FUNCTION - Processes one complete game turn.
-    
+
     Handles:
     - Game state management (new/load/save/play)
     - Command processing via LLM
     - Game world updates (NPCs, monsters, room changes)
     - Trophy/victory condition checking
     - UI state updates for Gradio interface
-    
-    Returns tuple for Gradio UI:
-    (image_gallery, map_image, room_description, room_contents, console_output, 
-     status, rooms_visited, inventory, long_description, game_state, room_video)
-    
+
+    Returns 11-value tuple for Gradio UI via _make_output_tuple().
+
     Game States:
     - "New-Game": Create new adventure with specified parameters
-    - "Load-Game": Load saved game from pickle file  
+    - "Load-Game": Load saved game from pickle file
     - "Save-Game": Save current game state
     - "Play-Game": Process player command and update world
     """
     global playerOne, rooms, active_game, list_of_saved_games, trophies, difficulty_g, cheat_mode, npc_introduced, you_started_it,  old_room, art_style_g
-    
-    def _get_npc_intro_dialogue(npc):
-        """Generate appropriate introduction dialogue based on NPC personality"""
-        # Ensure all attributes exist for backward compatibility
-        npc._ensure_attributes()
-            
-        if npc.personality_traits['mood'] == 'friendly':
-            return "Hello there, traveler! I'm glad to see a friendly face in these dark caves."
-        elif npc.personality_traits['mood'] == 'grumpy':
-            return "What do you want? Can't a person get some peace in these caves?"
-        elif npc.personality_traits['mood'] == 'mysterious':
-            return "Ah, another seeker of secrets wanders into my presence..."
-        elif npc.personality_traits['mood'] == 'suspicious':
-            return "Who are you and what are you doing here? State your business!"
-        else:
-            return "Greetings, adventurer. What brings you to this place?"
-    
+
     room_image = []
     
     map_image = None
@@ -4551,7 +4507,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     room_video = None   
     console = ""
     your_status = ""
-    rooms_visted = ""
+    rooms_visited = ""
     room_description = ""
     room_long_description = ""
     room_riddles = ""
@@ -4571,14 +4527,12 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         # Check if Ollama is running
         if not check_ollama_running():
             console = "Error: Ollama is not running. Please start Ollama with 'ollama serve' in a terminal."
-            return (room_image, map_image, 
-                room_description.strip()+"\n"+room_riddles.strip(),
-                room_contents.strip(), console.strip(), your_status,
-                rooms_visted.strip(), inventory1.strip(),
-                room_long_description, game_state_selector, room_video)
+            return _make_output_tuple(room_image, map_image, room_description,
+                room_riddles, room_contents, console, your_status,
+                rooms_visited, inventory1, room_long_description,
+                game_state_selector, room_video)
         
-        embedings_for_actions()
-        initalize_game_varables()
+        initialize_game_variables()
         load_adventure_data()
         set_up_llm_diffuser(diff_name=name_of_diffuser, llm_name=name_of_llm)
 
@@ -4622,10 +4576,10 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
             if playerOne.current_room.npc and playerOne.current_room.npc.has_pending_action():
                 state = playerOne.current_room.npc.conversation_state
                 console = console + f"DEBUG: Pending action: {state['pending_action']}, Offer: {state['last_offer']}\n"
-                return console, []
             else:
                 console = console + "DEBUG: No pending conversation.\n"
-                return console, []
+            return _make_output_tuple([], None, "", "", "", console,
+                "", "", "", "", game_state_selector, None)
         
         # Use the streamlined command processor
         result = process_command(command, playerOne, playerOne.current_room)
@@ -4637,22 +4591,20 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
             item_images = []
 
         # return if no active game
-    else: 
-        print ("Returning from talk_to_functions early", room_image, map_image)
-        return (room_image, map_image, 
-        room_description.strip()+"\n"+room_riddles.strip(),
-        room_contents.strip(), console.strip(), your_status,
-        rooms_visted.strip(), inventory1.strip(),
-        room_long_description, game_state_selector, room_video)
+    else:
+        print("Returning from talk_to_functions early", room_image, map_image)
+        return _make_output_tuple(room_image, map_image, room_description,
+            room_riddles, room_contents, console, your_status,
+            rooms_visited, inventory1, room_long_description,
+            game_state_selector, room_video)
 
     # Check if playerOne exists (could be None if loading failed)
     if playerOne is None:
         print("PlayerOne is None, returning early")
-        return (room_image, map_image, 
-        room_description.strip()+"\n"+room_riddles.strip(),
-        room_contents.strip(), console.strip(), your_status,
-        rooms_visted.strip(), inventory1.strip(),
-        room_long_description, game_state_selector, room_video)
+        return _make_output_tuple(room_image, map_image, room_description,
+            room_riddles, room_contents, console, your_status,
+            rooms_visited, inventory1, room_long_description,
+            game_state_selector, room_video)
 
     #Room content
     room_long_description = playerOne.current_room.full_description    
@@ -4671,7 +4623,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         for monster in monsters:
             attack_probability = random.randint(0, int(9000/diff_dict[difficulty])) # like difficulty dynamic
             if attack_probability < playerOne.wealth or you_started_it: #if you attack anything it wakes monsterup 
-                console = console + monster.monster_attack(playerOne) #moved to monster not player :) 
+                console = console + monster.monster_attack(playerOne)
             monster_content = monster_content + monster.inventory_living()
             if monster.image:
                 monster_image.append(monster.image)
@@ -4687,11 +4639,9 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         
         if npc_action and npc_action[0] == "move":
             direction = npc_action[1]
-            console = console + npc.move(direction) #move the npc
+            console = console + npc.move(direction)
         elif not npc_introduced:
             # More dynamic introduction based on NPC personality
-            npc._ensure_attributes()  # Ensure NPC has all attributes
-            
             # Special introduction for MB
             if hasattr(npc, 'is_master_beast') and npc.is_master_beast:
                 console += "\n🌟 A stunningly beautiful, woman with glowing eyes turns to greet you: 🌟\n"
@@ -4703,7 +4653,6 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 npc_introduced = True
         else:
             # NPCs may occasionally offer information or comments
-            npc._ensure_attributes()  # Ensure NPC has all attributes
             if random.randint(0, 15) == 0 and npc.personality_traits['helpfulness'] in ['very helpful', 'eager to help']:
                 # Helpful NPCs might give unsolicited advice
                 if playerOne.health < 150:
@@ -4719,7 +4668,6 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 
         if difficulty in ["cheat", "easy"]: #NPC Inventory to help
             room_contents = room_contents + (f'NPC Inventory: {npc.inventory_living()}')
-            npc._ensure_attributes()  # Ensure NPC has all attributes
             room_contents = room_contents + (f'\nNPC Personality: {npc.personality_traits["mood"]}, {npc.personality_traits["helpfulness"]}\n')
         if npc.image:
             npc_image.append(npc.image)
@@ -4780,14 +4728,12 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         console = console + (f"Your trophies: {', '.join(trophies)}\n")
         game_state_selector = gr.Radio(value="Load-Game")
 
-    #update the image, description of the room, health, wealth, points, kills, map, inventory
     try:
         if playerOne.current_room.image:
             room_image.append(playerOne.current_room.image)
-    except:
+    except Exception:
         room_image = []
 
-    #update the video of the room
     room_video = getattr(playerOne.current_room, 'video_data', None)
         
     if room_video:
@@ -4817,7 +4763,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     #Rooms Explored
     visited = [room.number for room in rooms.values() if room.explored]
     not_visited = [room.number for room in rooms.values() if not room.explored]
-    rooms_visted = rooms_visted + "Rooms visited: " + str(visited) + "  Rooms to explore: " + str(not_visited) + "\n"
+    rooms_visited = rooms_visited + "Rooms visited: " + str(visited) + "  Rooms to explore: " + str(not_visited) + "\n"
     #Inventory
     inventory1 = "" + playerOne.inventory_living()
     if playerOne.armors:
@@ -4827,15 +4773,17 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     
     old_room = playerOne.current_room  
 
-    image_gallery = (player_image or []) + (npc_image or []) + (room_image or []) + (monster_image or [] ) + (item_images or [])
-    #print ("returning from talk_to_functions", player_image, npc_image, monster_image, room_image, item_images)
+    image_gallery = (player_image or []) + (npc_image or []) + (room_image or []) + (monster_image or []) + (item_images or [])
 
-    return (image_gallery, map_image, 
-        room_description.strip()+"\n"+room_riddles.strip(), # use room_description to show riddles
-        room_contents.strip(), console.strip(), your_status, 
-        rooms_visted.strip(), inventory1.strip(), 
-        room_long_description, game_state_selector, room_video)
+    return _make_output_tuple(image_gallery, map_image, room_description,
+        room_riddles, room_contents, console, your_status,
+        rooms_visited, inventory1, room_long_description,
+        game_state_selector, room_video)
 
+
+###############################################################################
+# ═══════════════════════ GLOBAL INITIALIZATION ══════════════════════════ #
+###############################################################################
 
 if not os.path.exists(model_path):
     print("Please select the path for  LLM & DIFF folders. ") 
@@ -4845,13 +4793,9 @@ if not os.path.exists(data_path):
     print("Please select the path for saved games, art, and game data .")
     data_path = ask_for_folder()
 
-# Get the current directory- not used
-current_dir = os.getcwd()
-
 # Define the directories
 image_dir = os.path.join(data_path, "Adventure_Art")
 game_dir = os.path.join(data_path, "Adventure_Game_Saved")
-# llm_dir no longer needed with Ollama
 diff_dir = os.path.join(model_path, "Diffusion_Models")
 
 # Check if the directories exist, if not, create them
@@ -4861,7 +4805,7 @@ if not os.path.exists(image_dir):
 if not os.path.exists(game_dir):
     os.makedirs(game_dir)
 
-help = """
+HELP_TEXT = """
 ADVENTURE GAME COMMANDS:
 
 MOVEMENT:
@@ -4959,7 +4903,7 @@ QUICK START:
 """
 
 active_game = False
-diff_dict = {"cheat": 1, "easy": 1, "medium": 2, "hard": 3}
+diff_dict = DIFFICULTY_ATTACK_FREQ
 
 playerOne = None
 rooms = {} # dictionary of rooms room number is they key, room objecters
@@ -4977,6 +4921,10 @@ else:
 list_of_diffusers = saved_diffusers()
 
 TEMP_VIDEO_DIR = setup_temp_directory()
+
+###############################################################################
+# ═══════════════════════ GRADIO UI ══════════════════════════════════════ #
+###############################################################################
 
 with gr.Blocks(theme=gr.themes.Default(font=[gr.themes.GoogleFont("IBM Plex Mono")])) as web_interface:
     if not list_of_saved_games:
@@ -5066,7 +5014,7 @@ ensure_mflux_installed()
 
 try:
     web_interface.launch(share=True)
-except:
+except Exception:
     web_interface.launch(share=False)
 
 """
@@ -5098,7 +5046,7 @@ KEY MODIFICATION POINTS:
    - ollama_generate(): Modify LLM parameters or add new models
    - handle_question_with_llm(): Enhance question-answering system
 
-GLOBAL VARIABLES (see initalize_game_varables() for details):
+GLOBAL VARIABLES (see initialize_game_variables() for details):
 - rooms: Main game world dictionary
 - playerOne: Player character object  
 - active_game: Game state flag

@@ -16,7 +16,7 @@ from typing import Optional
 # Known FLUX.2 model name prefixes (use Flux2Klein for these)
 _FLUX2_NAMES = {"flux2-klein", "klein", "flux2"}
 
-DIFFUSION_MODELS_DIR = "/Users/jonathanrothberg/Diffusion_Models"
+DIFFUSION_MODELS_DIR = os.path.expanduser("~/Diffusion_Models")
 
 
 def _is_flux2(model_name: str) -> bool:
@@ -96,10 +96,11 @@ class MfluxImageGenerator:
                     guidance=3.5,
                 )
 
-            os.makedirs("Generated_Art", exist_ok=True)
+            _art_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Generated_Art")
+            os.makedirs(_art_dir, exist_ok=True)
             safe = re.sub(r'[^a-zA-Z0-9_]', '_', prompt[:60])
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = os.path.abspath(f"Generated_Art/{safe}_{ts}.png")
+            filepath = os.path.join(_art_dir, f"{safe}_{ts}.png")
             result.save(path=filepath)
             return filepath
         except Exception as e:

@@ -124,8 +124,9 @@ IMAGE CACHING & REUSE SYSTEM:
 ###############################################################################
 
 
-SAVE_DIR = os.path.join(os.getcwd(), "Adventure_Game_Saved")
-ART_DIR = os.path.join(os.getcwd(), "Adventure_Art")
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVE_DIR = os.path.join(_SCRIPT_DIR, "Adventure_Game_Saved")
+ART_DIR = os.path.join(_SCRIPT_DIR, "Adventure_Art")
 IN_GAME_IMG_DIR = os.path.join(SAVE_DIR, "in_game_images")
 
 # Optional world bible (generated once with a heavier LLM) to guide fast runtime play
@@ -192,6 +193,40 @@ PRESET_THEMES = {
     "Custom (type below)": ""
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION FLAGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# When False (default), use simplified prompts for medium-sized models (≤40B).
+# When True, include timer_event, conditional_action, chain_reaction, mechanics.
+ADVANCED_DIRECTIVES = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HELPER UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_world_bible() -> Optional[Dict[str, Any]]:
+    """Safe accessor for the global WORLD_BIBLE. Returns None if unset or invalid."""
+    global WORLD_BIBLE
+    return WORLD_BIBLE if isinstance(WORLD_BIBLE, dict) else None
+
+
+def _is_small_model(model_id: str) -> bool:
+    """Heuristic: models roughly ≤40B are 'small' and get simplified prompts."""
+    if not model_id:
+        return True
+    lower = model_id.lower()
+    small_indicators = [
+        '4b', '7b', '8b', '12b', '14b', '22b', '27b',
+        '32b', '35b', 'qwen', 'gemma', 'phi', 'mistral-7',
+    ]
+    return any(ind in lower for ind in small_indicators)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IMAGE GENERATION & CACHING
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def ensure_directories_exist() -> None:
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -205,7 +240,8 @@ def get_theme_suffix() -> str:
     Returns WORLD_BIBLE["global_theme"] if set (via UI), otherwise default theme.
     """
     try:
-        theme_suffix = ((WORLD_BIBLE or {}).get("global_theme") if 'WORLD_BIBLE' in globals() else None)
+        wb = _get_world_bible()
+        theme_suffix = wb.get("global_theme") if wb else None
     except Exception:
         theme_suffix = None
     
@@ -397,8 +433,9 @@ def generate_room_image_if_needed(state_mgr: "StateManager", image_gen: Optional
         # Try to get description from world bible
         wb_desc = None
         try:
-            if 'WORLD_BIBLE' in globals() and WORLD_BIBLE:
-                for loc in WORLD_BIBLE.get("locations", []):
+            wb = _get_world_bible()
+            if wb:
+                for loc in wb.get("locations", []):
                     if isinstance(loc, dict) and loc.get("name", "").lower() == room_name.lower():
                         wb_desc = loc.get("description")
                         break
@@ -468,10 +505,7 @@ def _world_bible_reference_for(subject_name: str, subject_type: str) -> Optional
     Returns a compact reference dict with section and index if found.
     Safe if WORLD_BIBLE is missing or structure varies.
     """
-    try:
-        wb = WORLD_BIBLE or {}
-    except Exception:
-        wb = {}
+    wb = _get_world_bible() or {}
     name_l = (subject_name or "").strip().lower()
     if not name_l or not isinstance(wb, dict):
         return None
@@ -584,6 +618,11 @@ def get_image_for_subject(state_mgr: "StateManager", subject_name: str) -> Optio
     except Exception:
         return None
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GAME STATE
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class GameState:
@@ -752,6 +791,10 @@ class GameState:
         payload = json.loads(json_str)
         return GameState(**payload)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATE MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class StateManager:
     def __init__(self, state: Optional[GameState] = None) -> None:
@@ -1236,6 +1279,10 @@ class StateManager:
         self.state = GameState.from_json(json_str)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class LLMEngine:
     def __init__(self, model_path: str, max_new_tokens: int = 1500, temperature: float = 0.7) -> None:
         self.model_path = model_path
@@ -1283,6 +1330,10 @@ class LLMEngine:
         except Exception as e:
             return f"(LLM error: {e})"
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JSON PARSING & ERROR RECOVERY
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def fix_common_json_errors(json_str: str) -> str:
     """
@@ -1543,6 +1594,10 @@ def extract_fallback_directives(text: str) -> Optional[Dict[str, Any]]:
     return directives if directives else None
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# VALIDATION & WORLD BIBLE
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def validate_and_fix_directives(directives: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     """
     Validate and fix common JSON schema issues in LLM directives.
@@ -1795,8 +1850,9 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str],
         enforced_theme = theme
         if not enforced_theme or not enforced_theme.strip():
             try:
-                if 'WORLD_BIBLE' in globals() and WORLD_BIBLE and isinstance(WORLD_BIBLE, dict):
-                    enforced_theme = WORLD_BIBLE.get("global_theme")
+                wb = _get_world_bible()
+                if wb:
+                    enforced_theme = wb.get("global_theme")
             except Exception:
                 pass
 
@@ -1804,45 +1860,28 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str],
         if not enforced_theme or not enforced_theme.strip():
             enforced_theme = DEFAULT_IMAGE_THEME
         
-        prompt = f"""Create a COMPLETE, SOLVABLE adventure game outline for: {snapshot}
+        prompt = f"""Create a solvable adventure game as JSON for: {snapshot}
 
-FRAMEWORK REQUIREMENTS - Every element must serve the story:
-- CONSISTENT STORY ARC: Create a logical progression where each objective builds toward the win condition
-- ALL ITEMS HAVE PURPOSE: Every key_item must be essential for solving puzzles, defeating monsters, or achieving objectives
-- ALL NPCs HAVE REASON: Every NPC must provide crucial information, items, or access that advances the story
-- INTERCONNECTED ELEMENTS: Items, NPCs, riddles, and mechanics must form a cohesive puzzle where each piece is necessary
-- WINNABLE PROGRESSION: The player must be able to logically discover and use all elements to complete the game
+Theme (set "global_theme" to this exact string): {enforced_theme}
 
-FLEXIBLE BUT COHERENT: Be creative with the theme and setting, but ensure every element contributes to the narrative goal.
+Required JSON fields:
+- objectives: 4 goals in order
+- locations: 5 rooms (name, description)
+- npcs: 2-3 characters (name, location, personality, provides)
+- monsters: 2-3 enemies (name, location, difficulty, weakness)
+- riddles: 2 puzzles (location, hint, solution, reward)
+- key_items: 6-8 items (name, purpose)
+- item_locations: where each item is found
+- progression_hints: 3-4 hints
+- mechanics: 3 cause-effect rules (action, effect, location)
+- main_arc: 2-sentence story summary
+- win_condition: what completes the game
 
+Example flow: torch (entrance) -> lights dark cave -> find key -> unlock temple -> get sword -> defeat guardian -> claim treasure
 
+Every item must be useful. Every NPC must help. The game must be winnable.
 
-THEME REQUIREMENT:
-- Use this EXACT art/world theme for the entire game and set JSON field "global_theme" to  this string:
-{enforced_theme}
-
-Include these fields:
-- objectives: 4 main goals (in logical order of completion)
-- theme: visual style (one paragraph)  
-- locations: 5 rooms with name and description
-- npcs: 2-3 characters with name, location, personality, and what they provide (hint/item/access)
-- monsters: 2-3 enemies with name, location, difficulty, and weakness (what defeats them)
-- riddles: 2 puzzles with location, hint, solution approach, and reward
-- key_items: 6-8 items with name and purpose (include weapons, tools, keys, healing items)
-- item_locations: where each key_item is found or obtained
-- progression_hints: 3-4 hints about the intended solution path
-- mechanics: 3-5 cause-effect rules with action, effect, and location (mechanics should enhance gameplay and support objectives, not create arbitrary obstacles)
-- main_arc: story summary (2-3 sentences)
-- win_condition: what specifically completes the game
-
-Example structure (but be creative):
-- Player needs torch (from entrance) to see in dark cave
-- Dark cave has key (guarded by riddle)
-- Key opens temple where sword is found
-- Sword defeats guardian blocking treasure
-- Treasure contains artifact that completes quest
-
-Respond with JSON only. Do not include any explanatory text, markdown formatting, or anything else - just the raw JSON object."""
+Output ONLY valid JSON. No markdown, no commentary."""
 
         # DEBUG: Show full prompt being sent to LLM
         print(f"[world_bible] PROMPT BEING SENT TO {heavy_model_id} ({len(prompt)} chars):")
@@ -1857,10 +1896,9 @@ Respond with JSON only. Do not include any explanatory text, markdown formatting
         else:
             wb_model_path = os.path.join(MLX_MODELS_DIR, heavy_model_id)
 
-        wb_engine = LLMEngine(model_path=wb_model_path, max_new_tokens=max_tokens, temperature=0.7)
-        system_msg = "You are a game designer. Output ONLY a single valid JSON object. No markdown fences, no commentary, no text outside the JSON."
+        wb_engine = LLMEngine(model_path=wb_model_path, max_new_tokens=max_tokens, temperature=0.5)
+        system_msg = "You are a game designer. Output ONLY a single valid JSON object. No markdown, no commentary."
         raw_response = wb_engine.generate(system_msg, prompt)
-        wb_engine._unload()
 
         print(f"[world_bible] RAW LLM RESPONSE ({len(raw_response)} chars):")
         print("=" * 80)
@@ -1930,9 +1968,38 @@ Respond with JSON only. Do not include any explanatory text, markdown formatting
                 print(f"[world_bible] All JSON parsing strategies failed: {e}")
                 plan = None
 
-        # If all parsing failed, return None - let user retry
+        # If all parsing failed, retry once with simpler prompt
         if plan is None:
-            print("[world_bible] No valid JSON parsed from response")
+            print("[world_bible] First attempt failed — retrying with simpler prompt")
+            retry_prompt = (
+                f"Create adventure game JSON for theme: {enforced_theme}\n"
+                "Include: objectives (4 goals), locations (5 rooms with name/description), "
+                "npcs (2 with name/location/personality/provides), "
+                "monsters (2 with name/location/difficulty/weakness), "
+                "key_items (6 with name/purpose), win_condition.\n"
+                "Output valid JSON only."
+            )
+            retry_response = wb_engine.generate(system_msg, retry_prompt)
+            retry_text = retry_response.replace("```json", "").replace("```", "").strip()
+            retry_candidates = extract_json_from_text(retry_text)
+            if retry_candidates:
+                plan = retry_candidates[0]
+                print("[world_bible] Retry succeeded")
+            else:
+                # Last resort: basic { } extraction
+                s, e = retry_text.find("{"), retry_text.rfind("}") + 1
+                if s >= 0 and e > s:
+                    try:
+                        plan = json.loads(fix_common_json_errors(retry_text[s:e]))
+                        print("[world_bible] Retry succeeded with JSON fixes")
+                    except Exception:
+                        pass
+
+        # Unload model after all attempts
+        wb_engine._unload()
+
+        if plan is None:
+            print("[world_bible] All attempts failed — no valid JSON")
             return None
 
         # NORMALIZE THEME KEY: prefer single canonical key "global_theme" (from UI)
@@ -1961,14 +2028,18 @@ Respond with JSON only. Do not include any explanatory text, markdown formatting
     return None
 
 
-# Full-featured system instructions for capable local LLMs
-SYSTEM_INSTRUCTIONS = (
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM INSTRUCTIONS (LLM prompts)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Core instructions — reliable with models ≥ 7B
+SYSTEM_INSTRUCTIONS_CORE = (
     "You are a text adventure narrator.\n\n"
 
     "YOUR OUTPUT FORMAT (follow this EXACTLY every turn):\n"
-    "1. Write 2-5 sentences of narration describing what happens and what the player sees.\n"
+    "1. Write 2-5 sentences of narration describing what the player sees.\n"
     "2. After the narration, write a JSON block inside ```json``` fences.\n"
-    "3. The JSON block MUST have this structure:\n"
+    "3. The JSON block MUST look like this:\n"
     '   ```json\n'
     '   {"state_updates": { ... }, "images": ["short image prompt"]}\n'
     '   ```\n\n'
@@ -1977,60 +2048,95 @@ SYSTEM_INSTRUCTIONS = (
     "- location: where player is now\n"
     "- inventory: what player carries\n"
     "- current_room_items: what is in this room\n"
-    "- current_exits: where the player can go from here\n"
-    "- story_context: what happened before (YOUR MEMORY from previous turns)\n"
-    "- game_flags: puzzle states, timers, conditions you set\n\n"
+    "- current_exits: where the player can go\n"
+    "- story_context: what happened before (YOUR MEMORY)\n"
+    "- game_flags: puzzle states and conditions\n\n"
 
-    "AVAILABLE TOOLS (put these inside state_updates):\n"
+    "AVAILABLE TOOLS (put inside state_updates):\n"
     "  move_to: \"Room Name\"              - move player to a room\n"
     "  connect: [[\"RoomA\", \"RoomB\"]]     - link rooms bidirectionally\n"
-    "  place_items: [\"item\"]              - put item in current room for player to find\n"
-    "  room_take: [\"item\"]               - player picks up item from room into inventory\n"
-    "  add_items: [\"item\"]               - give item directly to player inventory\n"
-    "  remove_items: [\"item\"]            - remove item from inventory\n"
-    "  change_health: -5 or +10           - damage or heal the player\n"
-    "  set_context: \"summary\"            - save what happened (YOUR MEMORY for next turn)\n"
+    "  place_items: [\"item\"]              - put item in current room\n"
+    "  room_take: [\"item\"]               - player PICKS UP item from room into inventory\n"
+    "  add_items: [\"item\"]               - magically give item (NOT for picking up!)\n"
+    "  remove_items: [\"item\"]            - destroy/consume item from inventory (NOT for picking up!)\n"
+    "  change_health: -5 or +10           - damage or heal\n"
+    "  set_context: \"summary\"            - save what happened (YOUR MEMORY)\n"
     "  set_flag: {\"name\": \"x\", \"value\": true} - track puzzle/event states\n"
-    "  timer_event: {\"name\": \"poison\", \"duration\": 3, \"action\": \"take_damage\", \"value\": 5}\n"
-    "  conditional_action: {\"condition\": \"has_key\", \"action\": \"unlock\", \"fallback\": \"door is locked\"}\n\n"
+    "  add_note: \"quest log entry\"       - add to quest log\n\n"
+    "IMPORTANT: When player picks up an item, use room_take, NOT add_items+remove_items.\n"
+    "room_take moves the item from the room to inventory in one step.\n\n"
 
     "IMAGE PROMPTS (put inside images array):\n"
     "  images: [\"short visual description of the scene\"]\n"
-    "  ALWAYS include at least one image prompt that matches your narration.\n\n"
+    "  ALWAYS include at least one image prompt.\n\n"
 
-    "EXAMPLE 1 - Player enters a new room:\n"
-    "The passage opens into a pitch-black chamber. You hear dripping water echoing off distant walls. Without light, you can barely see your own hand.\n\n"
+    "EXAMPLE 1 - Entering a new room:\n"
+    "The passage opens into a pitch-black chamber. You hear dripping water. Without light, you can barely see.\n\n"
     "```json\n"
     "{\"state_updates\": {"
     "\"move_to\": \"Dark Chamber\", "
     "\"connect\": [[\"Entrance Hall\", \"Dark Chamber\"]], "
     "\"place_items\": [\"Old Torch\"], "
-    "\"set_context\": \"Player entered dark room. Old torch on ground. Needs light to explore.\"}, "
-    "\"images\": [\"pitch-black cavern chamber, faint water dripping, barely visible shadows\"]}\n"
+    "\"set_context\": \"Entered dark room. Torch on ground. Needs light.\"}, "
+    "\"images\": [\"pitch-black cavern chamber, faint water dripping\"]}\n"
     "```\n\n"
 
-    "EXAMPLE 2 - Player uses an item:\n"
-    "You insert the rusty key into the lock. It turns with a satisfying click and the ancient door swings open, revealing a golden glow beyond.\n\n"
+    "EXAMPLE 2 - Picking up an item (use room_take!):\n"
+    "You grab the torch from the dusty floor. It feels solid in your hand.\n\n"
+    "```json\n"
+    "{\"state_updates\": {"
+    "\"room_take\": [\"Torch\"], "
+    "\"set_context\": \"Picked up torch from floor. Now in inventory.\"}, "
+    "\"images\": [\"adventurer holding a torch in a dim cave\"]}\n"
+    "```\n\n"
+
+    "EXAMPLE 3 - Using/consuming an item:\n"
+    "You insert the rusty key into the lock. It turns with a click and the door swings open.\n\n"
     "```json\n"
     "{\"state_updates\": {"
     "\"remove_items\": [\"Rusty Key\"], "
     "\"set_flag\": {\"name\": \"treasury_unlocked\", \"value\": true}, "
     "\"move_to\": \"Treasury\", "
     "\"connect\": [[\"Locked Corridor\", \"Treasury\"]], "
-    "\"set_context\": \"Used key to unlock treasury. Key consumed. Treasury now accessible.\"}, "
-    "\"images\": [\"ancient treasury door swinging open, golden light spilling through\"]}\n"
+    "\"set_context\": \"Used key to unlock treasury. Key consumed.\"}, "
+    "\"images\": [\"ancient treasury door opening, golden light\"]}\n"
     "```\n\n"
 
     "RULES:\n"
     "1. ALWAYS check inventory before letting player use items\n"
     "2. ALWAYS check current_room_items before room_take\n"
-    "3. ALWAYS use connect when the player moves to a new room\n"
-    "4. ALWAYS update set_context with a summary of what happened this turn\n"
-    "5. ALWAYS include at least one image prompt in the images array\n"
-    "6. JSON goes AFTER narration text, inside ```json``` fences\n"
-    "7. Describe what the player SEES - the environment, objects, atmosphere\n"
+    "3. ALWAYS use connect when moving to a NEW room\n"
+    "4. ALWAYS update set_context with what happened this turn\n"
+    "5. ALWAYS include at least one image prompt\n"
+    "6. JSON goes AFTER narration, inside ```json``` fences\n"
+    "7. Describe what the player SEES\n\n"
+
+    "JSON FORMAT REMINDER:\n"
+    "- Use double quotes for all keys and string values\n"
+    "- No trailing commas\n"
+    "- Close all { } and [ ] brackets\n"
 )
 
+# Advanced directive instructions — appended for larger / more capable models
+SYSTEM_INSTRUCTIONS_ADVANCED = (
+    "\nADVANCED TOOLS (also inside state_updates):\n"
+    "  timer_event: {\"name\": \"poison\", \"duration\": 3, \"action\": \"take_damage\", \"value\": 5}\n"
+    "  conditional_action: {\"condition\": \"has_key\", \"action\": \"unlock_door\", \"fallback\": \"door is locked\"}\n"
+    "  chain_reaction: {\"trigger\": \"has_item_and_at_location\", \"effects\": [...]}\n"
+    "  mechanics: {\"action\": \"light torch\", \"effect\": \"reveals hidden passage\", \"location\": \"Dark Cave\"}\n"
+)
+
+
+def get_system_instructions() -> str:
+    """Return the appropriate system instructions based on ADVANCED_DIRECTIVES flag."""
+    if ADVANCED_DIRECTIVES:
+        return SYSTEM_INSTRUCTIONS_CORE + SYSTEM_INSTRUCTIONS_ADVANCED
+    return SYSTEM_INSTRUCTIONS_CORE
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GAME LOOP CORE (start_story, build_user_prompt, apply_llm_directives)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["MfluxImageGenerator"], theme: Optional[str] = None) -> Tuple[str, List[str]]:
     """Ask the LLM to produce an opening scene and seed initial state via JSON.
@@ -2039,7 +2145,8 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
     """
     # Prefer theme from world bible when available
     try:
-        chosen_theme = theme or ((WORLD_BIBLE or {}).get("global_theme") if 'WORLD_BIBLE' in globals() else None) or "An atmospheric fantasy in caverns and ruins beneath an ancient forest."
+        wb = _get_world_bible()
+        chosen_theme = theme or (wb.get("global_theme") if wb else None) or "An atmospheric fantasy in caverns and ruins beneath an ancient forest."
     except Exception:
         chosen_theme = theme or "An atmospheric fantasy in caverns and ruins beneath an ancient forest."
     kickoff = (
@@ -2054,34 +2161,29 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
     # If a world bible exists, pass key context to guide the LLM
     wb_hint = ""
     try:
-        if WORLD_BIBLE:
-            # Build a richer context from world bible
+        _wb = _get_world_bible()
+        if _wb:
             hints = []
-            
-            # Objectives
-            if objs := WORLD_BIBLE.get("objectives", []):
+
+            if objs := _wb.get("objectives", []):
                 hints.append(f"objectives: {'; '.join(objs[:3])}")
-            
-            # NPCs in current or nearby locations
-            if npcs := WORLD_BIBLE.get("npcs", WORLD_BIBLE.get("key_characters", [])):
+
+            if npcs := _wb.get("npcs", _wb.get("key_characters", [])):
                 npc_info = [f"{n.get('name', 'Someone')} ({n.get('personality', n.get('role', 'NPC'))})" for n in npcs[:2]]
                 if npc_info:
                     hints.append(f"NPCs: {', '.join(npc_info)}")
-            
-            # Monsters that might be encountered
-            if monsters := WORLD_BIBLE.get("monsters", []):
+
+            if monsters := _wb.get("monsters", []):
                 monster_info = [f"{m.get('name', 'creature')} ({m.get('difficulty', 'unknown')})" for m in monsters[:2]]
                 if monster_info:
                     hints.append(f"monsters: {', '.join(monster_info)}")
-            
-            # Current health status
+
             if state_mgr.state.health < 50:
                 hints.append(f"player health: {state_mgr.state.health}/100 (wounded)")
             elif state_mgr.state.health < 100:
                 hints.append(f"player health: {state_mgr.state.health}/100")
-            
-            # Locations and their descriptions (CRITICAL for consistency)
-            if locations := WORLD_BIBLE.get("locations", []):
+
+            if locations := _wb.get("locations", []):
                 # Include all location descriptions to guide narrative
                 loc_descriptions = []
                 for loc in locations:
@@ -2107,7 +2209,7 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
     except Exception:
         wb_hint = ""
 
-    llm_text = llm.generate(SYSTEM_INSTRUCTIONS + wb_hint, kickoff)
+    llm_text = llm.generate(get_system_instructions() + wb_hint, kickoff)
     final_text, new_images, payloads, tool_logs = apply_llm_directives(state_mgr, llm_text, image_gen)
     # If LLM failed to seed a location, ensure we have at least 'Start'.
     if not state_mgr.state.location:
@@ -2127,11 +2229,214 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
     return final_text or "Your journey begins...", new_images
 
 
+def _generate_turn_images(
+    state_mgr: StateManager,
+    updates: Dict[str, Any],
+    llm_img_prompts: List[str],
+    image_gen: Optional[MfluxImageGenerator],
+    debug_lines: List[str],
+) -> List[str]:
+    """Generate and filter images for the current turn.
+
+    Handles auto-generation for new rooms/items, filtering against cached images,
+    theme enforcement, and duplicate prevention. Returns list of new image paths.
+    """
+    if not image_gen:
+        return []
+
+    image_paths: List[str] = []
+    img_prompts = list(llm_img_prompts)
+    img_prompts_lower = [p.lower() for p in img_prompts if isinstance(p, str)]
+
+    # --- Auto-generate image for new rooms ---
+    if isinstance(updates.get("move_to"), str):
+        new_room = updates["move_to"]
+        if not state_mgr.state.has_room_image(new_room):
+            auto_prompt = f"atmospheric fantasy {new_room.lower()}, detailed environment, adventure game location"
+            if not any(new_room.lower() in p for p in img_prompts_lower):
+                img_prompts.append(auto_prompt)
+                debug_lines.append(f"Auto-generating image for room: {new_room}")
+        else:
+            state_mgr.state.images_reused += 1
+            debug_lines.append(f"REUSING existing image for room: {new_room}")
+
+    # --- Auto-generate images for newly placed/taken items ---
+    for item in list(updates.get("place_items") or []) + list(updates.get("room_take") or []):
+        item_str = str(item)
+        already_imaged = any(
+            item_str.lower() in img.get("prompt", "").lower()
+            for img in state_mgr.state.last_images
+        )
+        if not already_imaged:
+            if not any(item_str.lower() in p for p in img_prompts_lower):
+                img_prompts.append(f"detailed close-up of {item_str}, fantasy adventure game item")
+                debug_lines.append(f"Auto-generating image for item: {item_str}")
+
+    if not img_prompts:
+        return image_paths
+
+    # --- Build set of known items for filtering ---
+    known_items: Set[str] = set()
+    for v in state_mgr.state.room_items.values():
+        known_items.update(str(it) for it in v)
+    known_items.update(str(it) for it in state_mgr.state.inventory)
+    wb = _get_world_bible() or {}
+    for it in wb.get("key_items", []):
+        nm = it.get("name") if isinstance(it, dict) else str(it)
+        if nm:
+            known_items.add(str(nm))
+
+    # --- Helper: check if we already have an image for a subject ---
+    def _has_image_for(text: str) -> bool:
+        t = str(text).strip().lower()
+        if any(t == str(r).strip().lower() for r in state_mgr.state.rooms_with_images):
+            state_mgr.state.images_reused += 1
+            return True
+        if any(t == str(i).strip().lower() for i in state_mgr.state.items_with_images):
+            state_mgr.state.images_reused += 1
+            return True
+        return False
+
+    # --- Filter prompts: skip images we already have ---
+    move_room = updates.get("move_to") if isinstance(updates.get("move_to"), str) else None
+    target_room = move_room or state_mgr.state.location
+    has_room_img = bool(target_room and _has_image_for(str(target_room)))
+
+    filtered_prompts: List[str] = []
+    for p in img_prompts:
+        if not isinstance(p, str) or not p.strip():
+            continue
+        lc = p.lower()
+        # Skip room prompt if we already have that room's image
+        if move_room and move_room.lower() in lc and _has_image_for(move_room):
+            debug_lines.append(f"Reuse existing image for room: {move_room}")
+            continue
+        # Skip all environment prompts if we have a room image (unless close-up)
+        if has_room_img:
+            is_closeup = any(kw in lc for kw in ("close-up", "close up", "closeup"))
+            if not is_closeup:
+                debug_lines.append(f"Reuse existing room image for: {target_room}")
+                continue
+        # Skip item prompts if we already have that item's image
+        skip = False
+        for it in known_items:
+            if it.lower() in lc and _has_image_for(it):
+                debug_lines.append(f"Reuse existing image for item: {it}")
+                skip = True
+                break
+        if skip:
+            continue
+        filtered_prompts.append(p)
+
+    debug_lines.append(f"Image filter: {len(img_prompts) - len(filtered_prompts)} skipped, {len(filtered_prompts)} to generate")
+
+    # --- Generate filtered prompts ---
+    theme_suffix = get_theme_suffix()
+    generated_rooms_this_batch: Set[str] = set()
+
+    for p in filtered_prompts:
+        final_prompt = p.strip()
+
+        # Reuse if LLM passed an existing filename
+        base = os.path.basename(final_prompt)
+        if base.lower().endswith(('.png', '.jpg', '.jpeg')):
+            for cand in [os.path.join(ART_DIR, base), os.path.join(IN_GAME_IMG_DIR, base)]:
+                if os.path.exists(cand) and cand not in image_paths:
+                    image_paths.append(cand)
+                    debug_lines.append(f"[reuse] Existing file: {base}")
+                    break
+            else:
+                # Try room/item fallback
+                room_path = get_current_room_image(state_mgr)
+                if room_path and room_path not in image_paths:
+                    image_paths.append(room_path)
+                    debug_lines.append(f"[reuse] Room image fallback: {os.path.basename(room_path)}")
+            continue
+
+        # Identify target room/item
+        prompt_lower = p.strip().lower()
+        target_room_for_prompt = None
+        for room_name in state_mgr.state.known_map.keys():
+            if room_name.lower() in prompt_lower:
+                target_room_for_prompt = room_name
+                break
+
+        # Skip duplicate room images within this turn
+        if target_room_for_prompt and target_room_for_prompt in generated_rooms_this_batch:
+            debug_lines.append(f"Skip duplicate room image this turn: {target_room_for_prompt}")
+            continue
+
+        target_item_for_prompt = None
+        all_items = set(state_mgr.state.inventory)
+        for ri in state_mgr.state.room_items.values():
+            all_items.update(ri)
+        for item_name in all_items:
+            if isinstance(item_name, str) and item_name.lower() in prompt_lower:
+                target_item_for_prompt = item_name
+                break
+        if not target_item_for_prompt:
+            for it in wb.get("key_items", []):
+                nm = it.get("name") if isinstance(it, dict) else str(it)
+                if isinstance(nm, str) and nm.lower() in prompt_lower:
+                    target_item_for_prompt = nm
+                    break
+
+        # If we can't identify subject and LLM didn't request it, skip
+        if not target_room_for_prompt and not target_item_for_prompt:
+            if p not in llm_img_prompts:
+                debug_lines.append("[skip] Unlinked auto-gen prompt skipped")
+                continue
+
+        # Enforce art style
+        if theme_suffix and theme_suffix.lower() not in final_prompt.lower():
+            final_prompt = f"{final_prompt}. World art style: {theme_suffix}. Strictly adhere to this style."
+
+        debug_lines.append(f"Generating image: {final_prompt[:120]}")
+        out_path = image_gen.generate(final_prompt)
+
+        if out_path:
+            original_prompt = p.strip().lower()
+            # Track as room image
+            room_identified = False
+            for room_name in state_mgr.state.known_map.keys():
+                if room_name.lower() in original_prompt:
+                    state_mgr.state.add_room_image(room_name, out_path, p.strip())
+                    generated_rooms_this_batch.add(room_name)
+                    room_identified = True
+                    image_paths.append(out_path)
+                    debug_lines.append(f"[track] ROOM: '{room_name}' → {os.path.basename(out_path)}")
+                    break
+            # Track as item image
+            if not room_identified:
+                for item_name in all_items:
+                    if item_name.lower() in original_prompt:
+                        state_mgr.state.add_item_image(item_name, out_path, p.strip())
+                        image_paths.append(out_path)
+                        debug_lines.append(f"[track] ITEM: '{item_name}' → {os.path.basename(out_path)}")
+                        break
+                else:
+                    debug_lines.append("[skip] Generated image not matched to room/item")
+        else:
+            debug_lines.append(f"Image generation failed for: {p.strip()[:80]}")
+
+    debug_lines.append(f"Images cached: {len(state_mgr.state.last_images)}")
+    return image_paths
+
+
 def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional[MfluxImageGenerator]) -> Tuple[str, List[str], List[Dict[str, Any]], List[str]]:
     image_paths: List[str] = []
     cleaned_text = text
     debug_lines: List[str] = []
     json_payloads: List[Dict[str, Any]] = []
+
+    # Strip <think>...</think> blocks (chain-of-thought from reasoning models like Qwen)
+    # These are internal model reasoning and should never appear in narration
+    think_pat = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+    if think_pat.search(text):
+        text = think_pat.sub("", text).strip()
+        debug_lines.append("[clean] Stripped <think> reasoning block from output")
+    # Also strip orphan tags (unclosed <think> or stray </think>)
+    text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
 
     # ENHANCED JSON EXTRACTION STRATEGY
     # Use improved extraction that handles partial and malformed JSON
@@ -2201,6 +2506,13 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
             json_payloads.append(fallback_directives)
             debug_lines.append(f"Extracted fallback directives: {list(fallback_directives.keys())}")
 
+    # Narration-only fallback — no state changes if all parsing failed
+    if not json_payloads:
+        debug_lines.append("[WARNING] No valid JSON found — narration only, no state changes")
+        # Preserve narrative continuity even without JSON
+        if cleaned_text.strip():
+            state_mgr.state.story_context = f"[narration-only] {cleaned_text[:200]}"
+
     # 3) Apply directives
     last_room_moved_to = None  # Track room moves for image display
     image_paths = []  # Initialize image paths list
@@ -2247,11 +2559,25 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                 last_room_moved_to = updates["move_to"]  # Track the move
             
             # Inventory updates (can happen anytime)
-            for item in updates.get("add_items", []) or []:
-                state_mgr.add_item(str(item))
+            # FIX: Detect when LLM sends both add_items and remove_items for the
+            # same item — this is a common small-model mistake where it means
+            # "take from room" but uses add+remove instead of room_take.
+            add_list = [str(i) for i in (updates.get("add_items", []) or [])]
+            remove_list = [str(i) for i in (updates.get("remove_items", []) or [])]
+            # Items in BOTH lists → treat as room_take (add to inventory, remove from room)
+            overlap = set(add_list) & set(remove_list)
+            if overlap:
+                for item in overlap:
+                    state_mgr.add_item(item)
+                    state_mgr.remove_item_from_room(item)
+                    debug_lines.append(f"tool.auto_room_take: {item} (LLM sent add+remove, corrected to room_take)")
+                add_list = [i for i in add_list if i not in overlap]
+                remove_list = [i for i in remove_list if i not in overlap]
+            for item in add_list:
+                state_mgr.add_item(item)
                 debug_lines.append(f"tool.add_item: {item}")
-            for item in updates.get("remove_items", []) or []:
-                state_mgr.remove_item(str(item))
+            for item in remove_list:
+                state_mgr.remove_item(item)
                 debug_lines.append(f"tool.remove_item: {item}")
             # Health and notes
             if updates.get("change_health") is not None:
@@ -2313,15 +2639,23 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                     condition_met = bool(state_mgr.state.game_flags[condition])
 
                 if condition_met and action:
-                    # Execute the conditional action (simple mapping for now)
+                    # Execute the conditional action — actually change state
                     if action.startswith("unlock_"):
                         target = action[7:]
-                        debug_lines.append(f"tool.conditional_action: {condition} met -> {action}")
+                        state_mgr.state.game_flags[f"{target}_unlocked"] = True
+                        debug_lines.append(f"tool.conditional_action: {condition} met -> unlocked {target}")
                     elif action.startswith("reveal_"):
                         target = action[7:]
-                        debug_lines.append(f"tool.conditional_action: {condition} met -> {action}")
+                        state_mgr.state.game_flags[f"{target}_revealed"] = True
+                        debug_lines.append(f"tool.conditional_action: {condition} met -> revealed {target}")
+                    elif action.startswith("move_"):
+                        target = action[5:]
+                        state_mgr.move_to(target)
+                        debug_lines.append(f"tool.conditional_action: {condition} met -> moved to {target}")
                     else:
-                        debug_lines.append(f"tool.conditional_action: {condition} met -> {action} (custom)")
+                        # Generic: set the action string as a flag
+                        state_mgr.state.game_flags[action] = True
+                        debug_lines.append(f"tool.conditional_action: {condition} met -> flag '{action}' set")
                 elif fallback:
                     debug_lines.append(f"tool.conditional_action: {condition} not met -> {fallback}")
 
@@ -2362,376 +2696,12 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                 state_mgr.state.game_flags[chain_id] = chain_data
                 debug_lines.append(f"tool.chain_reaction: {trigger} -> {len(effects)} effects stored")
 
-            # Images - both LLM-requested and auto-generated for new rooms and items
-            img_prompts = directives.get("images", []) if isinstance(directives, dict) else []
-            # Track processed prompts to avoid duplicates
-            img_prompts_lower = [p.lower() for p in img_prompts if isinstance(p, str)]
-            
-            # AUTO-GENERATE IMAGE FOR NEW ROOMS (Critical Reuse Point #1)
-            # ============================================================
-            # This handles room images when player moves to a new location
-            # REUSE VERIFICATION:
-            # - Pregenerated "Start" -> has_room_image("Start") = True -> Skip generation
-            # - First visit to "Cave" -> has_room_image("Cave") = False -> Generate
-            # - Return to "Cave" -> has_room_image("Cave") = True -> Skip generation
-            if image_gen and isinstance(updates.get("move_to"), str):
-                new_room = updates["move_to"]
-                # SIMPLE CHECK: use our direct tracking system
-                if not state_mgr.state.has_room_image(new_room):
-                    # Generate an atmospheric overview for this room
-                    auto_prompt = f"atmospheric fantasy {new_room.lower()}, detailed environment, adventure game location"
-                    # Skip if LLM already requested this type of image
-                    if not any(new_room.lower() in p for p in img_prompts_lower):
-                        img_prompts = list(img_prompts) + [auto_prompt]
-                        debug_lines.append(f"Auto-generating image for room: {new_room}")
-                    else:
-                        debug_lines.append(f"Skip auto-gen for room {new_room} - LLM already requested it")
-                else:
-                    state_mgr.state.images_reused += 1  # Track successful reuse!
-                    # Find the actual image filename for debugging
-                    existing_image = "unknown"
-                    for img_data in state_mgr.state.last_images:
-                        if img_data.get("type") == "room" and img_data.get("subject") == new_room:
-                            existing_image = os.path.basename(img_data.get("path", "unknown"))
-                            break
-                    debug_lines.append(f"REUSING existing image for room: {new_room} → {existing_image} (saved generation)")
-            
-            # Auto-generate images for important items when placed or taken
-            items_to_image = []
-            
-            # Check for newly placed items
-            for item in updates.get("place_items", []) or []:
-                item_str = str(item)
-                # Check if this item has been imaged before
-                item_already_imaged = any(
-                    item_str.lower() in img.get("prompt", "").lower()
-                    for img in state_mgr.state.last_images
-                )
-                if not item_already_imaged and image_gen:
-                    # Skip if LLM already requested this image
-                    if not any(item_str.lower() in p for p in img_prompts_lower):
-                        items_to_image.append(item_str)
-                        debug_lines.append(f"Auto-generating image for new item: {item_str}")
-                    else:
-                        debug_lines.append(f"Skip auto-gen for item {item_str} - LLM already requested it")
-            
-            # Check for items being taken (room_take)
-            for item in updates.get("room_take", []) or []:
-                item_str = str(item)
-                # Important items being picked up should get a close-up
-                item_already_imaged = any(
-                    item_str.lower() in img.get("prompt", "").lower()
-                    for img in state_mgr.state.last_images
-                )
-                if not item_already_imaged and image_gen:
-                    # Skip if LLM already requested this image
-                    if not any(item_str.lower() in p for p in img_prompts_lower):
-                        items_to_image.append(item_str)
-                        debug_lines.append(f"Auto-generating image for picked up item: {item_str}")
-                    else:
-                        debug_lines.append(f"Skip auto-gen for picked up item {item_str} - LLM already requested it")
-            
-            # Add item image prompts
-            for item in items_to_image:
-                item_prompt = f"detailed close-up of {item}, fantasy adventure game item, magical artifact"
-                img_prompts = list(img_prompts) + [item_prompt]
-            
-            # Generate all collected image prompts
-            if image_gen and isinstance(img_prompts, list):
-                # Always apply global theme for consistency across images
-                theme_suffix = get_theme_suffix()
-                # CHANGE: add theme origin to debug for analysis (WORLD_BIBLE vs DEFAULT)
-                try:
-                    has_wb_theme = bool((WORLD_BIBLE or {}).get("global_theme"))
-                except Exception:
-                    has_wb_theme = False
-                debug_lines.append(f"Theme origin: {'WORLD_BIBLE' if has_wb_theme else 'DEFAULT'}")
-                # CHANGE: filter LLM-requested prompts if we already have pregenerated images for the same subject
-                try:
-                    move_room = updates.get("move_to") if isinstance(updates.get("move_to"), str) else None
-                    placed_items = [str(x) for x in (updates.get("place_items") or [])]
-                    taken_items = [str(x) for x in (updates.get("room_take") or [])]
-                    known_items = set(placed_items + taken_items)
-                    # TRIVIAL BOOST: also consider inventory, items visible in rooms, and world-bible key items
-                    try:
-                        # Live items
-                        for v in state_mgr.state.room_items.values():
-                            for it in v:
-                                known_items.add(str(it))
-                        for it in state_mgr.state.inventory:
-                            known_items.add(str(it))
-                        # World bible key items (names only)
-                        wb = WORLD_BIBLE or {}
-                        for it in (wb.get("key_items") or []):
-                            nm = (it.get("name") if isinstance(it, dict) else str(it))
-                            if nm:
-                                known_items.add(str(nm))
-                    except Exception:
-                        pass
-                    def _has_image_for(text: str) -> bool:
-                        """
-                        LLM-REQUESTED IMAGE FILTERING (Critical Reuse Point #2)
-                        =======================================================
-                        When LLM requests images via JSON, we check if we already have them.
-                        This prevents regeneration of existing content.
-                        
-                        REUSE EXAMPLES:
-                        - LLM requests image for "Start" -> _has_image_for("Start") = True -> Skip
-                        - LLM requests image for "Torch" -> _has_image_for("Torch") = True -> Skip
-                        - Works for BOTH pregenerated AND dynamically generated images!
-                        """
-                        try:
-                            # Check if it's a room name (case-insensitive exact match)
-                            t = str(text).strip().lower()
-                            if any((t == str(r).strip().lower()) for r in state_mgr.state.rooms_with_images):
-                                state_mgr.state.images_reused += 1
-                                return True
-                            # Check if it's an item name (case-insensitive exact match)  
-                            if any((t == str(i).strip().lower()) for i in state_mgr.state.items_with_images):
-                                state_mgr.state.images_reused += 1
-                                return True
-                            return False
-                        except Exception:
-                            return False
-                    # Determine target room (new move if present, otherwise current location)
-                    try:
-                        target_room = move_room or state_mgr.state.location
-                    except Exception:
-                        target_room = move_room
-                    has_room_image = bool(target_room and _has_image_for(str(target_room)))
-                    skipped_room_count = 0
-                    skipped_env_count = 0
-                    skipped_item_count = 0
-                    filtered_prompts: List[str] = []
-                    for p in img_prompts:
-                        if not isinstance(p, str) or not p.strip():
-                            continue
-                        lc = p.lower()
-                        # Skip if it's a room prompt and we already have an image for that room
-                        if move_room and move_room.lower() in lc and _has_image_for(move_room):
-                            debug_lines.append(f"Reuse existing image for room: {move_room}")
-                            skipped_room_count += 1
-                            continue
-                        # If we already have a room image, skip ALL environment prompts unless it's a close-up
-                        if has_room_image:
-                            is_closeup = ("close-up" in lc) or ("close up" in lc) or ("closeup" in lc)
-                            if not is_closeup:
-                                debug_lines.append(f"Reuse existing room image for: {target_room} (skipping env prompt)")
-                                skipped_env_count += 1
-                                continue
-                        # Skip if it's an item prompt and we already have an image for that item
-                        skip_item = False
-                        for it in known_items:
-                            if it.lower() in lc and _has_image_for(it):
-                                # CHANGE (DEBUG ONLY): include the cached filename when reusing an item image
-                                try:
-                                    _added_detail = False
-                                    for _img in state_mgr.state.last_images:
-                                        if _img.get("type") == "item" and str(_img.get("subject")).lower() == str(it).lower():
-                                            _p = _img.get("path")
-                                            if _p and os.path.exists(_p):
-                                                debug_lines.append(f"Reuse existing image for item: {it} → {os.path.basename(_p)}")
-                                                _added_detail = True
-                                                break
-                                    if not _added_detail:
-                                        debug_lines.append(f"Reuse existing image for item: {it}")
-                                except Exception:
-                                    debug_lines.append(f"Reuse existing image for item: {it}")
-                                skipped_item_count += 1
-                                skip_item = True
-                                break
-                        if skip_item:
-                            continue
-                        filtered_prompts.append(p)
-                except Exception:
-                    filtered_prompts = [p for p in img_prompts if isinstance(p, str) and p.strip()]
-                # CHANGE: one-line summary of image filtering
-                try:
-                    debug_lines.append(
-                        f"Image filter: skipped room={locals().get('skipped_room_count', 0)}, env={locals().get('skipped_env_count', 0)}, item={locals().get('skipped_item_count', 0)}, to_generate={len(filtered_prompts)}"
-                    )
-                except Exception:
-                    pass
-                # MFLUX model summary (once per batch)
-                try:
-                    debug_lines.append(f"MFLUX: model={image_gen.model_id or '(none)'}")
-                except Exception:
-                    pass
-                # TRIVIAL FIX: prevent duplicate room images in the same turn
-                # Track which room subjects have already had an image generated this batch
-                generated_rooms_this_batch: Set[str] = set()
-                for p in filtered_prompts:
-                    if isinstance(p, str) and p.strip():
-                        final_prompt = p.strip()
-                        # TRIVIAL GUARD: if LLM passed an existing filename, reuse it instead of regenerating
-                        try:
-                            base = os.path.basename(final_prompt)
-                            if base.lower().endswith(('.png', '.jpg', '.jpeg')):
-                                candidate_paths = [
-                                    os.path.join(ART_DIR, base),
-                                    os.path.join(IN_GAME_IMG_DIR, base),
-                                    final_prompt if os.path.isabs(final_prompt) else None,
-                                ]
-                                candidate_paths = [p0 for p0 in candidate_paths if p0]
-                                existing = next((cp for cp in candidate_paths if os.path.exists(cp)), None)
-                                if existing:
-                                    if existing not in image_paths:
-                                        image_paths.append(existing)
-                                    debug_lines.append(f"[reuse] Using existing image file: {os.path.basename(existing)}")
-                                    # Also mark the room subject as generated if identifiable to avoid duplication this turn
-                                    try:
-                                        original_prompt_lower = p.strip().lower()
-                                        for room_name in state_mgr.state.known_map.keys():
-                                            if room_name.lower() in original_prompt_lower:
-                                                generated_rooms_this_batch.add(room_name)
-                                                break
-                                    except Exception:
-                                        pass
-                                    continue
-                                # If the filename doesn't exist locally, trivially reuse context-linked images
-                                # Prefer current room, then a recent inventory item, to avoid wasteful regeneration
-                                try:
-                                    room_path = get_current_room_image(state_mgr)
-                                    if room_path:
-                                        if room_path not in image_paths:
-                                            image_paths.append(room_path)
-                                        debug_lines.append(f"[reuse] Using current room image for filename hint: {os.path.basename(room_path)}")
-                                        continue
-                                    item_path = get_inventory_item_image(state_mgr)
-                                    if item_path:
-                                        if item_path not in image_paths:
-                                            image_paths.append(item_path)
-                                        debug_lines.append(f"[reuse] Using inventory item image for filename hint: {os.path.basename(item_path)}")
-                                        continue
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                        # Identify target room before spending image gen time; skip if already done this turn
-                        try:
-                            original_prompt_lower = p.strip().lower()
-                            target_room_for_prompt: Optional[str] = None
-                            for room_name in state_mgr.state.known_map.keys():
-                                if room_name.lower() in original_prompt_lower:
-                                    target_room_for_prompt = room_name
-                                    break
-                            if target_room_for_prompt and target_room_for_prompt in generated_rooms_this_batch:
-                                debug_lines.append(f"Skip duplicate room image this turn: {target_room_for_prompt}")
-                                continue
-                        except Exception:
-                            pass
-                        # Identify target item before spending image gen time
-                        try:
-                            original_prompt_lower = p.strip().lower()
-                            target_item_for_prompt: Optional[str] = None
-                            all_items_pre = set(state_mgr.state.inventory)
-                            for room_items in state_mgr.state.room_items.values():
-                                all_items_pre.update(room_items)
-                            for item_name in all_items_pre:
-                                if isinstance(item_name, str) and item_name.lower() in original_prompt_lower:
-                                    target_item_for_prompt = item_name
-                                    break
-                            # CHANGE: If not in placed items, check if it's in world bible key_items (LLM knows about these)
-                            if not target_item_for_prompt:
-                                try:
-                                    wb_items = (WORLD_BIBLE or {}).get("key_items", []) or []
-                                    for it in wb_items:
-                                        nm = (it.get("name") if isinstance(it, dict) else str(it))
-                                        if isinstance(nm, str) and nm.lower() in original_prompt_lower:
-                                            target_item_for_prompt = nm
-                                            debug_lines.append(f"[track] Item from world bible: {nm}")
-                                            break
-                                except Exception:
-                                    pass
-                        except Exception:
-                            target_item_for_prompt = None
-                        # CHANGE: If LLM explicitly requested this image in JSON, honor it even if we can't identify the subject
-                        # This respects the LLM's narrative focus
-                        if not target_room_for_prompt and not target_item_for_prompt:
-                            # Check if this prompt came from the LLM's JSON images array
-                            if p in img_prompts:
-                                debug_lines.append(f"[track] LLM-requested image (narrative focus): {p}")
-                                # Continue to generation since LLM explicitly wants this
-                            else:
-                                debug_lines.append("[skip] Image prompt not linked to known room or item; generation skipped")
-                                continue
-                        # CHANGE: explicitly enforce the exact world art style entered by user
-                        if theme_suffix:
-                            if theme_suffix.lower() not in final_prompt.lower():
-                                final_prompt = f"{final_prompt}. World art style: {theme_suffix}."
-                            final_prompt = f"{final_prompt} Strictly adhere to this style."
-                        debug_lines.append(f"Generating image: {final_prompt}")
-                        # CHANGE (TRIVIAL): Log concise image prompt info for LLM-first debugging (no logic change)
-                        try:
-                            _src = "LLM" if p in img_prompts else "AUTO"
-                            _p_prev = (final_prompt[:120] + "...") if len(final_prompt) > 120 else final_prompt
-                            _t_prev = ((theme_suffix[:80] + "...") if theme_suffix and len(theme_suffix) > 80 else (theme_suffix or ""))
-                            debug_lines.append(f"[image_prompt] src={_src} len={len(final_prompt)} prompt=\"{_p_prev}\" theme=\"{_t_prev}\"")
-                        except Exception:
-                            pass
-                        out_path = image_gen.generate(final_prompt)
-                        if out_path:
-                            # SMART TRACKING: figure out what this image is for and track it properly
-                            original_prompt = p.strip().lower()
-                            
-                            # Check if this is a room image (simple like inventory)
-                            room_identified = False
-                            for room_name in state_mgr.state.known_map.keys():
-                                if room_name.lower() in original_prompt:
-                                    state_mgr.state.add_room_image(room_name, out_path, p.strip())
-                                    debug_lines.append(f"[track] ROOM IMAGE: '{room_name}' → {os.path.basename(out_path)}")
-                                    # Prevent further room images for same subject within this turn
-                                    try:
-                                        generated_rooms_this_batch.add(room_name)
-                                    except Exception:
-                                        pass
-                                    room_identified = True
-                                    # Record for display only when identified
-                                    image_paths.append(out_path)
-                                    # CHANGE: include filename and brief description for debug console
-                                    try:
-                                        fname = os.path.basename(out_path)
-                                    except Exception:
-                                        fname = out_path
-                                    short_desc = (final_prompt[:80] + "...") if len(final_prompt) > 80 else final_prompt
-                                    debug_lines.append(f"Image saved: {fname} — {short_desc}")
-                                    break
-                            
-                            # Check if this is an item image (if not identified as room)
-                            if not room_identified:
-                                item_identified = False
-                                # Check current room items and inventory
-                                all_items = set(state_mgr.state.inventory)
-                                for room_items in state_mgr.state.room_items.values():
-                                    all_items.update(room_items)
-                                
-                                for item_name in all_items:
-                                    if item_name.lower() in original_prompt:
-                                        state_mgr.state.add_item_image(item_name, out_path, p.strip())
-                                        debug_lines.append(f"[track] ITEM IMAGE: '{item_name}' → {os.path.basename(out_path)}")
-                                        item_identified = True
-                                        # Record for display only when identified
-                                        image_paths.append(out_path)
-                                        # CHANGE: include filename and brief description for debug console
-                                        try:
-                                            fname = os.path.basename(out_path)
-                                        except Exception:
-                                            fname = out_path
-                                        short_desc = (final_prompt[:80] + "...") if len(final_prompt) > 80 else final_prompt
-                                        debug_lines.append(f"Image saved: {fname} — {short_desc}")
-                                        break
-                                
-                                # If we can't identify it, still track it the old way
-                                if not item_identified:
-                                    # CHANGE: Do not track or display unidentified images
-                                    debug_lines.append("[skip] Generated image did not match a room or item; discarded from tracking")
-                        else:
-                            debug_lines.append(f"Image generation failed for: {p.strip()}")
-                # CHANGE: image cache size after generation
-                try:
-                    debug_lines.append(f"Images cached: {len(state_mgr.state.last_images)}")
-                except Exception:
-                    pass
+            # Generate images for this turn (extracted to helper for clarity)
+            llm_img_prompts = directives.get("images", []) if isinstance(directives, dict) else []
+            new_turn_images = _generate_turn_images(
+                state_mgr, updates, llm_img_prompts, image_gen, debug_lines
+            )
+            image_paths.extend(new_turn_images)
         except Exception:
             continue
 
@@ -2752,6 +2722,10 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
     cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text).strip()
     return cleaned_text, image_paths, json_payloads, debug_lines
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODEL DISCOVERY
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def check_mlx_available() -> bool:
     if platform.system() != "Darwin":
@@ -2851,131 +2825,118 @@ def maybe_select_diffuser_interactively() -> Optional[str]:
 
 def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
     state = state_mgr.state
-    # Enrich context so the LLM can decide importance without engine heuristics
     current_items = state.room_items.get(state.location, [])
     current_exits = state.known_map.get(state.location, {}).get("exits", [])
-    visited_rooms = list(state.known_map.keys())
-    
-    # Enhanced context with better structure and prioritization
-    context = {
-        # CORE GAME STATE (always include)
+
+    # Trim known_map: current room + adjacent rooms only (saves tokens for small models)
+    adjacent_rooms = set(current_exits) | {state.location}
+    trimmed_map = {}
+    for room_name, room_data in state.known_map.items():
+        if room_name in adjacent_rooms:
+            trimmed_map[room_name] = room_data
+    # Cap at 5 entries even after filtering
+    if len(trimmed_map) > 5:
+        trimmed_map = dict(list(trimmed_map.items())[:5])
+
+    # Cap game_flags at 10 most recent entries
+    trimmed_flags = state.game_flags
+    if len(trimmed_flags) > 10:
+        trimmed_flags = dict(list(trimmed_flags.items())[-10:])
+
+    # Build compact context — no debug_info, no image lists, no visited_rooms
+    context: Dict[str, Any] = {
         "location": state.location,
         "health": state.health,
         "inventory": state.inventory,
-
-        # NAVIGATION & EXPLORATION (high priority)
         "current_exits": current_exits,
         "current_room_items": current_items,
-        "known_map": state.known_map,
-        "visited_rooms": visited_rooms,
-
-        # NARRATIVE & MEMORY (medium priority)
+        "known_map": trimmed_map,
         "story_context": state.story_context,
-        "recent_conversation": state.recent_history[-3:] if len(state.recent_history) > 3 else state.recent_history,  # Limit for token efficiency
-        "notes": state.notes[-5:] if len(state.notes) > 5 else state.notes,  # Most recent notes
-
-        # ADVANCED GAME STATE (contextual)
-        "game_flags": state.game_flags,
-        "player_name": state.player_name,
-
-        # WORLD BUILDING (when available)
-        "world_theme": get_theme_suffix(),
-        "win_condition": (WORLD_BIBLE.get("win_condition") if 'WORLD_BIBLE' in globals() and WORLD_BIBLE else None),
-
-        # CREATIVE AIDS (for image generation)
-        "rooms_with_images": state.rooms_with_images,
-        "items_with_images": state.items_with_images,
-
-        # DEBUG INFO (only when needed)
-        "debug_info": {
-            "total_images": len(state.last_images),
-            "images_reused": state.images_reused,
-            "active_timers": [k for k, v in state.game_flags.items() if isinstance(v, dict) and v.get("type") == "timer"],
-            "active_chains": [k for k, v in state.game_flags.items() if isinstance(v, dict) and v.get("type") == "chain_reaction"]
-        }
+        "recent_conversation": state.recent_history[-2:],
+        "notes": state.notes[-5:] if len(state.notes) > 5 else state.notes,
+        "game_flags": trimmed_flags,
     }
-    # Include world bible context to guide gameplay
+
+    # Only include non-default fields when they have useful info
+    if state.player_name:
+        context["player_name"] = state.player_name
+
+    wb = _get_world_bible()
+    if wb:
+        wc = wb.get("win_condition")
+        if wc:
+            context["win_condition"] = wc
+
+    # Health warning for LLM narrative guidance
+    if state.health <= 0:
+        context["WARNING"] = "Player is dead! Describe their demise. Do not allow further actions."
+    elif state.health <= 20:
+        context["WARNING"] = "Player health is critically low! Create tension but give a fair chance to survive."
+
+    # World bible context cues (compact, location-relevant excerpts)
     bible_line = ""
     try:
-        if WORLD_BIBLE:
-            # WORLD BIBLE → CUES (compact, relevant excerpts)
-            # We DO NOT send the entire world bible each turn. Instead, we derive
-            # short, situational cues that are directly relevant to the current
-            # location and gameplay. This keeps the prompt small while preserving
-            # design intent.
+        if wb:
             cues = []
 
-            # Include location description if available (for narrative consistency)
-            if locations := WORLD_BIBLE.get("locations", []):
-                for loc in locations:
-                    if isinstance(loc, dict) and loc.get("name", "").lower() == state.location.lower():
-                        desc = loc.get("description")
-                        if desc:
-                            cues.append(f"Location description: {desc}")
-                            break  # Only include the current location's description
+            # Current location description
+            for loc in wb.get("locations", []):
+                if isinstance(loc, dict) and loc.get("name", "").lower() == state.location.lower():
+                    desc = loc.get("description")
+                    if desc:
+                        cues.append(f"Location: {desc}")
+                    break
 
-            # Check for NPCs in current location
-            if npcs := WORLD_BIBLE.get("npcs", WORLD_BIBLE.get("key_characters", [])):
-                for npc in npcs:
-                    if npc.get("location", "").lower() == state.location.lower():
-                        provides = npc.get('provides', '')
-                        cues.append(f"NPC here: {npc.get('name')} - {npc.get('personality', 'mysterious')}")
-                        if provides:
-                            cues.append(f"  (can provide: {provides})")
-            
-            # Check for monsters in current location
-            if monsters := WORLD_BIBLE.get("monsters", []):
-                for monster in monsters:
-                    if monster.get("location", "").lower() == state.location.lower():
-                        weakness = monster.get('weakness', '')
-                        cues.append(f"Monster here: {monster.get('name')} ({monster.get('difficulty', 'dangerous')})")
-                        if weakness and any(item in state.inventory for item in ['torch', 'sword', 'key']):
-                            cues.append(f"  (weakness: {weakness})")
-            
-            # Check for riddles in current location
-            if riddles := WORLD_BIBLE.get("riddles", []):
-                for riddle in riddles:
-                    if riddle.get("location", "").lower() == state.location.lower():
-                        cues.append(f"Puzzle: {riddle.get('hint', 'something mysterious')}")
-                        if riddle.get('reward'):
-                            cues.append(f"  (solving grants: {riddle.get('reward')})")
-            
-            # Check for mechanics in current location
-            if mechanics := WORLD_BIBLE.get("mechanics", []):
-                for mech in mechanics:
-                    if mech.get("location", "").lower() == state.location.lower():
-                        cues.append(f"Mechanic: {mech.get('action')} -> {mech.get('effect')}")
-            
-            # Check for items that should be in this location
-            if item_locs := WORLD_BIBLE.get("item_locations", {}):
-                for item, loc_desc in item_locs.items():
-                    if state.location.lower() in loc_desc.lower() and item not in state.inventory:
-                        # Check if item should be available based on game logic
-                        item_info = next((i for i in WORLD_BIBLE.get("key_items", []) if i.get("name") == item), {})
-                        if item_info:
-                            cues.append(f"Item available: {item} - {item_info.get('purpose', 'useful item')}")
-            
-            # Add current objective based on inventory/progress
-            if objectives := WORLD_BIBLE.get("objectives", []):
-                # Simple heuristic: which objective are we on based on items collected
-                treasure_items = ['torch', 'rope', 'map', 'key', 'sword', 'treasure']
-                items_collected = sum(1 for item in treasure_items if item in state.inventory)
-                current_obj_idx = min(items_collected, len(objectives) - 1)
+            # NPCs in current location
+            for npc in wb.get("npcs", wb.get("key_characters", [])):
+                if npc.get("location", "").lower() == state.location.lower():
+                    provides = npc.get('provides', '')
+                    cues.append(f"NPC here: {npc.get('name')} - {npc.get('personality', 'mysterious')}")
+                    if provides:
+                        cues.append(f"  (can provide: {provides})")
+
+            # Monsters in current location
+            for monster in wb.get("monsters", []):
+                if monster.get("location", "").lower() == state.location.lower():
+                    cues.append(f"Monster here: {monster.get('name')} ({monster.get('difficulty', 'dangerous')})")
+                    weakness = monster.get('weakness', '')
+                    if weakness:
+                        cues.append(f"  (weakness: {weakness})")
+
+            # Riddles/puzzles in current location
+            for riddle in wb.get("riddles", []):
+                if riddle.get("location", "").lower() == state.location.lower():
+                    cues.append(f"Puzzle: {riddle.get('hint', 'something mysterious')}")
+                    if riddle.get('reward'):
+                        cues.append(f"  (solving grants: {riddle.get('reward')})")
+
+            # Mechanics in current location
+            for mech in wb.get("mechanics", []):
+                if mech.get("location", "").lower() == state.location.lower():
+                    cues.append(f"Mechanic: {mech.get('action')} -> {mech.get('effect')}")
+
+            # Items expected at this location
+            for item, loc_desc in wb.get("item_locations", {}).items():
+                if state.location.lower() in loc_desc.lower() and item not in state.inventory:
+                    item_info = next((i for i in wb.get("key_items", []) if i.get("name") == item), {})
+                    if item_info:
+                        cues.append(f"Item available: {item} - {item_info.get('purpose', 'useful item')}")
+
+            # Current objective — track via game_flags, not hardcoded item names
+            if objectives := wb.get("objectives", []):
+                completed = sum(
+                    1 for i in range(len(objectives))
+                    if state.game_flags.get(f"objective_{i}", False)
+                )
+                current_obj_idx = min(completed, len(objectives) - 1)
                 cues.append(f"Current goal: {objectives[current_obj_idx]}")
-            
-            # SIMPLE IMAGE TRACKING (belongs in game state context)
-            # Direct connection to existing map/item structures  
-            if state.rooms_with_images:
-                cues.append(f"Rooms with images: {', '.join(state.rooms_with_images[:5])}")
-            if state.items_with_images:
-                cues.append(f"Items with images: {', '.join(state.items_with_images[:5])}")
-            
-            # Add progression hints if stuck (no items collected recently)
-            if len(state.inventory) < 2 and (hints := WORLD_BIBLE.get("progression_hints", [])):
+
+            # Progression hints when player seems stuck
+            if len(state.inventory) < 2 and (hints := wb.get("progression_hints", [])):
                 cues.append(f"Hint: {hints[0]}")
-            
+
             if cues:
-                bible_line = f"\nWorld context:\n" + "\n".join(f"  {c}" for c in cues)
+                bible_line = "\nWorld context:\n" + "\n".join(f"  {c}" for c in cues)
     except Exception:
         bible_line = ""
 
@@ -2987,6 +2948,88 @@ def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
     )
     return header + f"Player says: {player_input}"
 
+
+def check_win_condition(state_mgr: StateManager) -> Optional[str]:
+    """Check if the win condition from the world bible is met.
+    Returns a congratulations message, or None if not yet won."""
+    wb = _get_world_bible()
+    if not wb:
+        return None
+    wc = wb.get("win_condition", "")
+    if not wc:
+        return None
+
+    state = state_mgr.state
+    wc_lower = wc.lower()
+
+    # Check if the game-complete flag was set explicitly by the LLM
+    if state.game_flags.get("game_complete") or state.game_flags.get("game_won"):
+        return f"**VICTORY!** {wc}\nCongratulations, {state.player_name or 'adventurer'}! You have completed the adventure!"
+
+    # Heuristic: check if key items mentioned in win condition are in inventory
+    # and if any location requirement is met
+    key_items = wb.get("key_items", [])
+    win_items = [
+        ki.get("name", "") for ki in key_items
+        if ki.get("name", "").lower() in wc_lower
+    ]
+    if win_items and all(item in state.inventory for item in win_items):
+        # Check for location requirement (e.g., "return to entrance")
+        for loc in wb.get("locations", []):
+            loc_name = loc.get("name", "")
+            if loc_name.lower() in wc_lower and state.location.lower() == loc_name.lower():
+                return f"**VICTORY!** {wc}\nCongratulations, {state.player_name or 'adventurer'}! You have completed the adventure!"
+        # If no location requirement detected, just having the items is enough
+        if not any(loc.get("name", "").lower() in wc_lower for loc in wb.get("locations", [])):
+            return f"**VICTORY!** {wc}\nCongratulations, {state.player_name or 'adventurer'}! You have completed the adventure!"
+
+    return None
+
+
+def handle_look_command(state_mgr: StateManager) -> Optional[str]:
+    """Handle 'look' / 'look around' without calling the LLM.
+    Returns a description string, or None if no info is available."""
+    state = state_mgr.state
+    parts = []
+
+    # Room description from world bible
+    wb = _get_world_bible()
+    if wb:
+        for loc in wb.get("locations", []):
+            if isinstance(loc, dict) and loc.get("name", "").lower() == state.location.lower():
+                desc = loc.get("description", "")
+                if desc:
+                    parts.append(f"**{state.location}**: {desc}")
+                break
+
+    if not parts:
+        parts.append(f"You are in **{state.location}**.")
+
+    # Room items
+    room_items = state.room_items.get(state.location, [])
+    if room_items:
+        parts.append(f"You see: {', '.join(room_items)}")
+
+    # Exits
+    exits = state.known_map.get(state.location, {}).get("exits", [])
+    if exits:
+        parts.append(f"Exits: {', '.join(exits)}")
+
+    # Health
+    parts.append(f"Health: {state.health}")
+
+    # Inventory
+    if state.inventory:
+        parts.append(f"Carrying: {', '.join(state.inventory)}")
+    else:
+        parts.append("Carrying: nothing")
+
+    return "\n".join(parts)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLI MODE
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optional[MfluxImageGenerator]) -> None:
     # Opening scene
@@ -3031,7 +3074,7 @@ def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     print(f"- {img['prompt']} -> {img['path']}")
             continue
 
-        system_prompt = SYSTEM_INSTRUCTIONS
+        system_prompt = get_system_instructions()
         user_prompt = build_user_prompt(state_mgr, user)
         llm_text = llm.generate(system_prompt, user_prompt)
         final_text, new_images, payloads, tool_logs = apply_llm_directives(state_mgr, llm_text, image_gen)
@@ -3059,6 +3102,10 @@ def do_generate_world_bible(wb_model: str, theme: Optional[str] = None, max_toke
         print(message)
     return message
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GRADIO UI
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optional[MfluxImageGenerator]) -> None:
     """Simple Gradio UI that shows images, inventory, health, map, and a debug console."""
@@ -3126,6 +3173,41 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 state_mgr.state.location,
             )
 
+        # Handle "look" command locally — saves an LLM call
+        lower_text = user_text.strip().lower()
+        if lower_text in ("look", "look around", "l", "examine room"):
+            look_text = handle_look_command(state_mgr)
+            if look_text:
+                ui_data["narration"] += f"\n> {user_text}\n\n{look_text}\n"
+                ui_data["debug"].append("[look] Handled locally, no LLM call")
+                latest_image = get_current_room_image(state_mgr)
+                return (
+                    ui_data["narration"],
+                    ui_data["images"],
+                    get_debug_view(),
+                    str(state_mgr.state.health),
+                    ", ".join(state_mgr.state.inventory) or "(empty)",
+                    state_mgr.describe_map(),
+                    latest_image,
+                    get_llm_context_view(),
+                    state_mgr.state.location,
+                )
+
+        # Block actions if player is dead
+        if state_mgr.state.health <= 0 and lower_text not in ("restart", "load", "help"):
+            ui_data["narration"] += f"\n> {user_text}\n\n**You have fallen.** Type 'restart' to begin anew or 'load' to restore a save.\n"
+            return (
+                ui_data["narration"],
+                ui_data["images"],
+                get_debug_view(),
+                str(state_mgr.state.health),
+                ", ".join(state_mgr.state.inventory) or "(empty)",
+                state_mgr.describe_map(),
+                None,
+                get_llm_context_view(),
+                state_mgr.state.location,
+            )
+
         # Build prompts and call LLM
         if not getattr(llm, "model_id", "").strip():
             # LLM not selected yet; don't call the backend
@@ -3149,7 +3231,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             ui_data["narration"] += f"\n\n{timer_narration}"
             ui_data["debug"].extend([f"[timer] {event}" for event in timer_events])
 
-        system_prompt = SYSTEM_INSTRUCTIONS
+        system_prompt = get_system_instructions()
         user_prompt = build_user_prompt(state_mgr, user_text)
         llm_text = llm.generate(system_prompt, user_prompt)
         
@@ -3174,7 +3256,18 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 if backup_image:
                     new_images.append(backup_image)
                     ui_data["debug"].append(f"[backup] Generated missing room image for: {state_mgr.state.location}")
-        
+
+        # Death check
+        if state_mgr.state.health <= 0:
+            final_text += "\n\n**You have fallen. Your adventure ends here.**\nType 'restart' to begin a new adventure, or 'load' to restore a saved game."
+            ui_data["debug"].append("[game] Player died (health <= 0)")
+
+        # Win condition check
+        win_msg = check_win_condition(state_mgr)
+        if win_msg:
+            final_text += f"\n\n{win_msg}"
+            ui_data["debug"].append("[game] Win condition met!")
+
         # Save conversation history (keep last 5 turns for context)
         # Include tool results in conversation history
         tool_feedback = []
@@ -3349,7 +3442,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             if llm and llm.model is not None:
                 llm._unload()
             model_path = os.path.join(MLX_MODELS_DIR, model_name)
-            llm = LLMEngine(model_path=model_path, max_new_tokens=max_tokens, temperature=0.8)
+            llm = LLMEngine(model_path=model_path, max_new_tokens=max_tokens, temperature=0.7)
             _append_debug(f"[reload] LLM -> {model_name} ({max_tokens} tokens)")
             return f"✅ LLM loaded: {model_name} ({max_tokens} tokens)"
         return "❌ No LLM model selected"
@@ -3525,7 +3618,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     """)
                 
                 # CHANGE (TRIVIAL): Initialize Latest Image so opening image shows immediately on new game
-                latest_image = gr.Image(label="Latest Image", height=768, width=768, value=(get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr) or (ui_data["images"][-1] if ui_data["images"] else None)))
+                latest_image = gr.Image(label="Latest Image", height=None, value=(get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr) or (ui_data["images"][-1] if ui_data["images"] else None)))
                 # CHANGE: Removed secondary latest-turn gallery per request; one latest image panel only
                 # CHANGE: Wrap main Image Gallery in a collapsible accordion for easy hiding
                 with gr.Accordion("Image Gallery", open=False):
@@ -3578,6 +3671,10 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
 
                 # Max tokens slider for LLM response length control
                 max_tokens_slider = gr.Slider(minimum=250, maximum=2500, value=2500, step=50, label="LLM Max Tokens (response length)")
+                advanced_directives_cb = gr.Checkbox(
+                    value=ADVANCED_DIRECTIVES,
+                    label="Advanced Directives (timers, conditionals — for larger models)",
+                )
 
                 with gr.Row():
                     location = gr.Textbox(label="Location", value=str(state_mgr.state.location), interactive=False)
@@ -3587,7 +3684,8 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 map_box = gr.Textbox(label="Known Map", value=state_mgr.describe_map(), lines=12, interactive=False)
                 
                 try:
-                    _wb_theme = ((WORLD_BIBLE or {}).get("global_theme") if 'WORLD_BIBLE' in globals() else None)
+                    _wb = _get_world_bible()
+                    _wb_theme = _wb.get("global_theme") if _wb else None
                 except Exception:
                     _wb_theme = None
                 # Theme selection - dropdown with presets + custom text option
@@ -3655,7 +3753,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     def get_world_bible_view():
                         """Display the current world bible for debugging"""
                         try:
-                            wb = WORLD_BIBLE if 'WORLD_BIBLE' in globals() and WORLD_BIBLE else None
+                            wb = _get_world_bible()
                             if not wb:
                                 return {"status": "No World Bible generated yet. Click 'Generate World Bible' to create one."}
                             
@@ -3968,6 +4066,17 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             inputs=[theme_input],
             outputs=[theme_status, theme_input],
         )
+
+        def do_toggle_advanced(val: bool):
+            global ADVANCED_DIRECTIVES
+            ADVANCED_DIRECTIVES = val
+            ui_data["debug"].append(f"[config] Advanced directives: {'ON' if val else 'OFF'}")
+
+        advanced_directives_cb.change(
+            fn=do_toggle_advanced,
+            inputs=[advanced_directives_cb],
+        )
+
         def do_pregenerate(level: str):
             # Pre-generate images for speed: some/most/all
             global WORLD_BIBLE
@@ -3977,7 +4086,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 items = sorted({i for v in state_mgr.state.room_items.values() for i in v})
                 # CHANGE: include World Bible rooms and key items so later gameplay reuses images
                 try:
-                    wb = WORLD_BIBLE or {}
+                    wb = _get_world_bible() or {}
                     # Locations may be list of dicts with 'name' or list of strings
                     wb_locations = wb.get("locations", []) or []
                     for loc in wb_locations:
@@ -4233,6 +4342,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         launch_gradio_ui(state_mgr, llm, image_gen)
         return 0
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     raise SystemExit(main())
