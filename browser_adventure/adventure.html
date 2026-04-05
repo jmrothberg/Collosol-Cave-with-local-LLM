@@ -1764,6 +1764,8 @@
         appendTurn(null, `Adventure resumed. You are in ${stateMgr.state.location}.`);
         updateStatusPanel(stateMgr);
         setDebug(["Game loaded from save."]);
+        // Generate an image for the current location
+        generateAndShowImage([]);
       }
       setInputEnabled(true);
     });

@@ -1,0 +1,170 @@
+You are improving a JSON world bible for a classic text adventure game.
+
+Your job is NOT to write prose only. Your job is to make the world bible more useful for a small parser-style adventure engine.
+
+IMPORTANT RULES
+- Keep output as valid JSON only.
+- Do not add markdown.
+- Do not add explanations outside the JSON.
+- Keep the same top-level structure unless adding clearly useful new fields.
+- Preserve the story, tone, and major quest unless there is a strong reason to improve clarity.
+- Prefer simple, concrete fields over abstract writing.
+- Be consistent with names, locations, items, and puzzle logic.
+- Do not invent major new plot branches unless they improve playability.
+- Keep the world small enough to be playable.
+
+MAIN GOAL
+Turn a lore-heavy world bible into a more playable classic text-adventure world bible.
+
+WHAT A GOOD WORLD BIBLE NEEDS
+A good text adventure needs:
+- clear rooms
+- clear exits
+- visible objects
+- useful items
+- examinable scenery
+- puzzles with clues
+- NPCs with specific roles
+- blockers and unlock conditions
+- a real win condition
+
+IMPROVE THESE AREAS
+
+1. LOCATIONS
+For each important location, include:
+- short name
+- 1-3 sentence description
+- exits to other rooms
+- notable scenery
+- room items
+- NPCs or monsters present
+- local clue or hint if relevant
+
+2. ITEMS
+For each key item, make it practical.
+Include fields like:
+- name
+- location
+- purpose
+- how obtained
+- where used
+- whether portable
+- if it combines with another item
+
+3. SCENERY AND INTERACTABLE OBJECTS
+Add non-portable things the player can examine or use, such as:
+- doors
+- altars
+- chests
+- pedestals
+- wall carvings
+- pools
+- levers
+- false walls
+- forge
+These should help puzzles feel grounded.
+
+4. PUZZLES
+Each puzzle should have:
+- id or name
+- location
+- problem
+- clue
+- solution
+- reward or result
+- what it unlocks
+Avoid puzzles with no clue.
+Avoid solutions that depend on a weird verb.
+Prefer classic actions like:
+- examine
+- take
+- open
+- unlock
+- light
+- read
+- search
+- move
+- push
+- pull
+- use X on Y
+- give X to NPC
+- say answer
+
+5. NPCS
+Each important NPC should have:
+- name
+- location
+- personality
+- role in progression
+- what they give, teach, unlock, or trade
+- what the player must do first, if anything
+
+6. MONSTERS OR THREATS
+If monsters exist, make them puzzle-like, not just combat stats.
+Include:
+- location
+- what they block
+- weakness
+- clue to that weakness
+- what happens when overcome
+
+7. PROGRESSION
+Make sure progression is logical:
+- early rooms teach the world
+- middle rooms require observation and item use
+- later rooms combine earlier knowledge and items
+- final area tests what the player learned
+
+8. FAIRNESS
+Be fair.
+- Important objects should be mentioned somewhere.
+- Key puzzles should have clues before the solution is needed.
+- Key items should be reachable.
+- Win condition should be actually possible.
+- Do not create dead ends unless clearly intended.
+
+9. OUTPUT STYLE
+Keep descriptions vivid but concise.
+Prefer short useful sentences over long lore paragraphs.
+Make the data practical for a game engine.
+
+10. OPTIONAL USEFUL FIELDS
+If useful, add small fields like:
+- scenery
+- interactables
+- blockers
+- unlocks
+- obtained_by
+- used_at
+- clues
+- puzzle_chain
+- state_notes
+
+WHEN IMPROVING THE INPUT
+- Fix missing room links.
+- Fix items that have purpose but no clear location.
+- Fix puzzles that have riddles but no physical interaction.
+- Fix NPCs that are flavor only and not gameplay relevant.
+- Fix win conditions that are too vague.
+- Add a few sensible ordinary objects if needed: rope, flint, oil, key, hammer, note, shard, chain, torch.
+- Keep the number of rooms moderate.
+
+DO NOT
+- do not turn it into a novel
+- do not remove core quest identity
+- do not make every room huge
+- do not add dozens of unnecessary items
+- do not rely on combat only
+- do not require hidden knowledge not present in the world
+
+TARGET RESULT
+Produce a revised JSON world bible that is better for a classic parser-based text adventure.
+
+Before finalizing internally, check:
+- Does every major objective map to a place, object, or puzzle?
+- Does every key item have a location and gameplay use?
+- Are room exits and progression clearer?
+- Are clues present for important puzzles?
+- Can a player plausibly win?
+
+Return only the improved JSON.

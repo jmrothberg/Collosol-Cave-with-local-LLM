@@ -23,9 +23,11 @@ Short URL (repo-root redirect stub):
 
 ```bash
 cd /path/to/Colossal_Cave   # repo root
-python3 -m http.server 8080
+python3 scripts/serve-threaded.py 8080
 # Open http://localhost:8080/browser_adventure/adventure.html
 ```
+
+> **Why not `python3 -m http.server`?** The built-in server lacks the `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers needed for `crossOriginIsolated` mode. Without them, ONNX Runtime Web falls back to single-threaded WASM (much slower).
 
 If you previously used `cd llm_adventure && python3 -m http.server`, use the repo root instead for this game. A redirect stub remains at [`../llm_adventure/adventure.html`](../llm_adventure/adventure.html) that sends the browser to `/browser_adventure/adventure.html` when the root server is used.
 
