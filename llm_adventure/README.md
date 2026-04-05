@@ -180,8 +180,9 @@ The key: all improvements come from the LLM better using the same simple tools.
 | File | Description |
 |------|-------------|
 | `LMM_adventure_Feb_15_26.py` | Main game engine (MLX-LM + MFLUX + Gradio) |
-| `llm_adventure/adventure.html` | **Browser edition** — full adventure game in one HTML file (Gemma 4B + SD 1.5, WebGPU) |
-| Root `adventure.html` | Redirect stub when `http.server` runs from repo root (→ `llm_adventure/adventure.html`) |
+| [`../browser_adventure/`](../browser_adventure/) | **Browser edition** — game + detailed docs ([`adventure.html`](../browser_adventure/adventure.html), [`README.md`](../browser_adventure/README.md)) |
+| `llm_adventure/adventure.html` | Redirect to `../browser_adventure/adventure.html` (keep old bookmarks working) |
+| Root `adventure.html` | Redirect stub when `http.server` runs from repo root (→ `browser_adventure/adventure.html`) |
 | `mflux_image_gen.py` | FLUX image generation wrapper (Apple Silicon) |
 | `diffusers-webgpu-compare-test.html` | Browser-only T2I compare (`web-txt2img` + ONNX Runtime Web / WebGPU; not Python diffusers) |
 | `vendor/web-txt2img/` | Vendored `web-txt2img@0.3.1` `dist/` (same-origin workers for localhost) |
@@ -190,31 +191,32 @@ The key: all improvements come from the LLM better using the same simple tools.
 
 ---
 
-## Browser Edition (`adventure.html`)
+## Browser Edition (`browser_adventure/`)
 
-**[Play in the browser on GitHub Pages](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/llm_adventure/adventure.html)** — no install; first visit downloads models (~4 GB total, then cached). Same origin as the rest of the site: [short URL via root stub](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html) (redirects to `llm_adventure/adventure.html`).
+**Full documentation:** [`../browser_adventure/README.md`](../browser_adventure/README.md) (how narration is generated, world bible vs. LLM, JSON tools, customizing stories, serving requirements).
 
-The full adventure game ported to a single HTML file — runs entirely in your browser with no Python, no server, no API keys. Uses the same game engine logic (state management, JSON directives, world bible) as the Python version.
+**[Play on GitHub Pages](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/browser_adventure/adventure.html)** — no install; first visit downloads models (~4 GB total, then cached). [Short URL (root stub)](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html) redirects into `browser_adventure/`.
+
+The game lives in **`browser_adventure/adventure.html`** (repo root folder). It loads `web-txt2img` from **`llm_adventure/vendor/`**, so you must serve from the **repository root**, not from `llm_adventure/` alone:
+
+```bash
+cd Colossal_Cave    # repo root
+python3 -m http.server 8080
+# http://localhost:8080/browser_adventure/adventure.html
+```
+
+Legacy paths **`/llm_adventure/adventure.html`** and **`/adventure.html`** redirect to the new location when using a root server.
 
 **Models:**
 - **LLM:** Gemma 4 E4B (`onnx-community/gemma-4-E4B-it-ONNX`) via Transformers.js + ONNX Runtime Web / WebGPU
 - **Images:** Stable Diffusion 1.5 (`sd-1.5`) via `web-txt2img` worker + ONNX Runtime Web / WebGPU
-
-**How to run:**
-
-Serve over **http(s)** (not `file://`). Paths depend on where you start `http.server`:
-
-- **Option A — `cd llm_adventure`:** `python3 -m http.server 8080` then open `http://localhost:8080/adventure.html`.
-- **Option B — repo root (`Colossal_Cave`):** `python3 -m http.server 8080` then open `http://localhost:8080/llm_adventure/adventure.html`, or `http://localhost:8080/adventure.html` (root stub redirects into `llm_adventure/`).
-
-If you see **404**, you likely used `/adventure.html` while the server document root was the repo root without the stub — use `/llm_adventure/adventure.html` or add/pull the root `adventure.html` redirect.
 
 **Requirements:**
 - **WebGPU** (Chrome/Edge 113+) strongly recommended; WASM fallback available but slower
 - **First run** downloads ~4 GB of model weights (browser-cached after first load)
 - **VRAM:** Gemma 4B + SD 1.5 run concurrently (LLM on main thread, image gen in Web Worker)
 
-**Built-in cave adventure:** Ships with a default world bible (the classic cave adventure with hermit, troll, temple, and treasure). Click "Start Adventure" and play immediately — no setup needed.
+**Built-in cave adventure:** Default world bible in `adventure.html` (classic cave: hermit, troll, temple, treasure). Click "Start Adventure" after models load.
 
 ---
 
