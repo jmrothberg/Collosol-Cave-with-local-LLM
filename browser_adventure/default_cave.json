@@ -1,0 +1,58 @@
+{
+  "objectives": [
+    "Light your way through the darkness",
+    "Gain passage across the underground river",
+    "Unlock the ancient temple",
+    "Claim the legendary treasure"
+  ],
+  "theme": "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere",
+  "global_theme": "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere",
+  "locations": [
+    { "name": "Entrance", "description": "rocky cave mouth with supplies left by previous explorers" },
+    { "name": "Dark Passage", "description": "pitch black tunnel that requires light" },
+    { "name": "Underground River", "description": "rushing water with narrow ledge" },
+    { "name": "Ancient Temple", "description": "locked stone doors with riddle inscription" },
+    { "name": "Treasury", "description": "golden vault guarded by stone sentinel" }
+  ],
+  "npcs": [
+    { "name": "Old Hermit", "location": "Entrance", "personality": "helpful guide", "provides": "torch and warning about troll" },
+    { "name": "Cave Spirit", "location": "Ancient Temple", "personality": "riddling guardian", "provides": "temple key if riddle solved" }
+  ],
+  "monsters": [
+    { "name": "River Troll", "location": "Underground River", "difficulty": "medium", "weakness": "fears fire from torch" },
+    { "name": "Stone Golem", "location": "Treasury", "difficulty": "hard", "weakness": "ancient sword pierces its core" }
+  ],
+  "riddles": [
+    { "location": "Ancient Temple", "hint": "I have cities but no houses, forests but no trees", "solution": "map", "reward": "temple access" },
+    { "location": "Treasury", "hint": "Feed me and I grow, give me water and I die", "solution": "fire/torch", "reward": "golem becomes dormant" }
+  ],
+  "key_items": [
+    { "name": "torch", "purpose": "lights dark areas, scares troll" },
+    { "name": "rope", "purpose": "crosses river safely" },
+    { "name": "map", "purpose": "solves temple riddle" },
+    { "name": "temple key", "purpose": "unlocks inner sanctum" },
+    { "name": "ancient sword", "purpose": "defeats stone golem" },
+    { "name": "golden treasure", "purpose": "quest completion" }
+  ],
+  "item_locations": {
+    "torch": "Given by hermit at entrance",
+    "rope": "Found in dark passage once lit",
+    "map": "Dropped by fleeing troll",
+    "temple key": "Reward for solving spirit's riddle",
+    "ancient sword": "Hidden in temple altar",
+    "golden treasure": "Treasury vault after defeating golem"
+  },
+  "progression_hints": [
+    "The hermit's gifts are essential for your journey",
+    "Fire is both light and weapon",
+    "The troll guards something important",
+    "Ancient words unlock ancient doors"
+  ],
+  "mechanics": [
+    { "action": "light torch in dark passage", "effect": "reveals hidden rope", "location": "Dark Passage" },
+    { "action": "wave torch at troll", "effect": "troll flees dropping map", "location": "Underground River" },
+    { "action": "place sword in altar slot", "effect": "opens secret treasury door", "location": "Ancient Temple" }
+  ],
+  "main_arc": "A brave explorer seeks legendary treasure in mysterious caves. They must use wit and courage to overcome guardians and puzzles.",
+  "win_condition": "Obtain the golden treasure and return to entrance"
+}

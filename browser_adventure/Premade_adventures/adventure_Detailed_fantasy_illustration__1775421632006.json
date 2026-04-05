@@ -1,0 +1,176 @@
+{
+  "worldBible": {
+    "global_theme": "Detailed fantasy illustration, warm torchlight, ancient stone, atmospheric mist.",
+    "main_arc": "A shadow blight threatens the valley, and only the legendary Sunstone can repel it. A fellowship of unlikely companions must delve into the Elder Depths to retrieve the artifact from the roots of darkness.",
+    "objectives": [
+      "Acquire the Rune-Carved Compass from Elara.",
+      "Obtain the Dwarven Forge Key from Thrainbeard.",
+      "Solve the Guardian's Lament within the Deep Chamber.",
+      "Retrieve the Sunstone from the Heart of Shadow."
+    ],
+    "win_condition": "The player successfully retrieves the Sunstone and returns it to the surface sanctuary before the final moon sets.",
+    "locations": [],
+    "npcs": [
+      {
+        "name": "Elara",
+        "location": "Cave Entrance Threshold",
+        "personality": "Wise, reserved, deeply connected to the fading light of the surface world.",
+        "provides": "Guidance on navigating magical traps; grants the player the Rune-Carved Compass."
+      },
+      {
+        "name": "Thrainbeard",
+        "location": "Thrainbeard's Nook",
+        "personality": "Gruff, practical, suspicious of outsiders but honorable once trust is earned.",
+        "provides": "Forges necessary implements; grants the player the Dwarven Forge Key after proving worth."
+      }
+    ],
+    "monsters": [
+      {
+        "name": "Shade Stalker",
+        "location": "Whispering Ascent",
+        "difficulty": "Moderate",
+        "weakness": "Bright light (requires Torch/Sunstone proximity)"
+      },
+      {
+        "name": "Stone Golem",
+        "location": "Deep Chamber",
+        "difficulty": "High",
+        "weakness": "Vibration/Rhythmic sound (exploitable via Hammer usage)"
+      },
+      {
+        "name": "Void Crawler",
+        "location": "Heart of Shadow",
+        "difficulty": "Extreme",
+        "weakness": "Purity/Divine Light (the Sunstone itself)"
+      }
+    ],
+    "riddles": [
+      {
+        "location": "Deep Chamber",
+        "hint": "I have cities, but no houses. I have mountains, but no trees. I have water, but no fish. What am I?",
+        "solution": "A Map",
+        "reward": "Access to the central mechanism needed to proceed deeper."
+      },
+      {
+        "location": "Glimmering Cavern",
+        "hint": "Though I speak without a tongue, I carry tales untold. I travel far, yet remain always here. What am I?",
+        "solution": "Echo",
+        "reward": "Reveals a hidden passage leading toward the Heart of Shadow."
+      }
+    ],
+    "key_items": [
+      {
+        "name": "Rune-Carved Compass",
+        "purpose": "Always points towards the source of the blight (and thus, the Sunstone)."
+      },
+      {
+        "name": "Dwarven Forge Key",
+        "purpose": "Opens the sealed barrier protecting the deepest levels beneath the altar."
+      },
+      {
+        "name": "Everburning Torch",
+        "purpose": "Maintains illumination through magically draining passages; essential for combat advantage."
+      },
+      {
+        "name": "Masterwork Hammer",
+        "purpose": "Necessary tool for bypassing mechanical defenses and weakening the Stone Golem."
+      },
+      {
+        "name": "Scroll of Warding",
+        "purpose": "Temporarily protects against Void Crawler's psychic attacks."
+      },
+      {
+        "name": "Sunstone Shard",
+        "purpose": "A fragment recovered early on; amplifies the power of the final Sunstone."
+      },
+      {
+        "name": "Adamantine Chain",
+        "purpose": "Used to bind or restrain powerful entities temporarily."
+      },
+      {
+        "name": "Ancient Lore Codex",
+        "purpose": "Provides crucial context regarding the Blight's origin and weaknesses."
+      }
+    ],
+    "item_locations": {
+      "Rune-Carved Compass": "Given by Elara at Cave Entrance Threshold.",
+      "Everburning Torch": "Found resting near the threshold, requiring initial maintenance.",
+      "Masterwork Hammer": "Crafted by Thrainbeard in his nook, requires raw materials gathered.",
+      "Dwarven Forge Key": "Granted by Thrainbeard after successful crafting commission.",
+      "Scroll of Warding": "Hidden behind a false wall in the Glimmering Cavern.",
+      "Sunstone Shard": "Embedded in the pedestal guarding the primary objective."
+    },
+    "progression_hints": [
+      "Trust is not given; it must be forged through shared peril.",
+      "The physical path is often secondary to the knowledge gained.",
+      "Light defeats shadow, but understanding illuminates the path beyond simple brute force.",
+      "Each lock has a corresponding key—some literal, some metaphorical."
+    ],
+    "mechanics": [
+      {
+        "action": "Maintain Torch Flame",
+        "effect": "Prevents immediate environmental fear penalties when traversing Whispering Ascent.",
+        "location": "All areas"
+      },
+      {
+        "action": "Utilize Codex Knowledge",
+        "effect": "Allows the player to identify the specific rhythmic frequency required to damage the Stone Golem.",
+        "location": "Deep Chamber"
+      },
+      {
+        "action": "Combine Forge Key + Altar Access",
+        "effect": "Unlocks the passage directly to the Heart of Shadow, bypassing the standard climb.",
+        "location": "Transition Point"
+      }
+    ],
+    "theme": "Detailed fantasy illustration, warm torchlight, ancient stone, atmospheric mist."
+  },
+  "gameState": {
+    "playerName": "Adventurer",
+    "location": "Antechamber",
+    "health": 100,
+    "inventory": [
+      "Provisions Satchel"
+    ],
+    "roomItems": {},
+    "knownMap": {
+      "Start": {
+        "exits": [],
+        "notes": "A nondescript starting place."
+      },
+      "Antechamber": {
+        "exits": [
+          "Main Corridor",
+          "Workshop"
+        ],
+        "notes": ""
+      },
+      "Main Corridor": {
+        "exits": [
+          "Antechamber"
+        ],
+        "notes": ""
+      },
+      "Workshop": {
+        "exits": [
+          "Antechamber"
+        ],
+        "notes": ""
+      }
+    },
+    "notes": [],
+    "recentHistory": [
+      {
+        "player": "search for items that would be useful in an adventure",
+        "response": "You survey your surroundings within the stone confines of the Antechamber. It is a small, utilitarian space, currently devoid of any objects worth finding, though you have your Provisions Satchel near"
+      }
+    ],
+    "storyContext": "Examined current room contents as requested by player.",
+    "gameFlags": {},
+    "roomsWithImages": [
+      "Antechamber"
+    ]
+  },
+  "timestamp": 1775421632004,
+  "exportVersion": "1.0"
+}

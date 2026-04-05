@@ -48,6 +48,7 @@ Pyramid-Flow/
 pyramid-flow-miniflux/
 wan/
 Z-Image-Turbo/
+local_models/
 
 # Generated content
 Generated_Art/
@@ -69,6 +70,7 @@ Adventure_Game_Saved/
 *.pt
 *.pth
 *.gguf
+*.onnx_data*
 
 # Test outputs
 flux-dev.png

@@ -31,6 +31,38 @@ If you previously used `cd llm_adventure && python3 -m http.server`, use the rep
 
 ---
 
+## Offline / local models (no internet needed)
+
+By default, models are downloaded from HuggingFace Hub on first load and cached in the browser. To run **fully offline** (or for faster local loading), download the model files once:
+
+```bash
+cd /path/to/Colossal_Cave
+python3 -c "
+from huggingface_hub import snapshot_download
+# Gemma 4 E4B ONNX (q4) — ~3.2 GB
+snapshot_download('onnx-community/gemma-4-E4B-it-ONNX',
+    allow_patterns=['config.json','generation_config.json','tokenizer.json',
+        'tokenizer_config.json','preprocessor_config.json','processor_config.json',
+        'onnx/decoder_model_merged_q4.onnx','onnx/decoder_model_merged_q4.onnx_data',
+        'onnx/decoder_model_merged_q4.onnx_data_1'],
+    local_dir='local_models/onnx-community/gemma-4-E4B-it-ONNX')
+# SD 1.5 ONNX — ~2 GB
+snapshot_download('microsoft/stable-diffusion-v1.5-webnn',
+    allow_patterns=['text-encoder.onnx',
+        'sd-unet-v1.5-model-b2c4h64w64s77-float16-compute-and-inputs-layernorm.onnx',
+        'Stable-Diffusion-v1.5-vae-decoder-float16-fp32-instancenorm.onnx'],
+    local_dir='local_models/microsoft/stable-diffusion-v1.5-webnn')
+# CLIP tokenizer — ~2 MB
+snapshot_download('Xenova/clip-vit-base-patch16',
+    allow_patterns=['tokenizer.json','tokenizer_config.json','config.json'],
+    local_dir='local_models/Xenova/clip-vit-base-patch16')
+"
+```
+
+Total download: **~5.1 GB**. The `local_models/` directory is git-ignored. When you serve from localhost, the game auto-detects local files and loads from disk instead of the web.
+
+---
+
 ## What “generates” the story?
 
 The story is **not** a fixed script. Each beat is produced by a **text-generation model** (Gemma 4 E4B ONNX) acting as **narrator + game master**. The page does not run a hand-authored plot tree; it runs a **loop**:
@@ -142,13 +174,25 @@ Win detection uses **`win_condition`** text plus **`game_flags`** / inventory he
 
 ---
 
+## Adventure generation, save/load, and preset themes
+
+The browser version now supports adventure generation, save/load, and preset themes:
+
+- **World Bible Generation**: use the in-browser Gemma 4B to generate a new adventure from a theme description. Pick a preset theme (Tolkien, Star Wars, Colossal Cave, Zork, Myst, Pirate, Cyberpunk) or write your own. Generation takes 30-90 seconds.
+- **Save/Load**: save game state + world bible to browser `localStorage`. Resume later from the adventure picker.
+- **JSON Import/Export**: download the current adventure (world bible + game state) as a `.json` file, or import one. Share adventures via GitHub or email. A reference file is at [`default_cave.json`](default_cave.json).
+- **Pre-game Adventure Picker**: choose default cave, generate new, or load saved before starting.
+- **In-game buttons**: Save, Export, and New Adventure in the header bar.
+
+The active world bible is stored in `activeWorldBible` (defaults to `DEFAULT_WORLD_BIBLE`). All game engine functions reference this mutable variable, so swapping it changes the entire adventure.
+
 ## What the Python game has that the browser build does not
 
-The browser page is intentionally smaller:
+The browser page is intentionally smaller in a few areas:
 
-- No **save/load** to disk, no Gradio UI, no **world bible generation** from a second “heavy” model.
 - No **MFLUX** / local FLUX paths; images are **only** SD 1.5 via ONNX in the worker.
 - **Advanced directives** from the Python engine (timers, chain reactions, etc.) are not implemented in the browser `applyLlmDirectives`—only the table above.
+- World bible generation uses the **same Gemma 4B** model (vs. a separate heavier model in Python), so generated bibles may be simpler.
 
 For full feature parity, run [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py) on Apple Silicon.
 

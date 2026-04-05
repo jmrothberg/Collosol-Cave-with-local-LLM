@@ -191,17 +191,62 @@
       max-height: 200px; overflow-y: auto; white-space: pre-wrap;
     }
     #debug-panel.open { display: block; }
+    /* ── Adventure picker (pre-game) ── */
+    .adventure-picker {
+      width: 100%; max-width: 600px; text-align: left;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .adventure-picker h3 { color: var(--accent); font-size: 1rem; margin-bottom: 2px; }
+    .pick-card {
+      background: var(--panel); border: 2px solid var(--border); border-radius: 8px;
+      padding: 12px 16px; cursor: pointer; transition: border-color 0.15s;
+    }
+    .pick-card:hover { border-color: var(--accent-dim); }
+    .pick-card.selected { border-color: var(--accent); }
+    .pick-card .pick-title { font-weight: 600; color: var(--text); font-size: 0.95rem; }
+    .pick-card .pick-desc { color: var(--text-muted); font-size: 0.8rem; margin-top: 2px; }
+    .pick-card .pick-options { margin-top: 8px; display: none; }
+    .pick-card.selected .pick-options { display: block; }
+    .pick-card select, .pick-card textarea, .pick-card input[type="file"] {
+      width: 100%; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 10px; font-size: 13px; margin-top: 6px; outline: none;
+    }
+    .pick-card select:focus, .pick-card textarea:focus { border-color: var(--accent-dim); }
+    .pick-card textarea { min-height: 60px; resize: vertical; font-family: inherit; }
+    .pick-card .saved-list { margin-top: 6px; max-height: 120px; overflow-y: auto; }
+    .pick-card .saved-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+    .pick-card .saved-item:hover { background: var(--panel-alt); }
+    .pick-card .saved-item.selected-save { background: var(--panel-alt); border: 1px solid var(--accent-dim); }
+    .pick-card .saved-item .save-name { color: var(--text); font-weight: 500; }
+    .pick-card .saved-item .save-date { color: var(--text-muted); font-size: 11px; }
+    .pick-card .or-divider { color: var(--text-muted); font-size: 11px; margin: 6px 0; text-align: center; }
+    .pick-card label.file-label {
+      display: inline-block; background: var(--border); color: var(--text);
+      border: 1px solid var(--border); padding: 5px 12px; border-radius: 4px;
+      cursor: pointer; font-size: 12px; transition: border-color 0.15s;
+    }
+    .pick-card label.file-label:hover { border-color: var(--accent); color: var(--accent); }
+    .pick-card input[type="file"] { display: none; }
+    #import-file-name { color: var(--text-muted); font-size: 11px; margin-left: 8px; }
+    /* ── Header action buttons ── */
+    .header-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .header-actions button { font-size: 12px; padding: 5px 10px; }
     /* ── Responsive ── */
     @media (max-width: 720px) {
       .mid-row { flex-direction: column; }
       .img-panel { width: 100%; min-height: 200px; }
       #narrative { max-height: 35vh; }
+      .adventure-picker { max-width: 100%; }
     }
   </style>
 </head>
 <body>
 
-  <!-- ═══ Loading overlay ═══ -->
+  <!-- ═══ Loading overlay / Adventure picker ═══ -->
   <div id="loading-overlay">
     <h2>JMR's LLM Adventure</h2>
     <p>A fully LLM-driven text adventure running entirely in your browser.
@@ -209,7 +254,44 @@
     <p style="font-size:0.8rem;color:var(--text-muted)">
       Requires WebGPU (Chrome/Edge 113+). First run downloads ~4 GB of models (cached).
     </p>
-    <button class="primary" id="btn-start" style="font-size:15px;padding:12px 28px;">Start Adventure</button>
+
+    <!-- Adventure picker section -->
+    <div class="adventure-picker" id="adventure-picker">
+      <h3>Choose Your Adventure</h3>
+
+      <!-- Option 1: Default -->
+      <div class="pick-card selected" data-pick="default" id="pick-default">
+        <div class="pick-title">Default Cave Adventure</div>
+        <div class="pick-desc">Classic cave exploration with puzzles, NPCs, and treasure. Ready to play immediately.</div>
+      </div>
+
+      <!-- Option 2: Generate new -->
+      <div class="pick-card" data-pick="generate" id="pick-generate">
+        <div class="pick-title">Generate New Adventure</div>
+        <div class="pick-desc">Use the LLM to create a brand-new world bible from a theme idea.</div>
+        <div class="pick-options">
+          <select id="theme-select">
+            <option value="">-- Pick a preset theme --</option>
+          </select>
+          <textarea id="custom-theme" placeholder="Or describe your own adventure theme...&#10;e.g. A haunted Victorian mansion with ghosts, secret passages, and a missing heirloom."></textarea>
+        </div>
+      </div>
+
+      <!-- Option 3: Load saved -->
+      <div class="pick-card" data-pick="load" id="pick-load">
+        <div class="pick-title">Load Saved Adventure</div>
+        <div class="pick-desc">Resume a saved game or import a world bible JSON file.</div>
+        <div class="pick-options">
+          <div class="saved-list" id="saved-list"><em style="color:var(--text-muted);font-size:12px;">No saved adventures yet.</em></div>
+          <div class="or-divider">— or import a file —</div>
+          <label class="file-label" for="import-file">Import JSON file</label>
+          <input type="file" id="import-file" accept=".json" />
+          <span id="import-file-name"></span>
+        </div>
+      </div>
+    </div>
+
+    <button class="primary" id="btn-start" style="font-size:15px;padding:12px 28px;margin-top:8px;">Start Adventure</button>
     <div class="progress-bar" id="prog-bar" style="display:none"><div class="fill" id="prog-fill"></div></div>
     <div id="load-status"></div>
   </div>
@@ -219,6 +301,11 @@
     <div>
       <h1>JMR's LLM Adventure</h1>
       <div class="subtitle">Gemma 4B + SD 1.5 — all in browser &nbsp;|&nbsp; v1.0 Jonathan Rothberg 2026</div>
+    </div>
+    <div class="header-actions">
+      <button id="btn-save" title="Save game to browser storage">Save</button>
+      <button id="btn-export" title="Download adventure as JSON file">Export</button>
+      <button id="btn-new-adventure" title="Start a different adventure">New Adventure</button>
     </div>
   </header>
   <main id="game-main">
@@ -270,6 +357,20 @@
     const IMG_STEPS = 20;
     const IMG_GUIDANCE = 7.5;
     const IMAGE_THEME = "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere";
+
+    // Local models: when running on localhost, check for downloaded models in /local_models/
+    // Download with: python3 -c "from huggingface_hub import snapshot_download; ..."
+    // See README.md or local_models/ for details.
+    const LOCAL_MODELS_BASE = "/local_models";
+    let useLocalModels = false;
+
+    async function detectLocalModels() {
+      if (!["localhost", "127.0.0.1", "0.0.0.0"].includes(location.hostname)) return false;
+      try {
+        const resp = await fetch(`${LOCAL_MODELS_BASE}/${LLM_MODEL_ID}/config.json`, { method: "HEAD" });
+        return resp.ok;
+      } catch { return false; }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // DEFAULT WORLD BIBLE — built-in cave adventure (from Python engine)
@@ -331,6 +432,62 @@
       ],
       main_arc: "A brave explorer seeks legendary treasure in mysterious caves. They must use wit and courage to overcome guardians and puzzles.",
       win_condition: "Obtain the golden treasure and return to entrance"
+    };
+
+    // Active world bible — swapped when generating or loading a different adventure
+    let activeWorldBible = DEFAULT_WORLD_BIBLE;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PRESET THEMES — mirrored from Python engine
+    // ═══════════════════════════════════════════════════════════════════════════
+    const PRESET_THEMES = {
+      "Tolkien Cave Adventure": (
+        "An adventure game starting at the entrance to a giant cave system, " +
+        "featuring Tolkien-inspired characters like wizards, hobbits, dwarves, and elves. " +
+        "Each character and object should play a meaningful part in completing the quest. " +
+        "Art style: detailed fantasy illustration with warm torchlight, ancient stone architecture, " +
+        "and atmospheric mist. Environments should feel lived-in and mysterious."
+      ),
+      "Star Wars Universe": (
+        "An adventure game set in the Star Wars universe with iconic characters like Jedi, " +
+        "droids, and aliens. Features lightsabers, the Force, and galactic technology. " +
+        "Each character and item should be essential to completing the mission. " +
+        "Art style: cinematic sci-fi with neon glows, metallic surfaces, holographic displays, " +
+        "and dramatic lighting contrasts between light and dark side aesthetics."
+      ),
+      "Colossal Cave (Classic)": (
+        "A classic text adventure inspired by the original Colossal Cave Adventure. " +
+        "Features underground caverns, twisty passages, treasure hunting, and puzzle solving. " +
+        "Characters include a helpful hermit, mysterious spirits, and cave-dwelling creatures. " +
+        "Art style: nostalgic fantasy illustration with glowing crystals, underground rivers, " +
+        "ancient ruins, and atmospheric cave lighting."
+      ),
+      "Zork-style Mystery": (
+        "A mysterious adventure in the style of Zork, featuring a sprawling underground empire, " +
+        "ancient artifacts, and clever puzzles. Characters are enigmatic and locations are interconnected. " +
+        "Art style: dark fantasy with ornate architecture, magical glows, brass and copper machinery, " +
+        "and deep shadows hiding secrets."
+      ),
+      "Myst Island": (
+        "A puzzle-focused adventure on a mysterious island with strange machines and hidden passages. " +
+        "Minimal characters but rich environmental storytelling. Each mechanism and clue connects to the solution. " +
+        "Art style: surreal landscapes, steampunk machinery, crystalline structures, " +
+        "ethereal lighting, and dreamlike atmosphere."
+      ),
+      "Pirate Treasure Hunt": (
+        "A swashbuckling adventure seeking buried treasure on a tropical island. " +
+        "Features pirates, sea caves, ancient maps, and hidden troves. " +
+        "Characters include a helpful parrot, ghostly pirates, and island natives. " +
+        "Art style: vibrant tropical colors, weathered wood and rope, golden treasure glints, " +
+        "moonlit beaches, and mysterious jungle ruins."
+      ),
+      "Cyberpunk Heist": (
+        "A high-tech adventure in a neon-lit dystopian city. " +
+        "Features hackers, corporate secrets, AI companions, and cybernetic enhancements. " +
+        "Each contact and gadget serves a purpose in the heist. " +
+        "Art style: neon-soaked cityscapes, holographic interfaces, rain-slicked streets, " +
+        "chrome and glass architecture, and dramatic urban lighting."
+      ),
     };
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -535,6 +692,276 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // WORLD BIBLE GENERATION — create a new adventure from a theme description
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function validateWorldBible(wb) {
+      const issues = [];
+      const required = ["objectives", "locations", "key_items", "win_condition"];
+      for (const f of required) {
+        if (!wb[f] || (Array.isArray(wb[f]) && wb[f].length === 0)) issues.push(`Missing or empty: ${f}`);
+      }
+      if (wb.locations && wb.locations.length < 3) issues.push(`Too few locations (${wb.locations.length}), need at least 3`);
+      if (wb.key_items && wb.key_items.length < 3) issues.push(`Too few items (${wb.key_items.length}), need at least 3`);
+      if (wb.key_items) {
+        for (const item of wb.key_items) {
+          if (typeof item === "object" && !item.purpose) issues.push(`Item '${item.name || "?"}' has no purpose`);
+        }
+      }
+      if (wb.locations) {
+        for (const loc of wb.locations) {
+          if (typeof loc === "object" && !loc.description) issues.push(`Location '${loc.name || "?"}' has no description`);
+        }
+      }
+      return { valid: issues.length === 0, issues };
+    }
+
+    async function generateWorldBible(theme, onStatus) {
+      if (!llmPipe) throw new Error("LLM not loaded yet");
+
+      const systemMsg = "You are a game designer. Output ONLY a single valid JSON object. No markdown fences, no commentary.";
+
+      const prompt =
+        `Create a solvable adventure game as JSON.\n\n` +
+        `Theme: ${theme}\n\n` +
+        `Set "global_theme" to a short art-style description for this theme.\n\n` +
+        `Required JSON fields:\n` +
+        `- objectives: 4 goals in order\n` +
+        `- global_theme: short art style string\n` +
+        `- locations: 5+ rooms (each: name, description)\n` +
+        `- npcs: 2-3 characters (each: name, location, personality, provides)\n` +
+        `- monsters: 2-3 enemies (each: name, location, difficulty, weakness)\n` +
+        `- riddles: 2 puzzles (each: location, hint, solution, reward)\n` +
+        `- key_items: 6-8 items (each: name, purpose)\n` +
+        `- item_locations: object mapping item name to where found\n` +
+        `- progression_hints: 3-4 player hints\n` +
+        `- mechanics: 3 cause-effect rules (each: action, effect, location)\n` +
+        `- main_arc: 2-sentence story summary\n` +
+        `- win_condition: what completes the game\n\n` +
+        `Example flow: torch (entrance) -> lights dark cave -> find key -> unlock temple -> get sword -> defeat guardian -> claim treasure\n\n` +
+        `Every item must be useful. Every NPC must help. The game must be winnable.\n\n` +
+        `Output ONLY valid JSON. No markdown, no commentary.`;
+
+      if (onStatus) onStatus("Generating world bible (this may take 30-90 seconds)...");
+
+      // Use lower temperature for more reliable JSON output
+      const messages = [
+        { role: "system", content: systemMsg },
+        { role: "user", content: prompt },
+      ];
+      let text = "";
+      const streamer = new TextStreamer(llmPipe.tokenizer, {
+        skip_prompt: true,
+        callback_function: (piece) => {
+          text += piece;
+          if (onStatus) {
+            const chars = text.length;
+            onStatus(`Generating world bible... ${chars} chars so far`);
+          }
+        },
+      });
+      await llmPipe(messages, {
+        max_new_tokens: 2048,
+        temperature: 0.5,
+        do_sample: true,
+        repetition_penalty: 1.1,
+        streamer,
+      });
+
+      if (onStatus) onStatus("Parsing world bible JSON...");
+
+      // Strip markdown fences if present
+      let cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+
+      // Try to extract valid JSON
+      let candidates = extractJsonFromText(cleaned);
+      let plan = candidates.length ? candidates[0] : null;
+
+      // Fallback: basic brace extraction with fixes
+      if (!plan) {
+        const start = cleaned.indexOf("{");
+        const end = cleaned.lastIndexOf("}") + 1;
+        if (start >= 0 && end > start) {
+          plan = tryParseJson(cleaned.slice(start, end));
+        }
+      }
+
+      // Retry with simpler prompt if first attempt failed
+      if (!plan) {
+        if (onStatus) onStatus("First attempt failed, retrying with simpler prompt...");
+        const retryPrompt =
+          `Create adventure game JSON for theme: ${theme}\n` +
+          `Include: objectives (4 goals), locations (5 rooms with name/description), ` +
+          `npcs (2 with name/location/personality/provides), ` +
+          `monsters (2 with name/location/difficulty/weakness), ` +
+          `key_items (6 with name/purpose), item_locations, mechanics, win_condition, global_theme.\n` +
+          `Output valid JSON only.`;
+
+        let retryText = "";
+        const retryStreamer = new TextStreamer(llmPipe.tokenizer, {
+          skip_prompt: true,
+          callback_function: (piece) => {
+            retryText += piece;
+            if (onStatus) onStatus(`Retry: ${retryText.length} chars...`);
+          },
+        });
+        await llmPipe(
+          [{ role: "system", content: systemMsg }, { role: "user", content: retryPrompt }],
+          { max_new_tokens: 2048, temperature: 0.4, do_sample: true, repetition_penalty: 1.1, streamer: retryStreamer }
+        );
+
+        const retryClean = retryText.replace(/```json/gi, "").replace(/```/g, "").trim();
+        const retryCandidates = extractJsonFromText(retryClean);
+        plan = retryCandidates.length ? retryCandidates[0] : null;
+        if (!plan) {
+          const s = retryClean.indexOf("{"), e = retryClean.lastIndexOf("}") + 1;
+          if (s >= 0 && e > s) plan = tryParseJson(retryClean.slice(s, e));
+        }
+      }
+
+      if (!plan) throw new Error("Failed to generate valid world bible JSON after 2 attempts");
+
+      // Ensure global_theme is set
+      if (!plan.global_theme) {
+        plan.global_theme = theme.includes("Art style:") ? theme : theme.split(".")[0];
+      }
+      // Ensure theme alias
+      plan.theme = plan.global_theme;
+
+      // Ensure required arrays exist (fill with empty defaults so game doesn't crash)
+      if (!Array.isArray(plan.objectives)) plan.objectives = [];
+      if (!Array.isArray(plan.locations)) plan.locations = [];
+      if (!Array.isArray(plan.npcs)) plan.npcs = [];
+      if (!Array.isArray(plan.monsters)) plan.monsters = [];
+      if (!Array.isArray(plan.riddles)) plan.riddles = [];
+      if (!Array.isArray(plan.key_items)) plan.key_items = [];
+      if (!plan.item_locations || typeof plan.item_locations !== "object") plan.item_locations = {};
+      if (!Array.isArray(plan.progression_hints)) plan.progression_hints = [];
+      if (!Array.isArray(plan.mechanics)) plan.mechanics = [];
+      if (!plan.main_arc) plan.main_arc = "";
+      if (!plan.win_condition) plan.win_condition = "Complete the adventure";
+
+      const { valid, issues } = validateWorldBible(plan);
+      if (!valid) {
+        console.warn("[world_bible] Validation issues:", issues);
+      }
+      if (onStatus) onStatus(valid ? "World bible generated successfully!" : `World bible generated (warnings: ${issues.join("; ")})`);
+
+      return plan;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SAVE / LOAD — localStorage + JSON file import/export
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    const SAVE_KEY_PREFIX = "jmr_adventure_";
+
+    function listSavedAdventures() {
+      const saves = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key.startsWith(SAVE_KEY_PREFIX)) {
+          try {
+            const data = JSON.parse(localStorage.getItem(key));
+            saves.push({
+              key,
+              name: key.slice(SAVE_KEY_PREFIX.length),
+              timestamp: data.timestamp || 0,
+              themeName: data.worldBible?.global_theme?.slice(0, 50) || "Unknown theme",
+            });
+          } catch { /* skip corrupt entries */ }
+        }
+      }
+      saves.sort((a, b) => b.timestamp - a.timestamp);
+      return saves;
+    }
+
+    function saveAdventure(name) {
+      const key = SAVE_KEY_PREFIX + name;
+      // Serialize game state without blob URLs (ephemeral)
+      const stateClone = JSON.parse(JSON.stringify(stateMgr.state));
+      delete stateClone.roomImageBlobs;
+      const payload = {
+        worldBible: activeWorldBible,
+        gameState: stateClone,
+        timestamp: Date.now(),
+      };
+      localStorage.setItem(key, JSON.stringify(payload));
+      return key;
+    }
+
+    function loadAdventure(name) {
+      const key = name.startsWith(SAVE_KEY_PREFIX) ? name : SAVE_KEY_PREFIX + name;
+      const raw = localStorage.getItem(key);
+      if (!raw) throw new Error(`No save found: ${name}`);
+      const data = JSON.parse(raw);
+      if (data.worldBible) activeWorldBible = data.worldBible;
+      if (data.gameState) {
+        // Restore state, ensuring blob caches are reset
+        const gs = data.gameState;
+        gs.roomImageBlobs = gs.roomImageBlobs || {};
+        gs.roomsWithImages = gs.roomsWithImages || [];
+        stateMgr.state = gs;
+      }
+      return data;
+    }
+
+    function exportAdventureJSON() {
+      const stateClone = JSON.parse(JSON.stringify(stateMgr.state));
+      delete stateClone.roomImageBlobs;
+      const payload = {
+        worldBible: activeWorldBible,
+        gameState: stateClone,
+        timestamp: Date.now(),
+        exportVersion: "1.0",
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const themeName = (activeWorldBible.global_theme || "adventure").replace(/[^a-z0-9]/gi, "_").slice(0, 30);
+      a.download = `adventure_${themeName}_${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function exportWorldBibleOnlyJSON() {
+      const blob = new Blob([JSON.stringify(activeWorldBible, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const themeName = (activeWorldBible.global_theme || "world").replace(/[^a-z0-9]/gi, "_").slice(0, 30);
+      a.download = `world_bible_${themeName}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    async function importAdventureJSON(file) {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      // Support both full save (worldBible + gameState) and world-bible-only files
+      if (data.worldBible) {
+        activeWorldBible = data.worldBible;
+        if (data.gameState) {
+          data.gameState.roomImageBlobs = data.gameState.roomImageBlobs || {};
+          data.gameState.roomsWithImages = data.gameState.roomsWithImages || [];
+          stateMgr.state = data.gameState;
+        }
+        return { hasGameState: !!data.gameState };
+      }
+      // Assume the file IS a world bible directly (has locations, objectives, etc.)
+      if (data.locations || data.objectives || data.win_condition) {
+        activeWorldBible = data;
+        return { hasGameState: false };
+      }
+      throw new Error("Unrecognized JSON format — expected a world bible or adventure save");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // APPLY LLM DIRECTIVES — process JSON state changes
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -668,55 +1095,55 @@
       };
 
       // Win condition
-      if (DEFAULT_WORLD_BIBLE.win_condition) context.win_condition = DEFAULT_WORLD_BIBLE.win_condition;
+      if (activeWorldBible.win_condition) context.win_condition = activeWorldBible.win_condition;
 
       // Health warnings
       if (s.health <= 0) context.WARNING = "Player is dead! Describe their demise.";
       else if (s.health <= 20) context.WARNING = "Player health critically low!";
 
-      // World bible cues for current location
+      // World bible cues for current location (defensive: arrays may be absent in imported bibles)
       const cues = [];
-      for (const loc of DEFAULT_WORLD_BIBLE.locations) {
+      for (const loc of (activeWorldBible.locations || [])) {
         if (loc.name.toLowerCase() === s.location.toLowerCase() && loc.description) {
           cues.push(`Location: ${loc.description}`);
           break;
         }
       }
-      for (const npc of DEFAULT_WORLD_BIBLE.npcs) {
+      for (const npc of (activeWorldBible.npcs || [])) {
         if (npc.location.toLowerCase() === s.location.toLowerCase()) {
           cues.push(`NPC here: ${npc.name} - ${npc.personality}${npc.provides ? ` (provides: ${npc.provides})` : ""}`);
         }
       }
-      for (const mon of DEFAULT_WORLD_BIBLE.monsters) {
+      for (const mon of (activeWorldBible.monsters || [])) {
         if (mon.location.toLowerCase() === s.location.toLowerCase()) {
           cues.push(`Monster here: ${mon.name} (${mon.difficulty})${mon.weakness ? ` weakness: ${mon.weakness}` : ""}`);
         }
       }
-      for (const riddle of DEFAULT_WORLD_BIBLE.riddles) {
+      for (const riddle of (activeWorldBible.riddles || [])) {
         if (riddle.location.toLowerCase() === s.location.toLowerCase()) {
           cues.push(`Puzzle: ${riddle.hint}${riddle.reward ? ` (solving grants: ${riddle.reward})` : ""}`);
         }
       }
-      for (const mech of DEFAULT_WORLD_BIBLE.mechanics) {
+      for (const mech of (activeWorldBible.mechanics || [])) {
         if (mech.location.toLowerCase() === s.location.toLowerCase()) {
           cues.push(`Mechanic: ${mech.action} -> ${mech.effect}`);
         }
       }
-      for (const [item, locDesc] of Object.entries(DEFAULT_WORLD_BIBLE.item_locations)) {
+      for (const [item, locDesc] of Object.entries(activeWorldBible.item_locations || {})) {
         if (s.location.toLowerCase().split(" ").some(w => locDesc.toLowerCase().includes(w)) && !s.inventory.includes(item)) {
-          const info = DEFAULT_WORLD_BIBLE.key_items.find(k => k.name === item);
+          const info = (activeWorldBible.key_items || []).find(k => k.name === item);
           if (info) cues.push(`Item available: ${item} - ${info.purpose}`);
         }
       }
       // Current objective
-      const objectives = DEFAULT_WORLD_BIBLE.objectives;
+      const objectives = activeWorldBible.objectives || [];
       if (objectives.length) {
         const completed = objectives.reduce((n, _, i) => n + (s.gameFlags[`objective_${i}`] ? 1 : 0), 0);
         cues.push(`Current goal: ${objectives[Math.min(completed, objectives.length - 1)]}`);
       }
       // Hint if stuck
-      if (s.inventory.length < 2 && DEFAULT_WORLD_BIBLE.progression_hints.length) {
-        cues.push(`Hint: ${DEFAULT_WORLD_BIBLE.progression_hints[0]}`);
+      if (s.inventory.length < 2 && (activeWorldBible.progression_hints || []).length) {
+        cues.push(`Hint: ${activeWorldBible.progression_hints[0]}`);
       }
 
       const bibleLine = cues.length ? "\nWorld context:\n" + cues.map(c => `  ${c}`).join("\n") : "";
@@ -737,16 +1164,16 @@
     function checkWinCondition(stateMgr) {
       const s = stateMgr.state;
       if (s.gameFlags.game_complete || s.gameFlags.game_won) {
-        return `VICTORY! ${DEFAULT_WORLD_BIBLE.win_condition}\nCongratulations, adventurer!`;
+        return `VICTORY! ${activeWorldBible.win_condition}\nCongratulations, adventurer!`;
       }
-      const wc = (DEFAULT_WORLD_BIBLE.win_condition || "").toLowerCase();
-      const winItems = DEFAULT_WORLD_BIBLE.key_items
+      const wc = (activeWorldBible.win_condition || "").toLowerCase();
+      const winItems = (activeWorldBible.key_items || [])
         .filter(k => wc.includes(k.name.toLowerCase()))
         .map(k => k.name);
       if (winItems.length && winItems.every(it => s.inventory.includes(it))) {
-        for (const loc of DEFAULT_WORLD_BIBLE.locations) {
+        for (const loc of (activeWorldBible.locations || [])) {
           if (wc.includes(loc.name.toLowerCase()) && s.location.toLowerCase() === loc.name.toLowerCase()) {
-            return `VICTORY! ${DEFAULT_WORLD_BIBLE.win_condition}\nCongratulations, adventurer!`;
+            return `VICTORY! ${activeWorldBible.win_condition}\nCongratulations, adventurer!`;
           }
         }
       }
@@ -759,9 +1186,15 @@
     let llmPipe = null;
 
     async function loadLlm(onProgress) {
-      env.allowLocalModels = false;
+      if (useLocalModels) {
+        env.allowLocalModels = true;
+        env.localModelPath = LOCAL_MODELS_BASE + "/";
+        onProgress({ text: `Loading ${LLM_MODEL_ID} from local files…` });
+      } else {
+        env.allowLocalModels = false;
+      }
       const device = navigator.gpu ? "webgpu" : "wasm";
-      onProgress({ text: `Loading ${LLM_MODEL_ID} (${device})…` });
+      onProgress({ text: `Loading ${LLM_MODEL_ID} (${device}${useLocalModels ? ", local" : ""})…` });
       try {
         llmPipe = await pipeline("text-generation", LLM_MODEL_ID, {
           dtype: "q4",
@@ -826,16 +1259,21 @@
     let imgReady = false;
 
     async function loadImageModel(onProgress) {
-      onProgress({ text: "Loading SD 1.5 image model…" });
+      onProgress({ text: `Loading SD 1.5 image model${useLocalModels ? " (local)" : ""}…` });
       try {
         imgClient = Txt2ImgWorkerClient.createDefault();
         const wasmBase = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
-        const res = await imgClient.load(IMG_MODEL_ID, {
+        const imgLoadOpts = {
           backendPreference: ["webgpu", "wasm"],
           wasmPaths: wasmBase,
           wasmNumThreads: navigator.hardwareConcurrency ? Math.min(4, navigator.hardwareConcurrency) : 2,
           wasmSimd: true,
-        }, (p) => {
+        };
+        // Point SD 1.5 adapter at local ONNX files when available
+        if (useLocalModels) {
+          imgLoadOpts.modelBaseUrl = `${LOCAL_MODELS_BASE}/microsoft/stable-diffusion-v1.5-webnn`;
+        }
+        const res = await imgClient.load(IMG_MODEL_ID, imgLoadOpts, (p) => {
           const pct = p?.pct != null ? ` ${p.pct}%` : "";
           onProgress({ text: `SD 1.5: ${p?.message || "loading"}${pct}`, pct: p?.pct });
         });
@@ -855,7 +1293,8 @@
     /** Generate an image with SD 1.5. Returns blob URL or null. */
     async function generateSceneImage(prompt, onStatus) {
       if (!imgClient || !imgReady) return null;
-      const fullPrompt = `${prompt}. Art style: ${IMAGE_THEME}`;
+      const artTheme = activeWorldBible.global_theme || activeWorldBible.theme || IMAGE_THEME;
+      const fullPrompt = `${prompt}. Art style: ${artTheme}`;
       const seed = Math.floor(Math.random() * 2147483647);
       if (onStatus) onStatus("Generating scene…");
       try {
@@ -969,7 +1408,7 @@
     const stateMgr = new StateManager();
 
     async function startStory() {
-      const wb = DEFAULT_WORLD_BIBLE;
+      const wb = activeWorldBible;
       const theme = wb.global_theme || IMAGE_THEME;
 
       // Build opening kickoff prompt
@@ -1110,14 +1549,84 @@
     // EVENT HANDLERS & INITIALIZATION
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // Debug toggle
+    // Track whether models are already loaded (for New Adventure without re-download)
+    let modelsLoaded = false;
+
+    // ── Adventure picker card selection ──
+    let selectedPick = "default";
+    let selectedSaveKey = null;
+    let importedFile = null;
+
+    function selectPickCard(pick) {
+      selectedPick = pick;
+      for (const card of document.querySelectorAll(".pick-card")) {
+        card.classList.toggle("selected", card.dataset.pick === pick);
+      }
+    }
+
+    for (const card of document.querySelectorAll(".pick-card")) {
+      card.addEventListener("click", () => selectPickCard(card.dataset.pick));
+    }
+
+    // ── Populate theme dropdown ──
+    const themeSelect = $("theme-select");
+    for (const [name] of Object.entries(PRESET_THEMES)) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      themeSelect.appendChild(opt);
+    }
+    themeSelect.addEventListener("change", () => {
+      const val = themeSelect.value;
+      if (val && PRESET_THEMES[val]) {
+        $("custom-theme").value = PRESET_THEMES[val];
+      }
+    });
+
+    // ── Populate saved adventures list ──
+    function refreshSavedList() {
+      const listEl = $("saved-list");
+      const saves = listSavedAdventures();
+      listEl.innerHTML = "";
+      if (saves.length === 0) {
+        listEl.innerHTML = '<em style="color:var(--text-muted);font-size:12px;">No saved adventures yet.</em>';
+        return;
+      }
+      for (const s of saves) {
+        const div = document.createElement("div");
+        div.className = "saved-item" + (selectedSaveKey === s.key ? " selected-save" : "");
+        div.innerHTML = `<span class="save-name">${s.name}</span><span class="save-date">${new Date(s.timestamp).toLocaleDateString()}</span>`;
+        div.addEventListener("click", (e) => {
+          e.stopPropagation();
+          selectedSaveKey = s.key;
+          importedFile = null;
+          $("import-file-name").textContent = "";
+          refreshSavedList();
+        });
+        listEl.appendChild(div);
+      }
+    }
+    refreshSavedList();
+
+    // ── Import file picker ──
+    $("import-file").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        importedFile = file;
+        selectedSaveKey = null;
+        $("import-file-name").textContent = file.name;
+        refreshSavedList();
+      }
+    });
+
+    // ── Debug toggle ──
     $("debug-toggle").addEventListener("click", () => {
       const panel = $("debug-panel");
       const open = panel.classList.toggle("open");
       $("debug-toggle").innerHTML = (open ? "&#9660;" : "&#9654;") + " Debug";
     });
 
-    // Send button / Enter key
+    // ── Send button / Enter key ──
     $("btn-send").addEventListener("click", () => {
       const input = $("player-input");
       const val = input.value.trim();
@@ -1130,7 +1639,51 @@
       }
     });
 
-    // Start button — kicks off model loading and game
+    // ── Helper: switch to game UI ──
+    function switchToGame() {
+      $("loading-overlay").classList.add("hidden");
+      $("game-main").classList.add("active");
+    }
+
+    // ── Helper: switch back to adventure picker ──
+    function switchToPicker() {
+      $("game-main").classList.remove("active");
+      $("loading-overlay").classList.remove("hidden");
+      $("btn-start").disabled = false;
+      $("btn-start").textContent = modelsLoaded ? "Start Adventure" : "Start Adventure";
+      $("prog-bar").style.display = "none";
+      $("load-status").textContent = "";
+      refreshSavedList();
+    }
+
+    // ── Helper: ensure models are loaded (skips if already done) ──
+    async function ensureModelsLoaded(setLoad) {
+      if (modelsLoaded) return true;
+
+      // Detect if local model files are available (localhost only)
+      useLocalModels = await detectLocalModels();
+      if (useLocalModels) {
+        setLoad({ text: "Local model files detected — loading from disk (faster, no internet needed)." });
+      }
+
+      const llmOk = await loadLlm(setLoad);
+      if (!llmOk) {
+        setLoad({ text: "Failed to load LLM. Refresh and try again." });
+        return false;
+      }
+
+      $("prog-fill").style.width = "0%";
+      const imgOk = await loadImageModel(setLoad);
+      if (!imgOk) {
+        setLoad({ text: "Image model failed — continuing text-only." });
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      modelsLoaded = true;
+      return true;
+    }
+
+    // ── Start button — loads models then starts chosen adventure ──
     $("btn-start").addEventListener("click", async () => {
       $("btn-start").disabled = true;
       $("btn-start").textContent = "Loading…";
@@ -1141,32 +1694,110 @@
         if (info.pct != null) $("prog-fill").style.width = Math.min(100, info.pct) + "%";
       };
 
-      // 1. Load LLM
-      const llmOk = await loadLlm(setLoad);
-      if (!llmOk) {
-        $("load-status").textContent = "Failed to load LLM. Refresh and try again.";
+      // 1. Load models (or skip if already loaded)
+      const ok = await ensureModelsLoaded(setLoad);
+      if (!ok) {
         $("btn-start").textContent = "Failed";
         return;
       }
 
-      // 2. Load Image model (non-fatal if it fails)
-      $("prog-fill").style.width = "0%";
-      const imgOk = await loadImageModel(setLoad);
-      if (!imgOk) {
-        setLoad({ text: "Image model failed — continuing text-only." });
-        await new Promise(r => setTimeout(r, 1500));
+      // 2. Handle chosen adventure mode
+      let needsNewStory = true;
+
+      if (selectedPick === "generate") {
+        const theme = $("custom-theme").value.trim();
+        if (!theme) {
+          setLoad({ text: "Please enter a theme description or pick a preset." });
+          $("btn-start").disabled = false;
+          $("btn-start").textContent = "Start Adventure";
+          return;
+        }
+        try {
+          setLoad({ text: "Generating world bible…" });
+          const wb = await generateWorldBible(theme, (msg) => setLoad({ text: msg }));
+          activeWorldBible = wb;
+          stateMgr.state = createGameState();
+        } catch (e) {
+          setLoad({ text: `World bible generation failed: ${e.message}. Using default.` });
+          activeWorldBible = DEFAULT_WORLD_BIBLE;
+          stateMgr.state = createGameState();
+          await new Promise(r => setTimeout(r, 2000));
+        }
+
+      } else if (selectedPick === "load") {
+        try {
+          if (importedFile) {
+            const result = await importAdventureJSON(importedFile);
+            needsNewStory = !result.hasGameState;
+          } else if (selectedSaveKey) {
+            loadAdventure(selectedSaveKey);
+            needsNewStory = false;
+          } else {
+            setLoad({ text: "Please select a saved game or import a JSON file." });
+            $("btn-start").disabled = false;
+            $("btn-start").textContent = "Start Adventure";
+            return;
+          }
+        } catch (e) {
+          setLoad({ text: `Load failed: ${e.message}. Using default.` });
+          activeWorldBible = DEFAULT_WORLD_BIBLE;
+          stateMgr.state = createGameState();
+          await new Promise(r => setTimeout(r, 2000));
+        }
+
+      } else {
+        // "default" — reset to built-in cave adventure
+        activeWorldBible = DEFAULT_WORLD_BIBLE;
+        stateMgr.state = createGameState();
       }
 
       // 3. Switch to game UI
-      $("loading-overlay").classList.add("hidden");
-      $("game-main").classList.add("active");
+      switchToGame();
 
-      // 4. Start the adventure
-      await startStory();
+      // 4. Start the adventure (or restore loaded state)
+      if (needsNewStory) {
+        $("narrative").innerHTML = "";
+        await startStory();
+      } else {
+        // Restored from save — rebuild UI from state
+        $("narrative").innerHTML = "";
+        appendTurn(null, `Adventure resumed. You are in ${stateMgr.state.location}.`);
+        updateStatusPanel(stateMgr);
+        setDebug(["Game loaded from save."]);
+      }
       setInputEnabled(true);
     });
 
-    // WebGPU check
+    // ── In-game: Save button ──
+    $("btn-save").addEventListener("click", () => {
+      const name = prompt("Save name:", `save_${Date.now()}`);
+      if (!name) return;
+      try {
+        saveAdventure(name);
+        appendTurn(null, `Game saved as "${name}".`);
+      } catch (e) {
+        appendTurn(null, `Save failed: ${e.message}`);
+      }
+    });
+
+    // ── In-game: Export button ──
+    $("btn-export").addEventListener("click", () => {
+      try {
+        exportAdventureJSON();
+        appendTurn(null, "Adventure exported as JSON file.");
+      } catch (e) {
+        appendTurn(null, `Export failed: ${e.message}`);
+      }
+    });
+
+    // ── In-game: New Adventure button ──
+    $("btn-new-adventure").addEventListener("click", () => {
+      if (!confirm("Leave current game and choose a new adventure?")) return;
+      setInputEnabled(false);
+      switchToPicker();
+    });
+
+    // ── WebGPU check ──
     if (!navigator.gpu) {
       $("load-status").textContent = "WebGPU not detected. Models will use WASM (slower). For best experience, use Chrome/Edge 113+.";
     }
