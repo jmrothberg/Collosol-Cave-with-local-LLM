@@ -13,6 +13,8 @@ This folder holds the **standalone in-browser** version of the LLM adventure eng
 Short URL (repo-root redirect stub):  
 [https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html)
 
+**Link previews (Slack, Discord, iMessage, etc.):** `adventure.html` and the redirect stubs include Open Graph / Twitter Card tags pointing at [`og-preview.png`](og-preview.png) on GitHub Pages. After deploy, pasting any of the URLs above should unfurl with that image (crawlers cache; use [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/) to refresh if needed).
+
 ---
 
 ## How you must serve this folder
