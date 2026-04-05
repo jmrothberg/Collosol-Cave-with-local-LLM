@@ -1,4 +1,4 @@
-# LLM Cave Adventure — browser edition
+# JMR's LLM Adventure — browser edition
 
 This folder holds the **standalone in-browser** version of the LLM adventure engine (the same design as [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py), but implemented in one HTML file plus shared image workers).
 

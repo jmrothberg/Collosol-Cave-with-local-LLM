@@ -180,7 +180,7 @@ The key: all improvements come from the LLM better using the same simple tools.
 | File | Description |
 |------|-------------|
 | `LMM_adventure_Feb_15_26.py` | Main game engine (MLX-LM + MFLUX + Gradio) |
-| [`../browser_adventure/`](../browser_adventure/) | **Browser edition** — game + detailed docs ([`adventure.html`](../browser_adventure/adventure.html), [`README.md`](../browser_adventure/README.md)) |
+| [`../browser_adventure/`](../browser_adventure/) | **JMR's LLM Adventure** (browser) — game + detailed docs ([`adventure.html`](../browser_adventure/adventure.html), [`README.md`](../browser_adventure/README.md)) |
 | `llm_adventure/adventure.html` | Redirect to `../browser_adventure/adventure.html` (keep old bookmarks working) |
 | Root `adventure.html` | Redirect stub when `http.server` runs from repo root (→ `browser_adventure/adventure.html`) |
 | `mflux_image_gen.py` | FLUX image generation wrapper (Apple Silicon) |
@@ -191,11 +191,11 @@ The key: all improvements come from the LLM better using the same simple tools.
 
 ---
 
-## Browser Edition (`browser_adventure/`)
+## Browser Edition — JMR's LLM Adventure (`browser_adventure/`)
 
 **Full documentation:** [`../browser_adventure/README.md`](../browser_adventure/README.md) (how narration is generated, world bible vs. LLM, JSON tools, customizing stories, serving requirements).
 
-**[Play on GitHub Pages](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/browser_adventure/adventure.html)** — no install; first visit downloads models (~4 GB total, then cached). [Short URL (root stub)](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html) redirects into `browser_adventure/`.
+**[Play JMR's LLM Adventure on GitHub Pages](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/browser_adventure/adventure.html)** — no install; first visit downloads models (~4 GB total, then cached). [Short URL (root stub)](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html) redirects into `browser_adventure/`.
 
 The game lives in **`browser_adventure/adventure.html`** (repo root folder). It loads `web-txt2img` from **`llm_adventure/vendor/`**, so you must serve from the **repository root**, not from `llm_adventure/` alone:
 
