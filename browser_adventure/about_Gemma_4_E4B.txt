@@ -1,0 +1,19 @@
+Use the following standardized sampling configuration across all use cases:
+
+temperature=1.0
+top_p=0.95
+top_k=64
+2. Thinking Mode Configuration
+Compared to Gemma 3, the models use standard system, assistant, and user roles. To properly manage the thinking process, use the following control tokens:
+
+Trigger Thinking: Thinking is enabled by including the <|think|> token at the start of the system prompt. To disable thinking, remove the token.
+Standard Generation: When thinking is enabled, the model will output its internal reasoning followed by the final answer using this structure:
+<|channel>thought\n[Internal reasoning]<channel|>
+Disabled Thinking Behavior: For all models except for the E2B and E4B variants, if thinking is disabled, the model will still generate the tags but with an empty thought block:
+<|channel>thought\n<channel|>[Final answer]
+Note that many libraries like Transformers and llama.cpp handle the complexities of the chat template for you.
+
+3. Multi-Turn Conversations
+No Thinking Content in History: In multi-turn conversations, the historical model output should only include the final response. Thoughts from previous model turns must not be added before the next user turn begins.
+4. Modality order
+For optimal performance with multimodal inputs, place image and/or audio content before the text in your prompt.

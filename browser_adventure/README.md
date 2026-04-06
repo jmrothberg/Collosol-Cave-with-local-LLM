@@ -33,35 +33,53 @@ If you previously used `cd llm_adventure && python3 -m http.server`, use the rep
 
 ---
 
-## Offline / local models (no internet needed)
+## Models — internet vs. local
 
-By default, models are downloaded from HuggingFace Hub on first load and cached in the browser. To run **fully offline** (or for faster local loading), download the model files once:
+### Default: just open the page (internet required)
+
+Most users don't need to download anything manually. Open the GitHub Pages link (or serve locally) and the browser fetches models from HuggingFace Hub on first load, then caches them:
+
+| Model | Source | Size | Purpose |
+|-------|--------|------|---------|
+| **Gemma 4 E4B** (ONNX q4) | `onnx-community/gemma-4-E4B-it-ONNX` | ~3.1 GB | Text generation (narrator + game master) |
+| **SD 1.5** (MS WebNN ONNX fp16) | `microsoft/stable-diffusion-v1.5-webnn` | ~1.9 GB | Scene illustration |
+| **CLIP tokenizer** | `Xenova/clip-vit-base-patch16` | ~2 MB | Prompt encoding for SD 1.5 |
+
+First load is **~5 GB** total (browser-cached afterward). **WebGPU** (Chrome/Edge 113+) is strongly recommended; WASM fallback works but is much slower.
+
+### Optional: fully offline / local files
+
+For faster loading or air-gapped machines, download the model files once to `local_models/` in the repo root. The game auto-detects each model independently on localhost — you can have the LLM local and SD remote, or both local.
+
+**Prerequisite:** `pip install huggingface_hub` (one time).
 
 ```bash
 cd /path/to/Colossal_Cave
 python3 -c "
 from huggingface_hub import snapshot_download
-# Gemma 4 E4B ONNX (q4) — ~3.2 GB
+# Gemma 4 E4B ONNX (q4) — ~3.1 GB
 snapshot_download('onnx-community/gemma-4-E4B-it-ONNX',
     allow_patterns=['config.json','generation_config.json','tokenizer.json',
         'tokenizer_config.json','preprocessor_config.json','processor_config.json',
         'onnx/decoder_model_merged_q4.onnx','onnx/decoder_model_merged_q4.onnx_data',
         'onnx/decoder_model_merged_q4.onnx_data_1'],
     local_dir='local_models/onnx-community/gemma-4-E4B-it-ONNX')
-# SD 1.5 ONNX — ~2 GB
+# SD 1.5 ONNX (fp16) — ~1.9 GB
 snapshot_download('microsoft/stable-diffusion-v1.5-webnn',
     allow_patterns=['text-encoder.onnx',
         'sd-unet-v1.5-model-b2c4h64w64s77-float16-compute-and-inputs-layernorm.onnx',
         'Stable-Diffusion-v1.5-vae-decoder-float16-fp32-instancenorm.onnx'],
     local_dir='local_models/microsoft/stable-diffusion-v1.5-webnn')
-# CLIP tokenizer — ~2 MB
+# CLIP tokenizer (used by SD 1.5) — ~2 MB
 snapshot_download('Xenova/clip-vit-base-patch16',
     allow_patterns=['tokenizer.json','tokenizer_config.json','config.json'],
     local_dir='local_models/Xenova/clip-vit-base-patch16')
 "
 ```
 
-Total download: **~5.1 GB**. The `local_models/` directory is git-ignored. When you serve from localhost, the game auto-detects local files and loads from disk instead of the web.
+Total: **~5.1 GB**. The `local_models/` directory is git-ignored.
+
+When serving from localhost, the game probes for each model's files at startup and reports what it found (e.g. "Local model files detected (LLM + SD 1.5)"). Any model not found locally falls back to the normal HuggingFace download.
 
 ---
 
@@ -202,10 +220,11 @@ For full feature parity, run [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../
 
 ## Dependencies (all loaded automatically)
 
-- **Gemma 4 E4B** from Hugging Face Hub via `@huggingface/transformers` (ONNX, q4).
-- **SD 1.5** weights from the Hub via **`../llm_adventure/vendor/web-txt2img/`** (Microsoft ONNX SD1.5 pipeline).
+- **Gemma 4 E4B** — ONNX q4, loaded via [`@huggingface/transformers`](https://huggingface.co/docs/transformers.js) (3.1 GB).
+- **SD 1.5** — Microsoft WebNN ONNX fp16, loaded via **`../llm_adventure/vendor/web-txt2img/`** (1.9 GB).
+- **CLIP tokenizer** — used by SD 1.5 for prompt encoding, loaded via `@xenova/transformers` or `@huggingface/transformers` (2 MB).
 
-First load is large (~4 GB combined, browser cache afterward). **WebGPU** is strongly recommended.
+See [Models — internet vs. local](#models--internet-vs-local) above for download details and sizes.
 
 ---
 

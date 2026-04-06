@@ -352,8 +352,11 @@
     // ═══════════════════════════════════════════════════════════════════════════
     const LLM_MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
     const IMG_MODEL_ID = "sd-1.5";
-    const LLM_MAX_TOKENS = 1024;
-    const LLM_TEMPERATURE = 0.7;
+    const LLM_MAX_TOKENS = 512;
+    // Gemma 4 E4B recommended sampling: temp=1.0, top_p=0.95, top_k=64
+    const LLM_TEMPERATURE = 1.0;
+    const LLM_TOP_P = 0.95;
+    const LLM_TOP_K = 64;
     const IMG_STEPS = 20;
     const IMG_GUIDANCE = 7.5;
     const IMAGE_THEME = "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere";
@@ -362,14 +365,18 @@
     // Download with: python3 -c "from huggingface_hub import snapshot_download; ..."
     // See README.md or local_models/ for details.
     const LOCAL_MODELS_BASE = "/local_models";
-    let useLocalModels = false;
+    let useLocalLlm = false;
+    let useLocalImg = false;
 
     async function detectLocalModels() {
-      if (!["localhost", "127.0.0.1", "0.0.0.0"].includes(location.hostname)) return false;
-      try {
-        const resp = await fetch(`${LOCAL_MODELS_BASE}/${LLM_MODEL_ID}/config.json`, { method: "HEAD" });
-        return resp.ok;
-      } catch { return false; }
+      if (!["localhost", "127.0.0.1", "0.0.0.0"].includes(location.hostname)) return;
+      // Check LLM and SD availability independently so one can be local while the other downloads remotely
+      const [llmOk, imgOk] = await Promise.all([
+        fetch(`${LOCAL_MODELS_BASE}/${LLM_MODEL_ID}/config.json`, { method: "HEAD" }).then(r => r.ok).catch(() => false),
+        fetch(`${LOCAL_MODELS_BASE}/microsoft/stable-diffusion-v1.5-webnn/text-encoder.onnx`, { method: "HEAD" }).then(r => r.ok).catch(() => false)
+      ]);
+      useLocalLlm = llmOk;
+      useLocalImg = imgOk;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -377,61 +384,150 @@
     // ═══════════════════════════════════════════════════════════════════════════
     const DEFAULT_WORLD_BIBLE = {
       objectives: [
-        "Light your way through the darkness",
-        "Gain passage across the underground river",
-        "Unlock the ancient temple",
-        "Claim the legendary treasure"
+        "Get a light source and explore the caves",
+        "Cross the underground river safely",
+        "Open the sealed forge and retrieve the enchanted blade",
+        "Defeat the stone dragon and claim the Starfire Gem"
       ],
       theme: IMAGE_THEME,
       global_theme: IMAGE_THEME,
       locations: [
-        { name: "Entrance", description: "rocky cave mouth with supplies left by previous explorers" },
-        { name: "Dark Passage", description: "pitch black tunnel that requires light" },
-        { name: "Underground River", description: "rushing water with narrow ledge" },
-        { name: "Ancient Temple", description: "locked stone doors with riddle inscription" },
-        { name: "Treasury", description: "golden vault guarded by stone sentinel" }
+        {
+          name: "Cave Mouth",
+          description: "A wide rocky entrance where daylight fades into shadow. An old hermit sits beside a crackling campfire. A coil of rope hangs from a spike driven into the wall.",
+          exits: ["Mushroom Grotto", "Dark Passage"],
+          items: ["rope"],
+          scenery: ["campfire", "spike in wall", "carved warning sign", "scattered explorer supplies"]
+        },
+        {
+          name: "Mushroom Grotto",
+          description: "A damp cavern lit by clusters of glowing blue mushrooms. Ancient wall carvings depict a forge being lit by sparks. A piece of flint glints on the ground near a dead campfire.",
+          exits: ["Cave Mouth", "Underground River"],
+          items: ["flint"],
+          scenery: ["glowing mushrooms", "wall carvings", "dead campfire", "dripping stalactites"]
+        },
+        {
+          name: "Dark Passage",
+          description: "A narrow pitch-black tunnel. Without a light source you cannot see anything. The air smells of damp stone and something musky.",
+          exits: ["Cave Mouth", "Underground River"],
+          items: ["explorer journal"],
+          scenery: ["narrow walls", "damp floor", "faint claw marks on stone"],
+          blocked_by: "total darkness (need torch to navigate)"
+        },
+        {
+          name: "Underground River",
+          description: "A roaring underground river cuts through the cavern. A rickety rope bridge spans the gap but a massive troll stands guard at the far side, snarling.",
+          exits: ["Mushroom Grotto", "Dark Passage", "Ancient Forge"],
+          items: [],
+          scenery: ["rope bridge", "rushing dark water", "troll nest of bones", "far ledge with iron door"],
+          blocked_by: "River Troll guards the bridge (fears fire)"
+        },
+        {
+          name: "Ancient Forge",
+          description: "A vast chamber dominated by a cold stone forge and anvil. An iron door on the far wall is sealed with a heavy lock. Soot-blackened runes circle the forge reading: FIRE AWAKENS WHAT STONE REMEMBERS.",
+          exits: ["Underground River", "Dragon's Vault"],
+          items: [],
+          scenery: ["stone forge", "anvil", "iron door with lock", "soot-blackened runes", "bellows"],
+          blocked_by: "iron door to Dragon's Vault is locked (need iron key)"
+        },
+        {
+          name: "Dragon's Vault",
+          description: "A treasure chamber bathed in amber light from crystal veins in the walls. A stone dragon crouches before a pedestal holding a brilliant Starfire Gem. The dragon's eyes glow when you approach.",
+          exits: ["Ancient Forge"],
+          items: ["Starfire Gem"],
+          scenery: ["crystal veins", "stone dragon", "gem pedestal", "ancient mural of a hero with a glowing blade"],
+          blocked_by: "stone dragon guardian (only an enchanted blade can pierce its heart)"
+        }
       ],
       npcs: [
-        { name: "Old Hermit", location: "Entrance", personality: "helpful guide", provides: "torch and warning about troll" },
-        { name: "Cave Spirit", location: "Ancient Temple", personality: "riddling guardian", provides: "temple key if riddle solved" }
+        {
+          name: "Old Hermit",
+          location: "Cave Mouth",
+          personality: "friendly but cautious old explorer who lost his nerve years ago",
+          provides: "gives torch freely, warns that a troll lives near the river and fears fire, hints that the deep forge holds a powerful weapon"
+        },
+        {
+          name: "Forge Spirit",
+          location: "Ancient Forge",
+          personality: "ancient whispering presence that awakens when the forge is lit",
+          provides: "reveals the enchanted blade hidden in the anvil, warns that only this blade can defeat the stone dragon"
+        }
       ],
       monsters: [
-        { name: "River Troll", location: "Underground River", difficulty: "medium", weakness: "fears fire from torch" },
-        { name: "Stone Golem", location: "Treasury", difficulty: "hard", weakness: "ancient sword pierces its core" }
+        {
+          name: "River Troll",
+          location: "Underground River",
+          difficulty: "medium",
+          weakness: "panics and flees when shown fire from the torch",
+          blocks: "bridge crossing to Ancient Forge",
+          drops: "iron key (fell from its nest when it fled)"
+        },
+        {
+          name: "Stone Dragon",
+          location: "Dragon's Vault",
+          difficulty: "hard",
+          weakness: "only the enchanted blade from the forge can pierce its stone heart",
+          blocks: "access to the Starfire Gem on the pedestal"
+        }
       ],
       riddles: [
-        { location: "Ancient Temple", hint: "I have cities but no houses, forests but no trees", solution: "map", reward: "temple access" },
-        { location: "Treasury", hint: "Feed me and I grow, give me water and I die", solution: "fire/torch", reward: "golem becomes dormant" }
+        {
+          location: "Ancient Forge",
+          hint: "FIRE AWAKENS WHAT STONE REMEMBERS — runes circling the forge",
+          solution: "use flint on forge (or light forge)",
+          reward: "forge ignites, Forge Spirit appears, enchanted blade revealed in anvil"
+        },
+        {
+          location: "Mushroom Grotto",
+          hint: "Wall carvings show figures striking sparks into a great forge, and a blade emerging from flame",
+          solution: "this is a clue, not a puzzle — it foreshadows the forge puzzle",
+          reward: "player learns that fire and the forge are connected"
+        }
       ],
       key_items: [
-        { name: "torch", purpose: "lights dark areas, scares troll" },
-        { name: "rope", purpose: "crosses river safely" },
-        { name: "map", purpose: "solves temple riddle" },
-        { name: "temple key", purpose: "unlocks inner sanctum" },
-        { name: "ancient sword", purpose: "defeats stone golem" },
-        { name: "golden treasure", purpose: "quest completion" }
+        { name: "torch", purpose: "illuminates Dark Passage and scares the River Troll" },
+        { name: "rope", purpose: "secures the bridge crossing at Underground River" },
+        { name: "flint", purpose: "lights the Ancient Forge to reveal the enchanted blade" },
+        { name: "explorer journal", purpose: "contains a note: 'The troll fled when I waved my torch. It dropped something metal as it ran.'" },
+        { name: "iron key", purpose: "unlocks the iron door from Ancient Forge to Dragon's Vault" },
+        { name: "enchanted blade", purpose: "the only weapon that can pierce the Stone Dragon's heart" },
+        { name: "Starfire Gem", purpose: "the legendary treasure — bring it back to Cave Mouth to complete the quest" }
       ],
       item_locations: {
-        torch: "Given by hermit at entrance",
-        rope: "Found in dark passage once lit",
-        map: "Dropped by fleeing troll",
-        "temple key": "Reward for solving spirit's riddle",
-        "ancient sword": "Hidden in temple altar",
-        "golden treasure": "Treasury vault after defeating golem"
+        "torch": "Given by Old Hermit at Cave Mouth",
+        "rope": "Hanging from a spike on the wall at Cave Mouth",
+        "flint": "On the ground near the dead campfire in Mushroom Grotto",
+        "explorer journal": "On the floor in the Dark Passage, visible once lit with torch",
+        "iron key": "Dropped by the River Troll when it flees from fire",
+        "enchanted blade": "Revealed in the anvil when the Ancient Forge is lit with flint",
+        "Starfire Gem": "On the pedestal in Dragon's Vault, guarded by Stone Dragon"
       },
       progression_hints: [
-        "The hermit's gifts are essential for your journey",
-        "Fire is both light and weapon",
-        "The troll guards something important",
-        "Ancient words unlock ancient doors"
+        "Talk to the hermit — he has a torch and useful warnings",
+        "Explore every room and examine things before moving deeper",
+        "The wall carvings in the grotto hint at what the forge needs",
+        "Read the journal — a dead explorer's notes reveal the troll's weakness",
+        "Fire is your most versatile tool: it lights, it scares, it forges"
       ],
       mechanics: [
-        { action: "light torch in dark passage", effect: "reveals hidden rope", location: "Dark Passage" },
-        { action: "wave torch at troll", effect: "troll flees dropping map", location: "Underground River" },
-        { action: "place sword in altar slot", effect: "opens secret treasury door", location: "Ancient Temple" }
+        { action: "give torch or wave torch at troll", effect: "troll panics, flees across bridge, drops iron key from its nest", location: "Underground River" },
+        { action: "use flint on forge or light forge", effect: "forge ignites, Forge Spirit appears, enchanted blade revealed in anvil", location: "Ancient Forge" },
+        { action: "use iron key on iron door", effect: "iron door unlocks, passage to Dragon's Vault opens", location: "Ancient Forge" },
+        { action: "use enchanted blade on stone dragon", effect: "blade pierces dragon's heart, dragon crumbles, Starfire Gem accessible", location: "Dragon's Vault" },
+        { action: "use rope on bridge", effect: "secures the rope bridge for safe crossing", location: "Underground River" }
       ],
-      main_arc: "A brave explorer seeks legendary treasure in mysterious caves. They must use wit and courage to overcome guardians and puzzles.",
-      win_condition: "Obtain the golden treasure and return to entrance"
+      puzzle_chain: [
+        { step: 1, action: "talk to hermit", gives: "torch", unlocks: "Dark Passage (light)" },
+        { step: 2, action: "take rope from wall", gives: "rope", unlocks: null },
+        { step: 3, action: "take flint in Mushroom Grotto", gives: "flint", unlocks: null },
+        { step: 4, action: "read explorer journal in Dark Passage", gives: "explorer journal", unlocks: null },
+        { step: 5, action: "wave torch at River Troll", gives: "iron key", unlocks: "bridge crossing" },
+        { step: 6, action: "use flint on forge", gives: "enchanted blade", unlocks: "Forge Spirit appears" },
+        { step: 7, action: "use iron key on iron door", gives: null, unlocks: "Dragon's Vault" },
+        { step: 8, action: "use enchanted blade on Stone Dragon", gives: "Starfire Gem", unlocks: "win" }
+      ],
+      main_arc: "A daring explorer descends into ancient caves seeking the legendary Starfire Gem. To reach it they must outwit a bridge troll, rekindle a forgotten forge, and defeat a stone dragon with the enchanted blade hidden within.",
+      win_condition: "Obtain the Starfire Gem and return to Cave Mouth"
     };
 
     // Active world bible — swapped when generating or loading a different adventure
@@ -494,75 +590,38 @@
     // SYSTEM PROMPT — instructs the LLM how to run the adventure
     // ═══════════════════════════════════════════════════════════════════════════
     const SYSTEM_INSTRUCTIONS =
-      "You are a text adventure narrator.\n\n" +
+      "You are a text adventure narrator. Each turn:\n" +
+      "1. Write 2-4 sentences describing what the player sees.\n" +
+      "2. Then output a ```json``` block with state_updates and images.\n\n" +
 
-      "YOUR OUTPUT FORMAT (follow this EXACTLY every turn):\n" +
-      "1. Write 2-5 sentences of narration describing what the player sees.\n" +
-      "2. After the narration, write a JSON block inside ```json``` fences.\n" +
-      "3. The JSON block MUST look like this:\n" +
-      "   ```json\n" +
-      '   {"state_updates": { ... }, "images": ["short image prompt"]}\n' +
-      "   ```\n\n" +
+      "STATE_UPDATES TOOLS:\n" +
+      '  move_to:"Room" - move player\n' +
+      '  connect:[["A","B"]] - link rooms\n' +
+      '  place_items:["x"] - put item in room\n' +
+      '  room_take:["x"] - pick up item (room->inventory)\n' +
+      '  add_items:["x"] - give item magically\n' +
+      '  remove_items:["x"] - destroy/consume item\n' +
+      "  change_health:N - damage(-) or heal(+)\n" +
+      '  set_context:"summary" - YOUR MEMORY of what happened\n' +
+      '  set_flag:{"name":"x","value":true} - track puzzle states\n' +
+      '  add_note:"text" - quest log entry\n' +
+      '  images:["scene description"] - REQUIRED every turn\n\n' +
 
-      "BEFORE YOU RESPOND, CHECK THE GAME STATE:\n" +
-      "- location: where player is now\n" +
-      "- inventory: what player carries\n" +
-      "- current_room_items: what is in this room\n" +
-      "- current_exits: where the player can go\n" +
-      "- story_context: what happened before (YOUR MEMORY)\n" +
-      "- game_flags: puzzle states and conditions\n\n" +
-
-      "AVAILABLE TOOLS (put inside state_updates):\n" +
-      '  move_to: "Room Name"              - move player to a room\n' +
-      '  connect: [["RoomA", "RoomB"]]     - link rooms bidirectionally\n' +
-      '  place_items: ["item"]              - put item in current room\n' +
-      '  room_take: ["item"]               - player PICKS UP item from room into inventory\n' +
-      '  add_items: ["item"]               - magically give item (NOT for picking up!)\n' +
-      '  remove_items: ["item"]            - destroy/consume item from inventory\n' +
-      "  change_health: -5 or +10           - damage or heal\n" +
-      '  set_context: "summary"            - save what happened (YOUR MEMORY)\n' +
-      '  set_flag: {"name": "x", "value": true} - track puzzle/event states\n' +
-      '  add_note: "quest log entry"       - add to quest log\n\n' +
-      "IMPORTANT: When player picks up an item, use room_take, NOT add_items.\n" +
-      "room_take moves the item from the room to inventory in one step.\n\n" +
-
-      "IMAGE PROMPTS (put inside images array):\n" +
-      '  images: ["short visual description of the scene"]\n' +
-      "  ALWAYS include at least one image prompt.\n\n" +
-
-      "EXAMPLE 1 - Entering a new room:\n" +
-      "The passage opens into a pitch-black chamber. You hear dripping water.\n\n" +
+      "EXAMPLE:\n" +
+      "You enter a dark chamber. Water drips from stalactites. A rusty torch lies on the ground.\n\n" +
       "```json\n" +
-      '{"state_updates": {' +
-      '"move_to": "Dark Chamber", ' +
-      '"connect": [["Entrance Hall", "Dark Chamber"]], ' +
-      '"place_items": ["Old Torch"], ' +
-      '"set_context": "Entered dark room. Torch on ground."}, ' +
-      '"images": ["pitch-black cavern chamber, faint water dripping"]}\n' +
-      "```\n\n" +
-
-      "EXAMPLE 2 - Picking up an item (use room_take!):\n" +
-      "You grab the torch from the dusty floor.\n\n" +
-      "```json\n" +
-      '{"state_updates": {' +
-      '"room_take": ["Torch"], ' +
-      '"set_context": "Picked up torch."}, ' +
-      '"images": ["adventurer holding a torch in a dim cave"]}\n' +
+      '{"state_updates":{"move_to":"Dark Chamber","connect":[["Hall","Dark Chamber"]],' +
+      '"place_items":["Torch"],"set_context":"Entered dark room. Torch on floor."},' +
+      '"images":["dark cavern chamber with dripping water"]}\n' +
       "```\n\n" +
 
       "RULES:\n" +
-      "1. ALWAYS check inventory before letting player use items\n" +
-      "2. ALWAYS check current_room_items before room_take\n" +
-      "3. ALWAYS use connect when moving to a NEW room\n" +
-      "4. ALWAYS update set_context with what happened this turn\n" +
-      "5. ALWAYS include at least one image prompt\n" +
-      "6. JSON goes AFTER narration, inside ```json``` fences\n" +
-      "7. Describe what the player SEES\n\n" +
-
-      "JSON FORMAT REMINDER:\n" +
-      "- Use double quotes for all keys and string values\n" +
-      "- No trailing commas\n" +
-      "- Close all { } and [ ] brackets\n";
+      "- Use room_take to pick up items (NOT add_items)\n" +
+      "- Check inventory before using items, check room items before room_take\n" +
+      "- Use connect when entering a NEW room\n" +
+      "- ONLY move to rooms listed in current_exits or create new connected rooms\n" +
+      "- Update set_context every turn\n" +
+      "- Use double quotes, no trailing commas in JSON\n";
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GAME STATE
@@ -680,8 +739,10 @@
 
     /** Strip JSON blocks / artifacts from text, returning clean narration. */
     function cleanNarration(text) {
-      // Strip <think> blocks
+      // Strip <think> blocks (generic format)
       text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<\/?think>/gi, "");
+      // Strip Gemma 4 thinking blocks: <|channel>thought\n...<channel|>
+      text = text.replace(/<\|channel>thought[\s\S]*?<channel\|>/gi, "");
       // Strip fenced blocks
       text = text.replace(/```(?:json)?[\s\S]*?```/gi, "");
       // Strip remaining JSON objects (balanced braces with our known keys)
@@ -697,6 +758,7 @@
 
     function validateWorldBible(wb) {
       const issues = [];
+      const warnings = [];
       const required = ["objectives", "locations", "key_items", "win_condition"];
       for (const f of required) {
         if (!wb[f] || (Array.isArray(wb[f]) && wb[f].length === 0)) issues.push(`Missing or empty: ${f}`);
@@ -708,129 +770,230 @@
           if (typeof item === "object" && !item.purpose) issues.push(`Item '${item.name || "?"}' has no purpose`);
         }
       }
+
+      const roomNames = new Set();
       if (wb.locations) {
         for (const loc of wb.locations) {
           if (typeof loc === "object" && !loc.description) issues.push(`Location '${loc.name || "?"}' has no description`);
+          if (loc.name) roomNames.add(loc.name);
+        }
+
+        // Check exits reference real rooms and no orphans
+        const reachable = new Set();
+        for (const loc of wb.locations) {
+          if (!Array.isArray(loc.exits) || loc.exits.length === 0) {
+            warnings.push(`Location '${loc.name}' has no exits`);
+          } else {
+            reachable.add(loc.name);
+            for (const exit of loc.exits) {
+              reachable.add(exit);
+              if (!roomNames.has(exit)) warnings.push(`Exit '${exit}' from '${loc.name}' not in locations list`);
+            }
+          }
+        }
+        for (const name of roomNames) {
+          if (!reachable.has(name)) warnings.push(`Location '${name}' is orphaned (unreachable)`);
         }
       }
-      return { valid: issues.length === 0, issues };
+
+      // Check puzzle_chain references real items
+      if (Array.isArray(wb.puzzle_chain)) {
+        const itemNames = new Set((wb.key_items || []).map(k => (k.name || "").toLowerCase()));
+        for (const step of wb.puzzle_chain) {
+          if (step.gives && !itemNames.has(step.gives.toLowerCase())) {
+            warnings.push(`puzzle_chain step ${step.step}: gives '${step.gives}' not in key_items`);
+          }
+          if (step.unlocks && roomNames.size && !roomNames.has(step.unlocks)
+              && step.unlocks !== "win" && step.unlocks !== null) {
+            warnings.push(`puzzle_chain step ${step.step}: unlocks '${step.unlocks}' not a known room`);
+          }
+        }
+      } else {
+        warnings.push("No puzzle_chain defined");
+      }
+
+      // Check NPC/monster locations reference real rooms
+      for (const npc of (wb.npcs || [])) {
+        if (npc.location && roomNames.size && !roomNames.has(npc.location)) {
+          warnings.push(`NPC '${npc.name}' location '${npc.location}' not in locations`);
+        }
+      }
+      for (const mon of (wb.monsters || [])) {
+        if (mon.location && roomNames.size && !roomNames.has(mon.location)) {
+          warnings.push(`Monster '${mon.name}' location '${mon.location}' not in locations`);
+        }
+      }
+
+      // Check item_locations reference real rooms
+      if (wb.item_locations && roomNames.size) {
+        for (const [item, locDesc] of Object.entries(wb.item_locations)) {
+          const matchesRoom = [...roomNames].some(rn => locDesc.toLowerCase().includes(rn.toLowerCase()));
+          if (!matchesRoom) warnings.push(`item_locations['${item}'] doesn't clearly reference a room`);
+        }
+      }
+
+      if (warnings.length) console.warn("[world_bible] Warnings:", warnings);
+      return { valid: issues.length === 0, issues: [...issues, ...warnings] };
     }
 
-    async function generateWorldBible(theme, onStatus) {
-      if (!llmPipe) throw new Error("LLM not loaded yet");
-
-      const systemMsg = "You are a game designer. Output ONLY a single valid JSON object. No markdown fences, no commentary.";
-
-      const prompt =
-        `Create a solvable adventure game as JSON.\n\n` +
-        `Theme: ${theme}\n\n` +
-        `Set "global_theme" to a short art-style description for this theme.\n\n` +
-        `Required JSON fields:\n` +
-        `- objectives: 4 goals in order\n` +
-        `- global_theme: short art style string\n` +
-        `- locations: 5+ rooms (each: name, description)\n` +
-        `- npcs: 2-3 characters (each: name, location, personality, provides)\n` +
-        `- monsters: 2-3 enemies (each: name, location, difficulty, weakness)\n` +
-        `- riddles: 2 puzzles (each: location, hint, solution, reward)\n` +
-        `- key_items: 6-8 items (each: name, purpose)\n` +
-        `- item_locations: object mapping item name to where found\n` +
-        `- progression_hints: 3-4 player hints\n` +
-        `- mechanics: 3 cause-effect rules (each: action, effect, location)\n` +
-        `- main_arc: 2-sentence story summary\n` +
-        `- win_condition: what completes the game\n\n` +
-        `Example flow: torch (entrance) -> lights dark cave -> find key -> unlock temple -> get sword -> defeat guardian -> claim treasure\n\n` +
-        `Every item must be useful. Every NPC must help. The game must be winnable.\n\n` +
-        `Output ONLY valid JSON. No markdown, no commentary.`;
-
-      if (onStatus) onStatus("Generating world bible (this may take 30-90 seconds)...");
-
-      // Use lower temperature for more reliable JSON output
-      const messages = [
-        { role: "system", content: systemMsg },
-        { role: "user", content: prompt },
-      ];
+    /** Helper: run LLM generation and return raw text. */
+    async function runLlmGeneration(systemMsg, userMsg, maxTokens, temperature, onChunk) {
       let text = "";
       const streamer = new TextStreamer(llmPipe.tokenizer, {
         skip_prompt: true,
         callback_function: (piece) => {
           text += piece;
-          if (onStatus) {
-            const chars = text.length;
-            onStatus(`Generating world bible... ${chars} chars so far`);
-          }
+          if (onChunk) onChunk(text);
         },
       });
-      await llmPipe(messages, {
-        max_new_tokens: 2048,
-        temperature: 0.5,
-        do_sample: true,
-        repetition_penalty: 1.1,
-        streamer,
+      await llmPipe(
+        [{ role: "system", content: systemMsg }, { role: "user", content: userMsg }],
+        { max_new_tokens: maxTokens, temperature, top_p: LLM_TOP_P, top_k: LLM_TOP_K, do_sample: true, streamer }
+      );
+      return text;
+    }
+
+    /** Helper: extract first valid JSON object from LLM output. */
+    function extractFirstJson(raw) {
+      const cleaned = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
+      const candidates = extractJsonFromText(cleaned);
+      if (candidates.length) return candidates[0];
+      const start = cleaned.indexOf("{");
+      const end = cleaned.lastIndexOf("}") + 1;
+      if (start >= 0 && end > start) return tryParseJson(cleaned.slice(start, end));
+      return null;
+    }
+
+    async function generateWorldBible(theme, onStatus) {
+      if (!llmPipe) throw new Error("LLM not loaded yet");
+
+      const sysMsg = "You are a game designer. Output ONLY valid JSON. No markdown, no commentary.";
+
+      // ── PASS 1: Map Skeleton (rooms + connections) ──
+      if (onStatus) onStatus("Pass 1/2: Generating map layout...");
+      const pass1Prompt =
+        `Create a 5-6 room map for this adventure theme: ${theme}\n\n` +
+        `Output JSON with EXACTLY these fields:\n` +
+        `{"rooms":[{"name":"Room Name","desc":"one sentence","exits":["OtherRoom"]}],` +
+        `"start":"first room name","art_style":"short visual style for this theme"}\n\n` +
+        `Rules:\n` +
+        `- Each room connects to 1-3 other rooms via exits\n` +
+        `- Exits must be bidirectional (if A links to B, B links to A)\n` +
+        `- Rooms should form a linear path with optional branches\n` +
+        `- First room is safe, last room holds the goal\n\n` +
+        `Output ONLY the JSON object.`;
+
+      let pass1Text = await runLlmGeneration(sysMsg, pass1Prompt, 800, 0.5,
+        (t) => { if (onStatus) onStatus(`Pass 1/2: map layout... ${t.length} chars`); });
+
+      let skeleton = extractFirstJson(pass1Text);
+
+      // Retry pass 1 with even simpler prompt if failed
+      if (!skeleton || !Array.isArray(skeleton.rooms) || skeleton.rooms.length < 3) {
+        if (onStatus) onStatus("Pass 1 retry: simpler map prompt...");
+        const retry1 = `Create 5 rooms for: ${theme}\nJSON format: {"rooms":[{"name":"...","desc":"...","exits":["..."]}],"start":"...","art_style":"..."}\nValid JSON only.`;
+        pass1Text = await runLlmGeneration(sysMsg, retry1, 600, 0.4,
+          (t) => { if (onStatus) onStatus(`Pass 1 retry... ${t.length} chars`); });
+        skeleton = extractFirstJson(pass1Text);
+      }
+
+      if (!skeleton || !Array.isArray(skeleton.rooms) || skeleton.rooms.length < 2) {
+        if (onStatus) onStatus("Pass 1 FAILED: could not generate map skeleton");
+        throw new Error("Failed to generate map skeleton");
+      }
+
+      // Normalize skeleton: ensure bidirectional exits
+      const roomNames = skeleton.rooms.map(r => r.name);
+      for (const room of skeleton.rooms) {
+        if (!Array.isArray(room.exits)) room.exits = [];
+        room.exits = room.exits.filter(e => roomNames.includes(e));
+      }
+      for (const room of skeleton.rooms) {
+        for (const exit of room.exits) {
+          const peer = skeleton.rooms.find(r => r.name === exit);
+          if (peer && !peer.exits.includes(room.name)) peer.exits.push(room.name);
+        }
+      }
+
+      // Pass 1 summary
+      const totalConnections = skeleton.rooms.reduce((n, r) => n + (r.exits?.length || 0), 0);
+      if (onStatus) onStatus(`Pass 1 done: ${skeleton.rooms.length} rooms, ${totalConnections} connections`);
+
+      // ── PASS 2: Content Population (items, NPCs, puzzles, chain) ──
+      if (onStatus) onStatus("Pass 2/2: Generating gameplay content...");
+      const roomList = skeleton.rooms.map(r => `${r.name} (${r.desc})`).join("; ");
+      const pass2Prompt =
+        `Add gameplay to these rooms: ${roomList}\n\n` +
+        `Output JSON with ALL these fields:\n` +
+        `- objectives: 4 goals in order\n` +
+        `- npcs: 2 characters (name, location, personality, provides)\n` +
+        `- monsters: 2 enemies (name, location, difficulty, weakness)\n` +
+        `- riddles: 1-2 puzzles (location, hint, solution, reward)\n` +
+        `- key_items: 6 items (name, purpose)\n` +
+        `- item_locations: {"item name":"which room"} for each item\n` +
+        `- puzzle_chain: ordered steps [{step:1,action:"do X",gives:"item",unlocks:"room or null"}]\n` +
+        `- mechanics: 2-3 rules (action, effect, location)\n` +
+        `- main_arc: 1 sentence story\n` +
+        `- win_condition: how to win\n\n` +
+        `Place NPCs and items in the rooms listed above. Every item must be useful.\n` +
+        `Output ONLY valid JSON.`;
+
+      let pass2Text = await runLlmGeneration(sysMsg, pass2Prompt, 1200, 0.5,
+        (t) => { if (onStatus) onStatus(`Pass 2/2: gameplay content... ${t.length} chars`); });
+
+      let content = extractFirstJson(pass2Text);
+
+      // Retry pass 2 if failed
+      if (!content) {
+        if (onStatus) onStatus("Pass 2 retry...");
+        const retry2 = `Add npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition to rooms: ${roomList}\nValid JSON only.`;
+        pass2Text = await runLlmGeneration(sysMsg, retry2, 1000, 0.4,
+          (t) => { if (onStatus) onStatus(`Pass 2 retry... ${t.length} chars`); });
+        content = extractFirstJson(pass2Text);
+      }
+
+      // Pass 2 summary
+      if (content) {
+        const p2npcs = (content.npcs || []).length;
+        const p2items = (content.key_items || []).length;
+        const p2chain = (content.puzzle_chain || []).length;
+        if (onStatus) onStatus(`Pass 2 done: ${p2npcs} npcs, ${p2items} items, ${p2chain} chain steps`);
+      } else {
+        if (onStatus) onStatus("Pass 2 FAILED: no valid content JSON (using empty defaults)");
+      }
+
+      // ── MERGE pass 1 + pass 2 into final world bible ──
+      if (onStatus) onStatus("Merging and validating world bible...");
+
+      const plan = content || {};
+
+      // Build locations from skeleton rooms, enriched with content items
+      plan.locations = skeleton.rooms.map(r => {
+        const items = [];
+        // Place items from item_locations into rooms
+        if (plan.item_locations) {
+          for (const [itemName, locDesc] of Object.entries(plan.item_locations)) {
+            if (typeof locDesc === "string" && locDesc.toLowerCase().includes(r.name.toLowerCase())) {
+              items.push(itemName);
+            }
+          }
+        }
+        return {
+          name: r.name,
+          description: r.desc || r.description || "",
+          exits: r.exits || [],
+          items,
+          scenery: []
+        };
       });
 
-      if (onStatus) onStatus("Parsing world bible JSON...");
+      // Set theme from skeleton or user input
+      const artStyle = skeleton.art_style || theme.split(".")[0] || theme;
+      plan.global_theme = artStyle;
+      plan.theme = artStyle;
 
-      // Strip markdown fences if present
-      let cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-
-      // Try to extract valid JSON
-      let candidates = extractJsonFromText(cleaned);
-      let plan = candidates.length ? candidates[0] : null;
-
-      // Fallback: basic brace extraction with fixes
-      if (!plan) {
-        const start = cleaned.indexOf("{");
-        const end = cleaned.lastIndexOf("}") + 1;
-        if (start >= 0 && end > start) {
-          plan = tryParseJson(cleaned.slice(start, end));
-        }
-      }
-
-      // Retry with simpler prompt if first attempt failed
-      if (!plan) {
-        if (onStatus) onStatus("First attempt failed, retrying with simpler prompt...");
-        const retryPrompt =
-          `Create adventure game JSON for theme: ${theme}\n` +
-          `Include: objectives (4 goals), locations (5 rooms with name/description), ` +
-          `npcs (2 with name/location/personality/provides), ` +
-          `monsters (2 with name/location/difficulty/weakness), ` +
-          `key_items (6 with name/purpose), item_locations, mechanics, win_condition, global_theme.\n` +
-          `Output valid JSON only.`;
-
-        let retryText = "";
-        const retryStreamer = new TextStreamer(llmPipe.tokenizer, {
-          skip_prompt: true,
-          callback_function: (piece) => {
-            retryText += piece;
-            if (onStatus) onStatus(`Retry: ${retryText.length} chars...`);
-          },
-        });
-        await llmPipe(
-          [{ role: "system", content: systemMsg }, { role: "user", content: retryPrompt }],
-          { max_new_tokens: 2048, temperature: 0.4, do_sample: true, repetition_penalty: 1.1, streamer: retryStreamer }
-        );
-
-        const retryClean = retryText.replace(/```json/gi, "").replace(/```/g, "").trim();
-        const retryCandidates = extractJsonFromText(retryClean);
-        plan = retryCandidates.length ? retryCandidates[0] : null;
-        if (!plan) {
-          const s = retryClean.indexOf("{"), e = retryClean.lastIndexOf("}") + 1;
-          if (s >= 0 && e > s) plan = tryParseJson(retryClean.slice(s, e));
-        }
-      }
-
-      if (!plan) throw new Error("Failed to generate valid world bible JSON after 2 attempts");
-
-      // Ensure global_theme is set
-      if (!plan.global_theme) {
-        plan.global_theme = theme.includes("Art style:") ? theme : theme.split(".")[0];
-      }
-      // Ensure theme alias
-      plan.theme = plan.global_theme;
-
-      // Ensure required arrays exist (fill with empty defaults so game doesn't crash)
+      // Ensure all required arrays/fields exist
       if (!Array.isArray(plan.objectives)) plan.objectives = [];
-      if (!Array.isArray(plan.locations)) plan.locations = [];
       if (!Array.isArray(plan.npcs)) plan.npcs = [];
       if (!Array.isArray(plan.monsters)) plan.monsters = [];
       if (!Array.isArray(plan.riddles)) plan.riddles = [];
@@ -838,14 +1001,27 @@
       if (!plan.item_locations || typeof plan.item_locations !== "object") plan.item_locations = {};
       if (!Array.isArray(plan.progression_hints)) plan.progression_hints = [];
       if (!Array.isArray(plan.mechanics)) plan.mechanics = [];
+      if (!Array.isArray(plan.puzzle_chain)) plan.puzzle_chain = [];
       if (!plan.main_arc) plan.main_arc = "";
       if (!plan.win_condition) plan.win_condition = "Complete the adventure";
 
-      const { valid, issues } = validateWorldBible(plan);
-      if (!valid) {
-        console.warn("[world_bible] Validation issues:", issues);
+      // Validate NPC/monster locations reference real rooms
+      const validRoomNames = plan.locations.map(l => l.name.toLowerCase());
+      for (const npc of plan.npcs) {
+        if (npc.location && !validRoomNames.includes(npc.location.toLowerCase())) {
+          npc.location = plan.locations[0].name;
+        }
       }
-      if (onStatus) onStatus(valid ? "World bible generated successfully!" : `World bible generated (warnings: ${issues.join("; ")})`);
+      for (const mon of plan.monsters) {
+        if (mon.location && !validRoomNames.includes(mon.location.toLowerCase())) {
+          mon.location = plan.locations[plan.locations.length - 1].name;
+        }
+      }
+
+      const { valid, issues } = validateWorldBible(plan);
+      if (!valid) console.warn("[world_bible] Validation issues:", issues);
+      const finalSummary = `Final: ${plan.locations.length} rooms, ${plan.key_items.length} items, ${plan.puzzle_chain.length} chain steps`;
+      if (onStatus) onStatus(valid ? `${finalSummary} — valid!` : `${finalSummary} — warnings: ${issues.join("; ")}`);
 
       return plan;
     }
@@ -976,6 +1152,9 @@
         return { narrative, imagePrompts, debug };
       }
 
+      // Normalize a value to an array — guards against LLM returning "rope" instead of ["rope"]
+      const asArray = (v) => v == null ? [] : Array.isArray(v) ? v : [v];
+
       for (const directives of payloads) {
         try {
           const updates = directives.state_updates || {};
@@ -991,13 +1170,13 @@
           }
 
           // Place items in current room
-          for (const item of (updates.place_items || [])) {
+          for (const item of asArray(updates.place_items)) {
             stateMgr.placeItemInRoom(String(item));
             debug.push(`place: ${item} @ ${stateMgr.state.location}`);
           }
 
           // room_take: move item from room to inventory
-          for (const item of (updates.room_take || [])) {
+          for (const item of asArray(updates.room_take)) {
             const taken = stateMgr.removeItemFromRoom(String(item));
             if (taken) { stateMgr.addItem(String(item)); debug.push(`take: ${item}`); }
             else {
@@ -1007,15 +1186,26 @@
             }
           }
 
-          // Move player
+          // Move player — also reveal world bible exits for newly visited rooms
           if (typeof updates.move_to === "string") {
+            const isNew = !stateMgr.state.knownMap[updates.move_to];
             stateMgr.moveTo(updates.move_to);
-            debug.push(`move: ${updates.move_to}`);
+            if (isNew && activeWorldBible && Array.isArray(activeWorldBible.locations)) {
+              const wbLoc = activeWorldBible.locations.find(l => l.name === updates.move_to);
+              if (wbLoc) {
+                const mapEntry = stateMgr.state.knownMap[updates.move_to];
+                if (wbLoc.description && !mapEntry.notes) mapEntry.notes = wbLoc.description;
+                if (Array.isArray(wbLoc.exits)) {
+                  for (const ex of wbLoc.exits) { if (!mapEntry.exits.includes(ex)) mapEntry.exits.push(ex); }
+                }
+              }
+            }
+            debug.push(`move: ${updates.move_to}${isNew ? " (new room discovered)" : ""}`);
           }
 
           // Inventory: add_items / remove_items
-          const addList = (updates.add_items || []).map(String);
-          const removeList = (updates.remove_items || []).map(String);
+          const addList = asArray(updates.add_items).map(String);
+          const removeList = asArray(updates.remove_items).map(String);
           // Detect add+remove same item = room_take intention
           const overlap = addList.filter(x => removeList.includes(x));
           for (const item of overlap) {
@@ -1054,12 +1244,31 @@
           }
 
           // Image prompts
-          if (Array.isArray(directives.images)) {
-            imagePrompts = imagePrompts.concat(directives.images.filter(p => typeof p === "string"));
-          }
+          const imgList = asArray(directives.images);
+          imagePrompts = imagePrompts.concat(imgList.filter(p => typeof p === "string"));
         } catch (e) {
           debug.push(`directive error: ${e.message}`);
         }
+      }
+
+      // State summary after all directives applied
+      const s = stateMgr.state;
+      const exitCount = (s.knownMap[s.location] || {}).exits?.length || 0;
+      const flagCount = Object.keys(s.gameFlags).length;
+      debug.push(`state: ${s.location} | HP:${s.health} | inv:${s.inventory.length} items | exits:${exitCount} | flags:${flagCount}`);
+
+      // Puzzle chain progress
+      const chain = activeWorldBible.puzzle_chain || [];
+      if (chain.length) {
+        const invLower = new Set(s.inventory.map(i => i.toLowerCase()));
+        let done = 0;
+        let nextStep = null;
+        for (const step of chain) {
+          if (step.gives && invLower.has(step.gives.toLowerCase())) { done++; }
+          else if (!nextStep) { nextStep = step; }
+        }
+        const nextDesc = nextStep ? ` (next: ${nextStep.action})` : " (all done!)";
+        debug.push(`chain: ${done}/${chain.length} steps${nextDesc}`);
       }
 
       return { narrative, imagePrompts, debug };
@@ -1073,88 +1282,104 @@
       const s = stateMgr.state;
       const currentItems = s.roomItems[s.location] || [];
       const currentExits = (s.knownMap[s.location] || {}).exits || [];
+      const locLower = s.location.toLowerCase();
 
-      // Trim map to adjacent rooms only (save tokens)
-      const adjacent = new Set([s.location, ...currentExits]);
-      const trimmedMap = {};
-      for (const [room, data] of Object.entries(s.knownMap)) {
-        if (adjacent.has(room)) trimmedMap[room] = data;
-      }
+      // Compact context — omit empty arrays to save tokens
+      const context = { location: s.location, health: s.health };
+      if (s.inventory.length) context.inventory = s.inventory;
+      if (currentExits.length) context.current_exits = currentExits;
+      if (currentItems.length) context.current_room_items = currentItems;
+      if (s.storyContext) context.story_context = s.storyContext;
+      if (s.recentHistory.length) context.last_turn = s.recentHistory.slice(-1)[0];
+      if (s.notes.length) context.notes = s.notes.slice(-3);
 
-      const context = {
-        location: s.location,
-        health: s.health,
-        inventory: s.inventory,
-        current_exits: currentExits,
-        current_room_items: currentItems,
-        known_map: trimmedMap,
-        story_context: s.storyContext,
-        recent_conversation: s.recentHistory.slice(-2),
-        notes: s.notes.slice(-5),
-        game_flags: s.gameFlags,
-      };
+      // Only include relevant game flags (cap at 8)
+      const flagEntries = Object.entries(s.gameFlags);
+      if (flagEntries.length) context.game_flags = Object.fromEntries(flagEntries.slice(-8));
 
-      // Win condition
       if (activeWorldBible.win_condition) context.win_condition = activeWorldBible.win_condition;
 
       // Health warnings
-      if (s.health <= 0) context.WARNING = "Player is dead! Describe their demise.";
-      else if (s.health <= 20) context.WARNING = "Player health critically low!";
+      if (s.health <= 0) context.WARNING = "Player is dead!";
+      else if (s.health <= 20) context.WARNING = "Health critical!";
 
-      // World bible cues for current location (defensive: arrays may be absent in imported bibles)
+      // World bible cues for current location
       const cues = [];
       for (const loc of (activeWorldBible.locations || [])) {
-        if (loc.name.toLowerCase() === s.location.toLowerCase() && loc.description) {
-          cues.push(`Location: ${loc.description}`);
+        if (loc.name.toLowerCase() === locLower) {
+          if (loc.description) cues.push(`Room: ${loc.description}`);
+          if (Array.isArray(loc.scenery) && loc.scenery.length) cues.push(`Scenery: ${loc.scenery.join(", ")}`);
+          if (loc.blocked_by) cues.push(`Blocked: ${loc.blocked_by}`);
           break;
         }
       }
       for (const npc of (activeWorldBible.npcs || [])) {
-        if (npc.location.toLowerCase() === s.location.toLowerCase()) {
-          cues.push(`NPC here: ${npc.name} - ${npc.personality}${npc.provides ? ` (provides: ${npc.provides})` : ""}`);
+        if (npc.location && npc.location.toLowerCase() === locLower) {
+          cues.push(`NPC: ${npc.name} (${npc.personality}${npc.provides ? ", provides: " + npc.provides : ""})`);
         }
       }
       for (const mon of (activeWorldBible.monsters || [])) {
-        if (mon.location.toLowerCase() === s.location.toLowerCase()) {
-          cues.push(`Monster here: ${mon.name} (${mon.difficulty})${mon.weakness ? ` weakness: ${mon.weakness}` : ""}`);
+        if (mon.location && mon.location.toLowerCase() === locLower) {
+          cues.push(`Monster: ${mon.name}${mon.weakness ? " weakness: " + mon.weakness : ""}`);
         }
       }
       for (const riddle of (activeWorldBible.riddles || [])) {
-        if (riddle.location.toLowerCase() === s.location.toLowerCase()) {
-          cues.push(`Puzzle: ${riddle.hint}${riddle.reward ? ` (solving grants: ${riddle.reward})` : ""}`);
+        if (riddle.location && riddle.location.toLowerCase() === locLower) {
+          cues.push(`Puzzle: "${riddle.hint}" -> ${riddle.reward || "reward"}`);
         }
       }
       for (const mech of (activeWorldBible.mechanics || [])) {
-        if (mech.location.toLowerCase() === s.location.toLowerCase()) {
+        if (mech.location && mech.location.toLowerCase() === locLower) {
           cues.push(`Mechanic: ${mech.action} -> ${mech.effect}`);
         }
       }
+      // Items available at this location
       for (const [item, locDesc] of Object.entries(activeWorldBible.item_locations || {})) {
-        if (s.location.toLowerCase().split(" ").some(w => locDesc.toLowerCase().includes(w)) && !s.inventory.includes(item)) {
+        if (locLower.split(" ").some(w => locDesc.toLowerCase().includes(w)) && !s.inventory.includes(item)) {
           const info = (activeWorldBible.key_items || []).find(k => k.name === item);
-          if (info) cues.push(`Item available: ${item} - ${info.purpose}`);
+          if (info) cues.push(`Item here: ${item} (${info.purpose})`);
         }
       }
-      // Current objective
-      const objectives = activeWorldBible.objectives || [];
-      if (objectives.length) {
-        const completed = objectives.reduce((n, _, i) => n + (s.gameFlags[`objective_${i}`] ? 1 : 0), 0);
-        cues.push(`Current goal: ${objectives[Math.min(completed, objectives.length - 1)]}`);
-      }
-      // Hint if stuck
-      if (s.inventory.length < 2 && (activeWorldBible.progression_hints || []).length) {
-        cues.push(`Hint: ${activeWorldBible.progression_hints[0]}`);
+
+      // Inject current puzzle_chain step instead of generic hints
+      const chain = activeWorldBible.puzzle_chain || [];
+      if (chain.length) {
+        const completedItems = new Set(s.inventory.map(i => i.toLowerCase()));
+        const completedFlags = s.gameFlags;
+        let nextStep = chain.find(step => {
+          if (!step.gives) return false;
+          return !completedItems.has(step.gives.toLowerCase()) && !completedFlags[`chain_step_${step.step}`];
+        });
+        if (nextStep) {
+          cues.push(`Next step: ${nextStep.action} -> gives ${nextStep.gives}${nextStep.unlocks ? ", unlocks " + nextStep.unlocks : ""}`);
+        }
+      } else {
+        // Fall back to objectives + hints if no puzzle_chain
+        const objectives = activeWorldBible.objectives || [];
+        if (objectives.length) {
+          const completed = objectives.reduce((n, _, i) => n + (s.gameFlags[`objective_${i}`] ? 1 : 0), 0);
+          cues.push(`Goal: ${objectives[Math.min(completed, objectives.length - 1)]}`);
+        }
+        if (s.inventory.length < 2 && (activeWorldBible.progression_hints || []).length) {
+          cues.push(`Hint: ${activeWorldBible.progression_hints[0]}`);
+        }
       }
 
-      const bibleLine = cues.length ? "\nWorld context:\n" + cues.map(c => `  ${c}`).join("\n") : "";
+      const bibleLine = cues.length ? "\nWorld:\n" + cues.map(c => `  ${c}`).join("\n") : "";
 
-      return (
-        "Game State (read-only; update via JSON directives only):\n" +
-        JSON.stringify(context, null, 2) +
+      // Build a short summary of which cues were injected (for debug panel)
+      const cueSummary = cues.length
+        ? "cues: " + cues.map(c => c.split(":")[0].trim()).join(", ")
+        : "cues: none";
+
+      // Compact JSON (no indentation) to save tokens
+      const prompt = (
+        "State:\n" +
+        JSON.stringify(context) +
         bibleLine +
-        "\n---\n" +
-        `Player says: ${playerInput}`
+        "\n---\nPlayer: " + playerInput
       );
+      return { prompt, cueSummary };
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1186,7 +1411,7 @@
     let llmPipe = null;
 
     async function loadLlm(onProgress) {
-      if (useLocalModels) {
+      if (useLocalLlm) {
         env.allowLocalModels = true;
         env.localModelPath = LOCAL_MODELS_BASE + "/";
         onProgress({ text: `Loading ${LLM_MODEL_ID} from local files…` });
@@ -1194,7 +1419,7 @@
         env.allowLocalModels = false;
       }
       const device = navigator.gpu ? "webgpu" : "wasm";
-      onProgress({ text: `Loading ${LLM_MODEL_ID} (${device}${useLocalModels ? ", local" : ""})…` });
+      onProgress({ text: `Loading ${LLM_MODEL_ID} (${device}${useLocalLlm ? ", local" : ""})…` });
       try {
         llmPipe = await pipeline("text-generation", LLM_MODEL_ID, {
           dtype: "q4",
@@ -1245,8 +1470,9 @@
       await llmPipe(messages, {
         max_new_tokens: LLM_MAX_TOKENS,
         temperature: LLM_TEMPERATURE,
+        top_p: LLM_TOP_P,
+        top_k: LLM_TOP_K,
         do_sample: true,
-        repetition_penalty: 1.15,
         streamer,
       });
       return text;
@@ -1259,7 +1485,7 @@
     let imgReady = false;
 
     async function loadImageModel(onProgress) {
-      onProgress({ text: `Loading SD 1.5 image model${useLocalModels ? " (local)" : ""}…` });
+      onProgress({ text: `Loading SD 1.5 image model${useLocalImg ? " (local)" : ""}…` });
       try {
         imgClient = Txt2ImgWorkerClient.createDefault();
         const wasmBase = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
@@ -1270,7 +1496,7 @@
           wasmSimd: true,
         };
         // Point SD 1.5 adapter at local ONNX files when available
-        if (useLocalModels) {
+        if (useLocalImg) {
           imgLoadOpts.modelBaseUrl = `${LOCAL_MODELS_BASE}/microsoft/stable-diffusion-v1.5-webnn`;
         }
         const res = await imgClient.load(IMG_MODEL_ID, imgLoadOpts, (p) => {
@@ -1393,7 +1619,75 @@
     function setImgStatus(text) { $("img-status").textContent = text || ""; }
 
     function setDebug(lines) {
-      $("debug-panel").textContent = lines.join("\n");
+      const panel = $("debug-panel");
+      const block = document.createElement("div");
+      block.style.borderBottom = "1px solid var(--border)";
+      block.style.paddingBottom = "6px";
+      block.style.marginBottom = "6px";
+      block.textContent = lines.join("\n");
+      panel.appendChild(block);
+      panel.scrollTop = panel.scrollHeight;
+    }
+    function clearDebug() { $("debug-panel").innerHTML = ""; }
+
+    /** Print a compact world bible summary at the top of the debug panel */
+    function debugWorldBible(wb) {
+      if (!wb) return;
+      const panel = $("debug-panel");
+      const wrapper = document.createElement("details");
+      wrapper.style.borderBottom = "2px solid var(--accent-dim)";
+      wrapper.style.paddingBottom = "6px";
+      wrapper.style.marginBottom = "8px";
+
+      const summary = document.createElement("summary");
+      summary.style.cursor = "pointer";
+      summary.style.fontWeight = "bold";
+      summary.style.color = "var(--accent)";
+      const rooms = wb.locations?.length || 0;
+      const items = wb.key_items?.length || 0;
+      const chain = wb.puzzle_chain?.length || 0;
+      summary.textContent = `World Bible (${rooms} rooms, ${items} items, ${chain}-step chain)`;
+      wrapper.appendChild(summary);
+
+      const pre = document.createElement("pre");
+      pre.style.margin = "4px 0 0 0";
+      pre.style.whiteSpace = "pre-wrap";
+      pre.style.fontSize = "10px";
+      const lines = [];
+      lines.push(`Arc: ${wb.main_arc || "(none)"}`);
+      lines.push(`Win: ${wb.win_condition || "(none)"}`);
+      lines.push("");
+      if (wb.locations) {
+        lines.push("MAP:");
+        for (const loc of wb.locations) {
+          const blocked = loc.blocked_by ? ` [BLOCKED: ${loc.blocked_by}]` : "";
+          const items = (loc.items || []).join(", ");
+          lines.push(`  ${loc.name} → ${(loc.exits || []).join(", ")}${blocked}`);
+          if (items) lines.push(`    items: ${items}`);
+        }
+        lines.push("");
+      }
+      if (wb.npcs) {
+        lines.push("NPCs:");
+        for (const n of wb.npcs) lines.push(`  ${n.name} @ ${n.location}: ${n.provides || n.personality}`);
+        lines.push("");
+      }
+      if (wb.monsters) {
+        lines.push("MONSTERS:");
+        for (const m of wb.monsters) lines.push(`  ${m.name} @ ${m.location}: weakness=${m.weakness}`);
+        lines.push("");
+      }
+      if (wb.puzzle_chain) {
+        lines.push("PUZZLE CHAIN:");
+        for (const s of wb.puzzle_chain) {
+          const gives = s.gives ? ` → ${s.gives}` : "";
+          const unlocks = s.unlocks ? ` [unlocks: ${s.unlocks}]` : "";
+          lines.push(`  ${s.step}. ${s.action}${gives}${unlocks}`);
+        }
+      }
+      pre.textContent = lines.join("\n");
+      wrapper.appendChild(pre);
+      panel.appendChild(wrapper);
     }
 
     function setInputEnabled(enabled) {
@@ -1403,41 +1697,99 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // GAME STATE SEEDING — pre-populate map/items from world bible at start
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function seedGameFromBible(stateMgr, wb) {
+      if (!wb || !Array.isArray(wb.locations) || wb.locations.length === 0) return;
+
+      const startLoc = wb.locations[0];
+      const startRoom = startLoc.name;
+
+      // Only add the starting room to the known map — other rooms are discovered through play
+      stateMgr.moveTo(startRoom);
+      const entry = stateMgr.state.knownMap[startRoom];
+      if (startLoc.description) entry.notes = startLoc.description;
+      if (Array.isArray(startLoc.exits)) {
+        for (const exit of startLoc.exits) {
+          if (!entry.exits.includes(exit)) entry.exits.push(exit);
+        }
+      }
+
+      // Pre-place items in ALL rooms (roomItems is separate from knownMap, so hidden rooms stay hidden on the map)
+      for (const loc of wb.locations) {
+        if (!loc.name || !Array.isArray(loc.items)) continue;
+        for (const item of loc.items) {
+          stateMgr.placeItemInRoom(item, loc.name);
+        }
+      }
+
+      // Add first objective to quest log
+      if (Array.isArray(wb.objectives) && wb.objectives.length > 0) {
+        stateMgr.addNote(`Goal: ${wb.objectives[0]}`);
+      }
+
+      // Remove the default "Start" room if a real start was set
+      if (startRoom !== "Start" && stateMgr.state.knownMap["Start"]) {
+        delete stateMgr.state.knownMap["Start"];
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // GAME FLOW
     // ═══════════════════════════════════════════════════════════════════════════
     const stateMgr = new StateManager();
+    let turnCounter = 0;
 
     async function startStory() {
       const wb = activeWorldBible;
       const theme = wb.global_theme || IMAGE_THEME;
+      turnCounter = 0;
 
-      // Build opening kickoff prompt
+      // Seed the game state from world bible before LLM kickoff
+      seedGameFromBible(stateMgr, wb);
+
+      // Build opening kickoff prompt — include seeded state so LLM knows the map
       const hints = [];
       if (wb.objectives) hints.push(`objectives: ${wb.objectives.slice(0, 3).join("; ")}`);
       if (wb.npcs) hints.push(`NPCs: ${wb.npcs.map(n => `${n.name} (${n.personality})`).join(", ")}`);
-      if (wb.locations) hints.push(`Locations: ${wb.locations.slice(0, 3).map(l => `${l.name}: ${l.description}`).join("; ")}`);
+      const startLoc = wb.locations[0];
+      if (startLoc) hints.push(`Starting room: ${startLoc.name} — ${startLoc.description}`);
+      const startExits = (startLoc && startLoc.exits) ? startLoc.exits.join(", ") : "unknown";
+      const startItems = (stateMgr.state.roomItems[stateMgr.state.location] || []).join(", ") || "none visible";
       const wbHint = hints.length ? `\n\nWorld context: ${hints.join("; ")}` : "";
 
       const kickoff =
         "Start a new adventure. The player has just arrived.\n" +
+        `Player is at: ${stateMgr.state.location}. Exits: ${startExits}. Items here: ${startItems}.\n` +
         "DESCRIBE WHAT THE PLAYER SEES: the room, atmosphere, objects, exits, characters. " +
         "Write 3-5 vivid sentences.\n" +
-        "Set an initial location with at least 2 exits. Place a useful starting item in the room.\n" +
+        "Use move_to and connect in your JSON to confirm the starting room and its exits.\n" +
         "IMPORTANT: Include an image prompt in your JSON.\n\n" +
         `Theme: ${theme}`;
 
+      const sysPrompt = SYSTEM_INSTRUCTIONS + wbHint;
+      const debugHeader = [`── Turn 0 (start) ──`, `prompt: sys=${sysPrompt.length} user=${kickoff.length} chars`];
+
       showThinking();
-      const llmText = await generateLlmResponse(SYSTEM_INSTRUCTIONS + wbHint, kickoff);
+      const t0 = performance.now();
+      const llmText = await generateLlmResponse(sysPrompt, kickoff);
+      const elapsed = Math.round(performance.now() - t0);
       removeThinking();
+
+      debugHeader.push(`response: ${llmText.length} chars in ${elapsed}ms`);
+      const jsonCount = extractJsonFromText(llmText).length;
+      debugHeader.push(`JSON: ${jsonCount ? jsonCount + " object(s) parsed" : "NONE (narration only)"}`);
 
       const { narrative, imagePrompts, debug } = applyLlmDirectives(stateMgr, llmText);
       if (!stateMgr.state.location || stateMgr.state.location === "Start") {
-        stateMgr.moveTo("Entrance");
+        stateMgr.moveTo(wb.locations?.[0]?.name || "Entrance");
       }
 
       appendTurn(null, narrative || "Your journey begins…");
       updateStatusPanel(stateMgr);
-      setDebug(debug);
+      const seedInfo = `seeded: ${Object.keys(stateMgr.state.knownMap).length} rooms, ${Object.values(stateMgr.state.roomItems).flat().length} items placed`;
+      setDebug([...debugHeader, ...debug, seedInfo]);
 
       // Generate scene image (async, non-blocking)
       generateAndShowImage(imagePrompts);
@@ -1478,15 +1830,18 @@
 
       setInputEnabled(false);
       showThinking();
+      turnCounter++;
 
       // Record turn
       stateMgr.state.recentHistory.push({ player: playerInput, response: "" });
       if (stateMgr.state.recentHistory.length > 5) stateMgr.state.recentHistory.shift();
 
       const systemPrompt = SYSTEM_INSTRUCTIONS;
-      const userPrompt = buildUserPrompt(stateMgr, playerInput);
+      const { prompt: userPrompt, cueSummary } = buildUserPrompt(stateMgr, playerInput);
+      const debugHeader = [`── Turn ${turnCounter} ──`, `prompt: sys=${systemPrompt.length} user=${userPrompt.length} chars`];
 
       let llmText;
+      const t0 = performance.now();
       try {
         llmText = await generateLlmResponse(systemPrompt, userPrompt);
       } catch (e) {
@@ -1495,8 +1850,13 @@
         setInputEnabled(true);
         return;
       }
+      const elapsed = Math.round(performance.now() - t0);
 
       removeThinking();
+      debugHeader.push(`response: ${llmText.length} chars in ${elapsed}ms`);
+      const jsonCount = extractJsonFromText(llmText).length;
+      debugHeader.push(`JSON: ${jsonCount ? jsonCount + " object(s) parsed" : "NONE (narration only)"}`);
+
       const { narrative, imagePrompts, debug } = applyLlmDirectives(stateMgr, llmText);
 
       // Update conversation memory
@@ -1506,7 +1866,7 @@
 
       appendTurn(playerInput, narrative || "(The narrator says nothing.)");
       updateStatusPanel(stateMgr);
-      setDebug(debug);
+      setDebug([...debugHeader, ...debug, cueSummary]);
 
       // Check win
       const win = checkWinCondition(stateMgr);
@@ -1520,6 +1880,37 @@
       generateAndShowImage(imagePrompts);
     }
 
+    /**
+     * Build a concise SD 1.5 prompt (~50-75 tokens).
+     * Uses room description as base, then appends only objects/NPCs NOT already mentioned.
+     */
+    function buildImagePrompt(room, llmPrompt) {
+      const wbLoc = (activeWorldBible.locations || []).find(l => l.name === room);
+
+      // Collect all visible elements
+      const roomItems = stateMgr.state.roomItems[room] || [];
+      const scenery = (wbLoc?.scenery || []).slice(0, 3);
+      const npcs = (activeWorldBible.npcs || []).filter(n => n.location === room).map(n => n.name);
+      const monsters = (activeWorldBible.monsters || []).filter(m => m.location === room).map(m => m.name);
+
+      // If no LLM prompt, build entirely from world bible
+      if (!llmPrompt) {
+        const desc = wbLoc?.description || room.toLowerCase();
+        const parts = [desc, ...npcs, ...monsters, ...roomItems, ...scenery];
+        return parts.join(", ");
+      }
+
+      // Deduplicate: only append keywords the LLM didn't already mention
+      const baseLower = llmPrompt.toLowerCase();
+      const missing = [];
+      for (const word of [...npcs, ...monsters, ...roomItems, ...scenery]) {
+        const key = word.toLowerCase().split(" ").pop(); // match on last word ("Old Hermit" → "hermit")
+        if (!baseLower.includes(key)) missing.push(word);
+      }
+
+      return missing.length ? `${llmPrompt}, ${missing.join(", ")}` : llmPrompt;
+    }
+
     /** Pick best image prompt and generate / show, with room caching. */
     async function generateAndShowImage(imagePrompts) {
       const room = stateMgr.state.location;
@@ -1528,12 +1919,21 @@
       if (stateMgr.state.roomImageBlobs[room]) {
         showSceneImage(stateMgr.state.roomImageBlobs[room]);
         setImgStatus(`Cached: ${room}`);
+        setDebug([`IMG (cached): ${room}`]);
         return;
       }
 
-      // Pick prompt — prefer LLM-provided, fall back to room name
-      let prompt = imagePrompts.length ? imagePrompts[0] : null;
-      if (!prompt) prompt = `atmospheric ${room.toLowerCase()}, detailed fantasy cave environment`;
+      const llmPrompt = imagePrompts.length ? imagePrompts[0] : null;
+      const prompt = buildImagePrompt(room, llmPrompt);
+
+      // Debug: show exactly what SD 1.5 receives
+      const artTheme = activeWorldBible.global_theme || activeWorldBible.theme || IMAGE_THEME;
+      setDebug([
+        `IMG → SD 1.5:`,
+        `  LLM scene: ${llmPrompt || "(none — using world bible)"}`,
+        `  SD prompt: ${prompt}`,
+        `  art theme: ${artTheme}`
+      ]);
 
       const url = await generateSceneImage(prompt, setImgStatus);
       if (url) {
@@ -1660,10 +2060,11 @@
     async function ensureModelsLoaded(setLoad) {
       if (modelsLoaded) return true;
 
-      // Detect if local model files are available (localhost only)
-      useLocalModels = await detectLocalModels();
-      if (useLocalModels) {
-        setLoad({ text: "Local model files detected — loading from disk (faster, no internet needed)." });
+      // Detect which models have local files (localhost only; each checked independently)
+      await detectLocalModels();
+      if (useLocalLlm || useLocalImg) {
+        const parts = [useLocalLlm ? "LLM" : null, useLocalImg ? "SD 1.5" : null].filter(Boolean).join(" + ");
+        setLoad({ text: `Local model files detected (${parts}) — loading from disk where available.` });
       }
 
       const llmOk = await loadLlm(setLoad);
@@ -1757,10 +2158,14 @@
       // 4. Start the adventure (or restore loaded state)
       if (needsNewStory) {
         $("narrative").innerHTML = "";
+        clearDebug();
+        debugWorldBible(activeWorldBible);
         await startStory();
       } else {
         // Restored from save — rebuild UI from state
         $("narrative").innerHTML = "";
+        clearDebug();
+        debugWorldBible(activeWorldBible);
         appendTurn(null, `Adventure resumed. You are in ${stateMgr.state.location}.`);
         updateStatusPanel(stateMgr);
         setDebug(["Game loaded from save."]);
