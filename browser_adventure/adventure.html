@@ -557,7 +557,17 @@
         { step: 8, action: "use enchanted blade on Stone Dragon", gives: "Starfire Gem", unlocks: "win" }
       ],
       main_arc: "A daring explorer descends into ancient caves seeking the legendary Starfire Gem. To reach it they must outwit a bridge troll, rekindle a forgotten forge, and defeat a stone dragon with the enchanted blade hidden within.",
-      win_condition: "Obtain the Starfire Gem and return to Cave Mouth"
+      win_condition: "Obtain the Starfire Gem and return to Cave Mouth",
+      author_walkthrough:
+        "1. At Cave Mouth, talk to the Old Hermit. He gives you a torch and warns about the troll.\n" +
+        "2. Take the rope hanging from the spike on the wall (Cave Mouth).\n" +
+        "3. Go to Mushroom Grotto (exit from Cave Mouth). Pick up the flint near the dead campfire.\n" +
+        "4. Return to Cave Mouth, then enter Dark Passage (torch lights the way). Read the explorer journal on the floor — it hints the troll fears fire and drops something metal.\n" +
+        "5. Go to Underground River (exit from Dark Passage or Mushroom Grotto). Wave the torch at the River Troll — it panics, flees, and drops an iron key.\n" +
+        "6. Cross the bridge to Ancient Forge. Use the flint on the forge — it ignites, the Forge Spirit appears, and the enchanted blade is revealed in the anvil. Take the blade.\n" +
+        "7. Use the iron key on the iron door in Ancient Forge — it unlocks the passage to Dragon's Vault.\n" +
+        "8. Enter Dragon's Vault. Use the enchanted blade on the Stone Dragon — it crumbles and the Starfire Gem is accessible. Take the gem.\n" +
+        "9. Return through Ancient Forge → Underground River → Mushroom Grotto or Dark Passage → Cave Mouth. You win!"
     };
 
     // Active world bible — swapped when generating or loading a different adventure
@@ -657,7 +667,8 @@
       "- Update set_context every turn\n" +
       "- When a room blocker is cleared (door unlocked, guard fled, etc.): set_flag {\"name\":\"ROOM_unblocked\",\"value\":true} (ROOM = room name with spaces replaced by underscores)\n" +
       "- When a monster is defeated or flees: set_flag {\"name\":\"MONSTER_defeated\",\"value\":true} (MONSTER = monster name with spaces replaced by underscores)\n" +
-      "- Use double quotes, no trailing commas in JSON\n";
+      "- Use double quotes, no trailing commas in JSON\n" +
+      "- META HELP: If the user message includes FULL_WORLD_BIBLE_JSON, they are asking for out-of-character help (goals, strategy, reminders). Use that JSON accurately but answer in natural language. Judge how much to say: a light nudge vs a clearer plan—your discretion. Do not dump the raw JSON unless they explicitly ask for it. For normal in-room actions, that section is omitted—stay in character.\n";
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GAME STATE
@@ -1182,7 +1193,9 @@
         `- puzzle_chain: ordered steps [{step:1,action:"do X",gives:"item",unlocks:"room or null"}]\n` +
         `- mechanics: 2-3 rules (action, effect, location)\n` +
         `- main_arc: 1 sentence story\n` +
-        `- win_condition: how to win\n\n` +
+        `- win_condition: how to win\n` +
+        `- author_walkthrough: plain text, 8-20 numbered lines; full solution in order (puzzle_chain + win); must match puzzle_chain exactly.\n\n` +
+        `SOLVABILITY (required): puzzle_chain must be logically completable in order — every "gives" item obtainable when that step applies, NPC/monster/item_locations consistent with rooms, win_condition achievable. Fix contradictions before output.\n\n` +
         `Place NPCs and items in the rooms listed above. Every item must be useful.\n` +
         `Output ONLY valid JSON.`;
 
@@ -1195,7 +1208,7 @@
       // Retry pass 2 if failed
       if (!content) {
         slog("Pass 2 retry...");
-        const retry2 = `Theme: ${theme.slice(0, 300)}\n${forbidStockNames}\nAdd npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition to rooms: ${roomList}\nValid JSON only.`;
+        const retry2 = `Theme: ${theme.slice(0, 300)}\n${forbidStockNames}\nAdd npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition, author_walkthrough (numbered full solution) to rooms: ${roomList}\nValid JSON only.`;
         pass2Text = await runGen(sysMsg, retry2, p2RetryTok, 0.4,
           (t) => { slog(`Pass 2 retry... ${t.length} chars`); });
         content = extractFirstJson(pass2Text);
@@ -1256,6 +1269,13 @@
       if (!Array.isArray(plan.puzzle_chain)) plan.puzzle_chain = [];
       if (!plan.main_arc) plan.main_arc = "";
       if (!plan.win_condition) plan.win_condition = "Complete the adventure";
+      if (typeof plan.author_walkthrough !== "string" || !plan.author_walkthrough.trim()) {
+        plan.author_walkthrough = synthesizeAuthorWalkthrough(plan);
+        slog("author_walkthrough: filled by synthesis (model omitted or empty)");
+      } else {
+        plan.author_walkthrough = plan.author_walkthrough.trim();
+        slog(`author_walkthrough: ${plan.author_walkthrough.length} chars from model`);
+      }
 
       // Validate NPC/monster locations reference real rooms
       const validRoomNames = plan.locations.map(l => l.name.toLowerCase());
@@ -1542,6 +1562,82 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // AUTHOR WALKTHROUGH — solvability / hints (generated or synthesized)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /** Build a plain-text solution from structured bible fields (always available). */
+    function synthesizeAuthorWalkthrough(wb) {
+      if (!wb) return "";
+      const lines = [];
+      lines.push("=== How to win (auto-built from world bible) ===");
+      if (wb.win_condition) lines.push(`Win: ${wb.win_condition}`);
+      if (wb.main_arc) lines.push(`Story: ${wb.main_arc}`);
+      if (Array.isArray(wb.objectives) && wb.objectives.length) {
+        lines.push("Goals:");
+        wb.objectives.forEach((o, i) => lines.push(`  ${i + 1}. ${o}`));
+      }
+      if (Array.isArray(wb.puzzle_chain) && wb.puzzle_chain.length) {
+        lines.push("Steps (in order):");
+        for (const s of wb.puzzle_chain) {
+          const g = s.gives ? ` → obtain: ${s.gives}` : "";
+          const u = s.unlocks != null && s.unlocks !== undefined && s.unlocks !== "" ? ` → unlocks: ${s.unlocks}` : "";
+          lines.push(`  ${s.step}. ${s.action}${g}${u}`);
+        }
+      }
+      if (Array.isArray(wb.key_items) && wb.key_items.length) {
+        lines.push("Key items:");
+        for (const k of wb.key_items) {
+          if (k && typeof k.name === "string" && k.name) lines.push(`  - ${k.name}: ${k.purpose || ""}`);
+        }
+      }
+      if (Array.isArray(wb.progression_hints) && wb.progression_hints.length) {
+        lines.push(`Hints: ${wb.progression_hints.join(" | ")}`);
+      }
+      return lines.join("\n");
+    }
+
+    /** LLM-authored walkthrough from generation, else synthesis (never empty for a normal bible). */
+    function getAuthorWalkthrough(wb) {
+      const raw = wb && wb.author_walkthrough;
+      if (typeof raw === "string" && raw.trim()) return raw.trim();
+      return synthesizeAuthorWalkthrough(wb);
+    }
+
+    /** True when the player is asking for meta help — attach full world bible JSON (one LLM call, larger prompt). */
+    function playerWantsMetaHelp(playerInput) {
+      const t = (playerInput || "").trim().toLowerCase();
+      if (!t || t.length > 220) return false;
+      if (/^(look|look around|inventory|inv|map)\b/.test(t)) return false;
+      return /^help\b/.test(t)
+        || /^hint\b/.test(t)
+        || /^hints\b/.test(t)
+        || /^clue\b/.test(t)
+        || /^stuck\b/.test(t)
+        || /^lost\b/.test(t)
+        || /^goal\b/.test(t)
+        || /^goals\b/.test(t)
+        || /^objectives?\b/.test(t)
+        || /^what (should|can|do) i do\b/.test(t)
+        || /^what (am i|is the) (trying to|supposed to|goal)\b/.test(t)
+        || /^how (do|can) i win\b/.test(t)
+        || /^where (should|can) i (go|start)\b/.test(t)
+        || t === "walkthrough"
+        || /\bneed (a )?hint\b/.test(t)
+        || /\bgive (me )?(a )?hint\b/.test(t)
+        || /\bany (hints|tips|advice)\b/.test(t);
+    }
+
+    /** Serialize entire bible for meta-help prompts (LLM discretion on how much to reveal). */
+    function fullWorldBibleJsonForHelp(wb) {
+      if (!wb) return "{}";
+      try {
+        return JSON.stringify(wb);
+      } catch {
+        return "{}";
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // BUILD USER PROMPT — provides game state context to the LLM
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1612,42 +1708,28 @@
         }
       }
 
-      // Inject current puzzle_chain step instead of generic hints
-      const chain = activeWorldBible.puzzle_chain || [];
-      if (chain.length) {
-        const completedItems = new Set(s.inventory.map(i => i.toLowerCase()));
-        const completedFlags = s.gameFlags;
-        let nextStep = chain.find(step => {
-          if (!step.gives) return false;
-          return !completedItems.has(step.gives.toLowerCase()) && !completedFlags[`chain_step_${step.step}`];
-        });
-        if (nextStep) {
-          cues.push(`Next step: ${nextStep.action} -> gives ${nextStep.gives}${nextStep.unlocks ? ", unlocks " + nextStep.unlocks : ""}`);
-        }
-      } else {
-        // Fall back to objectives + hints if no puzzle_chain
-        const objectives = activeWorldBible.objectives || [];
-        if (objectives.length) {
-          const completed = objectives.reduce((n, _, i) => n + (s.gameFlags[`objective_${i}`] ? 1 : 0), 0);
-          cues.push(`Goal: ${objectives[Math.min(completed, objectives.length - 1)]}`);
-        }
-        if (s.inventory.length < 2 && (activeWorldBible.progression_hints || []).length) {
-          cues.push(`Hint: ${activeWorldBible.progression_hints[0]}`);
-        }
-      }
-
       const bibleLine = cues.length ? "\nWorld:\n" + cues.map(c => `  ${c}`).join("\n") : "";
 
-      // Build a short summary of which cues were injected (for debug panel)
-      const cueSummary = cues.length
-        ? "cues: " + cues.map(c => c.split(":")[0].trim()).join(", ")
-        : "cues: none";
+      const metaHelp = playerWantsMetaHelp(playerInput);
+      let metaBlock = "";
+      if (metaHelp) {
+        metaBlock =
+          "\n---\nFULL_WORLD_BIBLE_JSON (for meta questions only; narrator uses discretion—do not paste wholesale unless asked):\n" +
+          fullWorldBibleJsonForHelp(activeWorldBible) +
+          "\n---\n";
+      }
 
-      // Compact JSON (no indentation) to save tokens
+      // Build a short summary of which cues were injected (for debug panel)
+      const cueSummary = (cues.length
+        ? "cues: " + cues.map(c => c.split(":")[0].trim()).join(", ")
+        : "cues: none") + (metaHelp ? " | metaHelp: full bible JSON attached" : "");
+
+      // Compact JSON (no indentation) to save tokens; meta help adds full bible in one pass
       const prompt = (
         "State:\n" +
         JSON.stringify(context) +
         bibleLine +
+        metaBlock +
         "\n---\nPlayer: " + playerInput
       );
       return { prompt, cueSummary };
@@ -1971,6 +2053,22 @@
       }
       pre.textContent = lines.join("\n");
       wrapper.appendChild(pre);
+
+      const wtDetails = document.createElement("details");
+      wtDetails.style.marginTop = "8px";
+      const wtSum = document.createElement("summary");
+      wtSum.style.cursor = "pointer";
+      wtSum.style.color = "var(--warn)";
+      wtSum.textContent = "Designer walkthrough (full spoiler — debug only)";
+      wtDetails.appendChild(wtSum);
+      const wtPre = document.createElement("pre");
+      wtPre.style.margin = "4px 0 0 0";
+      wtPre.style.whiteSpace = "pre-wrap";
+      wtPre.style.fontSize = "10px";
+      wtPre.textContent = getAuthorWalkthrough(wb) || "(none)";
+      wtDetails.appendChild(wtPre);
+      wrapper.appendChild(wtDetails);
+
       panel.appendChild(wrapper);
     }
 
@@ -2097,10 +2195,6 @@
       }
       if (cmd === "inv" || cmd === "inventory") {
         appendTurn(playerInput, stateMgr.state.inventory.length ? `Carrying: ${stateMgr.state.inventory.join(", ")}` : "You're not carrying anything.");
-        return;
-      }
-      if (cmd === "help") {
-        appendTurn(playerInput, "Commands: type any action (go north, pick up torch, talk to hermit, etc.)\nSpecial: look, inventory, help, map");
         return;
       }
       if (cmd === "map") {

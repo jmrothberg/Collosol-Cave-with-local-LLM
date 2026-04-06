@@ -254,6 +254,22 @@ Empty replies trigger retries (single user message, then `/api/generate`). Pass 
 
 The live setting is **`activeWorldBible`** (starts as **`DEFAULT_WORLD_BIBLE`** in `adventure.html`).
 
+---
+
+## Help, hints, and solvability
+
+**Fast local commands (no LLM):** **`look`**, **`inventory`** / **`inv`**, **`map`**. Everything else—including **`help`**, **`hint`**, goals, strategy, or “what should I do”—goes through the **narrator LLM** in one turn.
+
+**Normal play (lean prompt):** The model gets **current state JSON** plus **this room’s** bible cues (description, NPCs, monsters, blockers, items tied to this room). It does **not** get a scripted “next puzzle step” line every turn; pacing and hint strength are up to the model.
+
+**Meta-help (richer prompt, same single call):** If the input looks like meta help (e.g. starts with **`help`**, **`hint`**, **`stuck`**, **`goals`**, **`how do i win`**, **`what should i do`**, **`walkthrough`**, **`any hints`**—see `playerWantsMetaHelp` in `adventure.html`), the user prompt also includes **`FULL_WORLD_BIBLE_JSON`**: the **entire** world bible so the LLM can answer from the full design. System instructions tell it to use **discretion** (nudge vs detailed plan) and not dump raw JSON unless the player asks.
+
+**Generation:** Pass 2 is instructed to keep **`puzzle_chain`** **logically solvable** and consistent with items/NPCs/rooms, and to write **`author_walkthrough`** aligned with that chain. If the model omits it, the engine **synthesizes** a walkthrough from structured fields.
+
+**Full written solution (debug only):** Open **Debug**, expand the world bible block, then **“Designer walkthrough (full spoiler — debug only)”**. There is **no** in-game cheat phrase.
+
+**Export World** includes **`author_walkthrough`** in the JSON for offline reading or editing.
+
 ## What the Python game has that the browser build does not
 
 The browser page is intentionally smaller in a few areas:
