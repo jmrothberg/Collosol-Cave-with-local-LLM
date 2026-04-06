@@ -1,25 +1,32 @@
 # JMR's LLM Adventure — browser edition
 
-This folder holds the **standalone in-browser** version of the LLM adventure engine (the same design as [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py), but implemented in one HTML file plus shared image workers).
+In-browser text adventure: **Gemma 4B** (Transformers.js) narrates and runs game logic; **Stable Diffusion 1.5** draws scenes. Same design idea as the Python engine [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py).
 
 | File | Role |
 |------|------|
-| [`adventure.html`](adventure.html) | Full game UI + engine (Gemma 4B + SD 1.5) |
-| This README | How narration, state, and customization work |
-
-**Play on GitHub Pages (no install):**  
-[https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/browser_adventure/adventure.html](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/browser_adventure/adventure.html)
-
-Short URL (repo-root redirect stub):  
-[https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html)
-
-**Link previews (Slack, Discord, iMessage, etc.):** `adventure.html` and the redirect stubs include Open Graph / Twitter Card tags pointing at [`og-preview.png`](og-preview.png) on GitHub Pages. After deploy, pasting any of the URLs above should unfurl with that image (crawlers cache; use [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/) to refresh if needed).
+| [`adventure.html`](adventure.html) | Full game UI + engine |
+| This README | Setup, generation, save/load, JSON behavior |
 
 ---
 
-## How you must serve this folder
+## Quick start (GitHub Pages — recommended)
 
-`adventure.html` loads image code from **`../llm_adventure/vendor/web-txt2img/`** (same-origin worker). That path only exists if the HTTP server’s **document root is the repository root** (`Colossal_Cave/`), not `llm_adventure/` alone.
+**No install.** Use a recent **Chrome or Edge** with **WebGPU** if you can (first visit downloads ~5 GB of models from HuggingFace, then caches them).
+
+| Link | Notes |
+|------|--------|
+| **[Play (full URL)](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/browser_adventure/adventure.html)** | Main entry point |
+| **[Short redirect](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/adventure.html)** | Repo-root stub → same game |
+
+GitHub Pages serves the **whole repository**, so `adventure.html` can load `../llm_adventure/vendor/web-txt2img/` correctly. You do **not** need a local Python server just to play the hosted build.
+
+**Link previews** (Slack, Discord, iMessage): Open Graph / Twitter tags point at [`og-preview.png`](og-preview.png). Crawlers cache; refresh with [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/) if needed.
+
+---
+
+## Local development server (optional, faster COOP/COEP)
+
+For hacking on the repo locally, serve from the **repository root** (`Colossal_Cave/`), not from `browser_adventure/` alone — the page loads workers from **`../llm_adventure/vendor/web-txt2img/`**.
 
 ```bash
 cd /path/to/Colossal_Cave   # repo root
@@ -27,9 +34,9 @@ python3 scripts/serve-threaded.py 8080
 # Open http://localhost:8080/browser_adventure/adventure.html
 ```
 
-> **Why not `python3 -m http.server`?** The built-in server lacks the `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers needed for `crossOriginIsolated` mode. Without them, ONNX Runtime Web falls back to single-threaded WASM (much slower).
+> **Why not `python3 -m http.server`?** The default module does not send `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy`, so the page may not get `crossOriginIsolated` and ONNX can fall back to slower single-threaded WASM.
 
-If you previously used `cd llm_adventure && python3 -m http.server`, use the repo root instead for this game. A redirect stub remains at [`../llm_adventure/adventure.html`](../llm_adventure/adventure.html) that sends the browser to `/browser_adventure/adventure.html` when the root server is used.
+A redirect stub lives at [`../llm_adventure/adventure.html`](../llm_adventure/adventure.html) when the root server is used.
 
 ---
 
@@ -194,19 +201,58 @@ Win detection uses **`win_condition`** text plus **`game_flags`** / inventory he
 
 ---
 
-## Adventure generation, save/load, and preset themes
+## Adventure picker: default, generate, load
 
-The browser version now supports adventure generation, save/load, and preset themes:
+Before **Start Adventure**, pick one card:
 
-- **World Bible Generation**: use the in-browser Gemma 4B to generate a new adventure from a theme description, or check **Use a local Ollama model** on the “Generate New Adventure” card to run the two-pass world build against your machine’s Ollama API (`http://127.0.0.1:11434` by default). In-browser Gemma still drives narration after the game starts. Pick a preset theme (Tolkien, Star Wars, Colossal Cave, Zork, Myst, Pirate, Cyberpunk) or write your own. Gemma-only generation often takes 30–90 seconds.
-- **Ollama + browser**: the page calls Ollama with `fetch` from your game origin (e.g. `http://localhost:8080`). If the browser blocks the request, allow that origin in Ollama before starting the server, for example: `OLLAMA_ORIGINS=http://localhost:8080 ollama serve` (use your real origin; comma-separate multiple values if needed). Pull the model first (`ollama pull llama3.2`, etc.). While world-gen runs, each line under the progress bar is prefixed **`[Ollama · modelname]`** (or **`[Gemma world-gen]`** if the checkbox is off) so the latest status still shows which backend is active. If Ollama returns **0 characters**, the code retries with a single user message and then **`/api/generate`**; the Debug panel lists **`[Ollama API]`** lines and raw JSON. World-gen uses Ollama’s **`format: json`** and **higher `num_predict`** than the in-browser path so map JSON is not cut off; if you still see **`done_reason=length`**, the model hit the cap—Debug will say so. Use the exact model tag from **`ollama list`** (e.g. `gemma2:9b`); made-up tags like `gemma4:31b` fail unless that model really exists locally. After a successful Ollama world build, the game also downloads a `world_bible_*.json` file to your default **Downloads** folder (same as **Export World**).
-- **Save/Load**: save game state + world bible to browser `localStorage`. Resume later from the adventure picker.
-- **JSON Import/Export**: import a `.json` world bible (like [`default_cave.json`](default_cave.json)) or a full save (world bible + game state) from a file. **Save game** (in the header) stores world bible + progress in this browser only. **Export World** downloads the world bible only—no inventory or flags—so you can share or edit the setting; use **Save game** to keep your place.
-- **Pre-game Adventure Picker**: choose default cave, generate new, or load saved before starting.
-- **In-game buttons**: Save game, Export World, and New Adventure in the header bar.
-- **Debug panel**: open **Debug** to see how the world was chosen (`built-in default` vs `generated` vs import/load). After **Generate New Adventure**, the first block lists each world-gen step (pass 1/2, retries, short raw previews, room names, validation). If you see **`active: generation failed → built-in default`**, the next line in that block is **`FAILURE: …`** with the real error (and a short hint for Ollama vs browser). If your game matches the built-in Starfire Gem cave, you either picked **Default Cave Adventure** or generation failed and the engine fell back to the default bible.
+| Card | What you get |
+|------|----------------|
+| **Default Cave Adventure** | Built-in world (Starfire Gem / Cave Mouth, etc.). No LLM world build. |
+| **Generate New Adventure** | Two-pass LLM build from your theme (preset dropdown or custom text). |
+| **Load Saved Adventure** | Browser **Save game** slots, or **import JSON** (world bible or full save). |
 
-The active world bible is stored in `activeWorldBible` (defaults to `DEFAULT_WORLD_BIBLE`). All game engine functions reference this mutable variable, so swapping it changes the entire adventure.
+**Important:** To get a **new** Tolkien/Zork/etc. world, choose **Generate New Adventure** (card must be selected), enter or pick a theme, then **Start**. If you only see the default cave, you either picked **Default Cave** or generation failed (see Debug).
+
+---
+
+## World bible generation (Gemma vs Ollama)
+
+**Generate New Adventure** can build the world bible two ways:
+
+1. **In-browser Gemma** (checkbox **off**) — same model as gameplay; often 30–90s; can be weaker at JSON.
+2. **Local Ollama** (checkbox **on**) — your Mac/PC runs the map + content passes; gameplay still uses Gemma in the browser.
+
+After a successful **Ollama** build, a **`world_bible_*.json`** is saved to your **Downloads** folder (same idea as **Export World**).
+
+### Ollama setup (short checklist)
+
+1. Install and run **Ollama** on the same machine as the browser (`ollama serve` or the Mac app).
+2. **`ollama pull <model>`** then use the **exact** name from **`ollama list`** in the game (e.g. `llama3.2`, `gemma2:9b`). Typos or fake tags (e.g. `gemma4:31b`) will fail or behave oddly.
+3. **CORS:** the game page calls `http://127.0.0.1:11434` from **whatever origin you opened**. Ollama must allow that origin:
+   - **Local:** e.g. `OLLAMA_ORIGINS=http://localhost:8080 ollama serve` if you use port 8080 (match your URL).
+   - **GitHub Pages:** e.g. `OLLAMA_ORIGINS=https://jmrothberg.github.io ollama serve` (or your fork’s `https://YOURUSER.github.io`) so the **hosted** page can reach your laptop’s Ollama. Without this, the browser blocks the request.
+4. Status lines under the progress bar: **`[Ollama · model]`** vs **`[Gemma world-gen]`** so you always see which backend is building.
+
+### Ollama troubleshooting (Debug panel)
+
+Open **Debug** after a failed or odd run:
+
+- **`[Ollama API]`** — HTTP status, `format=json`, `num_predict`, **`done_reason=length`** (hit token cap), and raw JSON when needed.
+- **`FAILURE:`** — first explanation when generation falls back to the built-in cave.
+- **`active: generation failed → built-in default`** — read **`FAILURE:`** and **`[Ollama API]`** lines right below the header.
+
+Empty replies trigger retries (single user message, then `/api/generate`). Pass 1 uses **JSON mode** and **larger `num_predict`** than the old 800-token cap so map JSON is not truncated as often.
+
+---
+
+## Save / load / export
+
+- **Save game** (header): world bible + progress → this browser’s `localStorage` only.
+- **Export World**: downloads **world bible JSON** only (no inventory). Good for sharing or editing.
+- **Import JSON**: world bible like [`default_cave.json`](default_cave.json), or a full save with `gameState`.
+- **New Adventure**: returns to the picker (models stay cached if already loaded).
+
+The live setting is **`activeWorldBible`** (starts as **`DEFAULT_WORLD_BIBLE`** in `adventure.html`).
 
 ## What the Python game has that the browser build does not
 

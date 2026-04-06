@@ -1663,11 +1663,13 @@
         return `VICTORY! ${activeWorldBible.win_condition}\nCongratulations, adventurer!`;
       }
       const wc = (activeWorldBible.win_condition || "").toLowerCase();
+      // LLM/Ollama bibles may omit key_items[].name or use odd shapes — guard before toLowerCase.
       const winItems = (activeWorldBible.key_items || [])
-        .filter(k => wc.includes(k.name.toLowerCase()))
+        .filter(k => k && typeof k.name === "string" && k.name.length && wc.includes(k.name.toLowerCase()))
         .map(k => k.name);
       if (winItems.length && winItems.every(it => s.inventory.includes(it))) {
         for (const loc of (activeWorldBible.locations || [])) {
+          if (!loc || typeof loc.name !== "string") continue;
           if (wc.includes(loc.name.toLowerCase()) && s.location.toLowerCase() === loc.name.toLowerCase()) {
             return `VICTORY! ${activeWorldBible.win_condition}\nCongratulations, adventurer!`;
           }
