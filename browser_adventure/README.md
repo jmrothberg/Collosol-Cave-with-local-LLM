@@ -200,9 +200,9 @@ The browser version now supports adventure generation, save/load, and preset the
 
 - **World Bible Generation**: use the in-browser Gemma 4B to generate a new adventure from a theme description. Pick a preset theme (Tolkien, Star Wars, Colossal Cave, Zork, Myst, Pirate, Cyberpunk) or write your own. Generation takes 30-90 seconds.
 - **Save/Load**: save game state + world bible to browser `localStorage`. Resume later from the adventure picker.
-- **JSON Import/Export**: download the current adventure (world bible + game state) as a `.json` file, or import one. Share adventures via GitHub or email. A reference file is at [`default_cave.json`](default_cave.json).
+- **JSON Import/Export**: import a `.json` world bible (like [`default_cave.json`](default_cave.json)) or a full save (world bible + game state) from a file. **Save game** (in the header) stores world bible + progress in this browser only. **Export World** downloads the world bible only—no inventory or flags—so you can share or edit the setting; use **Save game** to keep your place.
 - **Pre-game Adventure Picker**: choose default cave, generate new, or load saved before starting.
-- **In-game buttons**: Save, Export, and New Adventure in the header bar.
+- **In-game buttons**: Save game, Export World, and New Adventure in the header bar.
 
 The active world bible is stored in `activeWorldBible` (defaults to `DEFAULT_WORLD_BIBLE`). All game engine functions reference this mutable variable, so swapping it changes the entire adventure.
 

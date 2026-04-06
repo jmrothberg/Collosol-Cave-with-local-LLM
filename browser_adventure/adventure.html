@@ -128,16 +128,23 @@
     .thinking { color: var(--warn); font-style: italic; animation: pulse 1.5s ease-in-out infinite; }
     @keyframes pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
     /* ── Middle row: image + status ── */
-    .mid-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    /* flex-start: do not stretch img-panel to status-panel height (was making the image column look "too tall") */
+    .mid-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
     /* ── Scene image ── */
     .img-panel {
       flex: 0 0 auto; width: 320px;
       border: 1px solid var(--border); border-radius: 8px;
       background: var(--panel); padding: 8px;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      min-height: 260px; position: relative;
+      display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+      min-height: 120px; position: relative;
     }
-    .img-panel img { max-width: 100%; border-radius: 6px; display: none; }
+    /* SD 1.5 output is 512×512 — lock display to square so the browser never stretches the bitmap */
+    .img-panel img {
+      max-width: 100%; width: 100%; height: auto;
+      aspect-ratio: 1 / 1;
+      object-fit: contain;
+      border-radius: 6px; display: none;
+    }
     .img-panel img.visible { display: block; }
     .img-panel .img-status { font-size: 11px; color: var(--text-muted); margin-top: 6px; text-align: center; }
     .img-placeholder { color: var(--text-muted); font-size: 12px; text-align: center; }
@@ -303,8 +310,8 @@
       <div class="subtitle">Gemma 4B + SD 1.5 — all in browser &nbsp;|&nbsp; v1.0 Jonathan Rothberg 2026</div>
     </div>
     <div class="header-actions">
-      <button id="btn-save" title="Save game to browser storage">Save</button>
-      <button id="btn-export" title="Download adventure as JSON file">Export</button>
+      <button id="btn-save" title="Save world bible and current progress to this browser (localStorage)">Save game</button>
+      <button id="btn-export" title="Download world bible only as JSON (no inventory or progress)—share or edit the setting">Export World</button>
       <button id="btn-new-adventure" title="Start a different adventure">New Adventure</button>
     </div>
   </header>
@@ -360,6 +367,14 @@
     const IMG_STEPS = 20;
     const IMG_GUIDANCE = 7.5;
     const IMAGE_THEME = "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere";
+
+    // SD 1.5 rules (simple model, ~77 CLIP tokens): few concrete subjects, one composition hint, no contradictions.
+    // See composeImagePromptForSD() — we cap phrases, lead with "wide shot", strip other-room names from LLM mood.
+    const SD_COMPOSITION_HINT = "wide establishing shot, full scene";
+    const SD_MAX_KEY_PHRASES = 4;
+    const SD_MOOD_MAX_CHARS = 44;
+    const SD_STYLE_MAX_CHARS = 28;
+    const SD_PROMPT_MAX_CHARS = 195;
 
     // Local models: when running on localhost, check for downloaded models in /local_models/
     // Download with: python3 -c "from huggingface_hub import snapshot_download; ..."
@@ -605,7 +620,7 @@
       '  set_context:"summary" - YOUR MEMORY of what happened\n' +
       '  set_flag:{"name":"x","value":true} - track puzzle states\n' +
       '  add_note:"text" - quest log entry\n' +
-      '  images:["scene description"] - REQUIRED every turn\n\n' +
+      '  images:["this room only, 6 words max"] - no other room names; engine adds items/NPCs for SD\n\n' +
 
       "EXAMPLE:\n" +
       "You enter a dark chamber. Water drips from stalactites. A rusty torch lies on the ground.\n\n" +
@@ -621,6 +636,8 @@
       "- Use connect when entering a NEW room\n" +
       "- ONLY move to rooms listed in current_exits or create new connected rooms\n" +
       "- Update set_context every turn\n" +
+      "- When a room blocker is cleared (door unlocked, guard fled, etc.): set_flag {\"name\":\"ROOM_unblocked\",\"value\":true} (ROOM = room name with spaces replaced by underscores)\n" +
+      "- When a monster is defeated or flees: set_flag {\"name\":\"MONSTER_defeated\",\"value\":true} (MONSTER = monster name with spaces replaced by underscores)\n" +
       "- Use double quotes, no trailing commas in JSON\n";
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1309,7 +1326,9 @@
         if (loc.name.toLowerCase() === locLower) {
           if (loc.description) cues.push(`Room: ${loc.description}`);
           if (Array.isArray(loc.scenery) && loc.scenery.length) cues.push(`Scenery: ${loc.scenery.join(", ")}`);
-          if (loc.blocked_by) cues.push(`Blocked: ${loc.blocked_by}`);
+          // Only inject blocked_by if the corresponding _unblocked flag has NOT been set
+          const ubKey = loc.name.replace(/[^a-zA-Z0-9]+/g, "_") + "_unblocked";
+          if (loc.blocked_by && !s.gameFlags[ubKey]) cues.push(`Blocked: ${loc.blocked_by}`);
           break;
         }
       }
@@ -1320,7 +1339,9 @@
       }
       for (const mon of (activeWorldBible.monsters || [])) {
         if (mon.location && mon.location.toLowerCase() === locLower) {
-          cues.push(`Monster: ${mon.name}${mon.weakness ? " weakness: " + mon.weakness : ""}`);
+          // Only inject monster cue if the corresponding _defeated flag has NOT been set
+          const mKey = mon.name.replace(/[^a-zA-Z0-9]+/g, "_") + "_defeated";
+          if (!s.gameFlags[mKey]) cues.push(`Monster: ${mon.name}${mon.weakness ? " weakness: " + mon.weakness : ""}`);
         }
       }
       for (const riddle of (activeWorldBible.riddles || [])) {
@@ -1516,11 +1537,9 @@
       }
     }
 
-    /** Generate an image with SD 1.5. Returns blob URL or null. */
-    async function generateSceneImage(prompt, onStatus) {
+    /** Generate an image with SD 1.5. `fullPrompt` is the complete string sent to CLIP (caller builds it). */
+    async function generateSceneImage(fullPrompt, onStatus) {
       if (!imgClient || !imgReady) return null;
-      const artTheme = activeWorldBible.global_theme || activeWorldBible.theme || IMAGE_THEME;
-      const fullPrompt = `${prompt}. Art style: ${artTheme}`;
       const seed = Math.floor(Math.random() * 2147483647);
       if (onStatus) onStatus("Generating scene…");
       try {
@@ -1880,35 +1899,114 @@
       generateAndShowImage(imagePrompts);
     }
 
+    /** Truncate LLM image text at clause boundary (4B rambles; SD 1.5 needs a short tail). */
+    function truncateImageMood(text, maxChars) {
+      if (!text) return "";
+      const t = text.trim();
+      const breakAt = (s, i) => {
+        const slice = s.slice(0, i);
+        const c = slice.lastIndexOf(",");
+        const p = slice.lastIndexOf(".");
+        const cut = Math.max(c, p);
+        return cut > 10 ? slice.slice(0, cut).trim() : slice.trim();
+      };
+      if (t.length <= maxChars) return t;
+      return breakAt(t, maxChars);
+    }
+
+    /** Map NPC title to a short visual cue (SD 1.5 handles concrete words better than proper names alone). */
+    function npcSdCue(name) {
+      const n = String(name || "").toLowerCase();
+      if (n.includes("hermit")) return "old hermit, full figure";
+      if (n.includes("spirit")) return "ghostly spirit figure";
+      if (n.includes("troll")) return "large cave troll";
+      return String(name || "");
+    }
+
+    /** Drop LLM mood clauses that name other rooms (4B often lists exits in the image string). */
+    function filterMoodOtherRooms(mood, currentRoom, wb) {
+      const others = (wb?.locations || []).map((l) => l.name).filter((n) => n && n !== currentRoom);
+      return mood
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .filter((seg) => {
+          const sl = seg.toLowerCase();
+          return !others.some((o) => sl.includes(o.toLowerCase()));
+        })
+        .join(", ");
+    }
+
+    /** Remove mood clauses whose long words already appear in the keys string (avoid campfire vs dead campfire clash). */
+    function stripMoodRedundantWithKeys(mood, keysLower) {
+      return mood
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .filter((seg) => {
+          const words = seg
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, " ")
+            .split(/\s+/)
+            .filter((w) => w.length > 3);
+          return !words.some((w) => keysLower.includes(w));
+        })
+        .join(", ");
+    }
+
+    /** One short style token; avoid repeating "glow/crystal" if keys+mood already saturated with light words. */
+    function sdShortStyle(theme, coreLower) {
+      let s = (theme || IMAGE_THEME || "dark fantasy").split(",")[0].trim().toLowerCase();
+      if (s.length > SD_STYLE_MAX_CHARS) s = s.slice(0, SD_STYLE_MAX_CHARS).trim();
+      if ((coreLower.includes("glow") || coreLower.includes("mushroom")) && (s.includes("glow") || s.includes("crystal")))
+        s = "dark fantasy painting";
+      if (!s) s = "dark fantasy painting";
+      return s;
+    }
+
     /**
-     * Build a concise SD 1.5 prompt (~50-75 tokens).
-     * Uses room description as base, then appends only objects/NPCs NOT already mentioned.
+     * Build a short SD 1.5 prompt: composition hint, ≤4 subject phrases, tiny mood, tiny style.
+     * SD 1.5 ignores extra concepts; too many = macro crops or random picks.
      */
-    function buildImagePrompt(room, llmPrompt) {
-      const wbLoc = (activeWorldBible.locations || []).find(l => l.name === room);
+    function composeImagePromptForSD(room, llmPrompt) {
+      const wb = activeWorldBible;
+      const wbLoc = (wb.locations || []).find((l) => l.name === room);
+      const items = (stateMgr.state.roomItems[room] || []).slice(0, 2);
+      const npcRow = (wb.npcs || []).filter((n) => n.location === room).slice(0, 1);
+      const monRow = (wb.monsters || []).filter((m) => m.location === room).slice(0, 1);
+      const sceneryOne = (wbLoc?.scenery || []).slice(0, 1);
 
-      // Collect all visible elements
-      const roomItems = stateMgr.state.roomItems[room] || [];
-      const scenery = (wbLoc?.scenery || []).slice(0, 3);
-      const npcs = (activeWorldBible.npcs || []).filter(n => n.location === room).map(n => n.name);
-      const monsters = (activeWorldBible.monsters || []).filter(m => m.location === room).map(m => m.name);
+      const keyParts = [];
+      for (const it of items) keyParts.push(String(it));
+      for (const n of npcRow) keyParts.push(npcSdCue(n.name));
+      for (const m of monRow) keyParts.push(String(m.name));
+      for (const sc of sceneryOne) keyParts.push(String(sc));
 
-      // If no LLM prompt, build entirely from world bible
-      if (!llmPrompt) {
-        const desc = wbLoc?.description || room.toLowerCase();
-        const parts = [desc, ...npcs, ...monsters, ...roomItems, ...scenery];
-        return parts.join(", ");
+      const keysPrefix = keyParts.slice(0, SD_MAX_KEY_PHRASES).join(", ");
+      const keysLower = keysPrefix.toLowerCase();
+
+      let mood = llmPrompt
+        ? truncateImageMood(llmPrompt, SD_MOOD_MAX_CHARS + 24)
+        : truncateImageMood(wbLoc?.description || `${room}`, SD_MOOD_MAX_CHARS + 24);
+      mood = filterMoodOtherRooms(mood, room, wb);
+      mood = stripMoodRedundantWithKeys(mood, keysLower);
+      mood = truncateImageMood(mood, SD_MOOD_MAX_CHARS);
+
+      const coreForStyle = `${keysPrefix} ${mood}`.toLowerCase();
+      const style = sdShortStyle(wb.global_theme || wb.theme, coreForStyle);
+
+      let full = `${SD_COMPOSITION_HINT}, ${keysPrefix}`;
+      if (mood) full += `. ${mood}`;
+      full += `. ${style}`;
+      if (full.length > SD_PROMPT_MAX_CHARS) {
+        mood = truncateImageMood(mood, 20);
+        full = `${SD_COMPOSITION_HINT}, ${keysPrefix}`;
+        if (mood) full += `. ${mood}`;
+        full += `. ${style}`;
+        if (full.length > SD_PROMPT_MAX_CHARS) full = full.slice(0, SD_PROMPT_MAX_CHARS).trim();
       }
 
-      // Deduplicate: only append keywords the LLM didn't already mention
-      const baseLower = llmPrompt.toLowerCase();
-      const missing = [];
-      for (const word of [...npcs, ...monsters, ...roomItems, ...scenery]) {
-        const key = word.toLowerCase().split(" ").pop(); // match on last word ("Old Hermit" → "hermit")
-        if (!baseLower.includes(key)) missing.push(word);
-      }
-
-      return missing.length ? `${llmPrompt}, ${missing.join(", ")}` : llmPrompt;
+      return { full, keysPrefix, mood, style, llmRaw: llmPrompt };
     }
 
     /** Pick best image prompt and generate / show, with room caching. */
@@ -1924,18 +2022,18 @@
       }
 
       const llmPrompt = imagePrompts.length ? imagePrompts[0] : null;
-      const prompt = buildImagePrompt(room, llmPrompt);
+      const { full, keysPrefix, mood, style, llmRaw } = composeImagePromptForSD(room, llmPrompt);
 
-      // Debug: show exactly what SD 1.5 receives
-      const artTheme = activeWorldBible.global_theme || activeWorldBible.theme || IMAGE_THEME;
       setDebug([
-        `IMG → SD 1.5:`,
-        `  LLM scene: ${llmPrompt || "(none — using world bible)"}`,
-        `  SD prompt: ${prompt}`,
-        `  art theme: ${artTheme}`
+        `IMG → SD 1.5 (wide shot, ≤${SD_MAX_KEY_PHRASES} subjects, short):`,
+        `  LLM raw: ${llmRaw || "(none)"}`,
+        `  keys:    ${keysPrefix || "(none)"}`,
+        `  mood:    ${mood || "(stripped / none)"}`,
+        `  style:   ${style}`,
+        `  → SD:    ${full}`
       ]);
 
-      const url = await generateSceneImage(prompt, setImgStatus);
+      const url = await generateSceneImage(full, setImgStatus);
       if (url) {
         stateMgr.addRoomImage(room, url);
         showSceneImage(url);
@@ -2187,11 +2285,11 @@
       }
     });
 
-    // ── In-game: Export button ──
+    // ── In-game: Export World (world bible JSON only; use Save game for progress in this browser) ──
     $("btn-export").addEventListener("click", () => {
       try {
-        exportAdventureJSON();
-        appendTurn(null, "Adventure exported as JSON file.");
+        exportWorldBibleOnlyJSON();
+        appendTurn(null, "World bible exported as JSON file (no saved progress in file).");
       } catch (e) {
         appendTurn(null, `Export failed: ${e.message}`);
       }
