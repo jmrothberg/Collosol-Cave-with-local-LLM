@@ -238,6 +238,13 @@
     }
     .pick-card label.file-label:hover { border-color: var(--accent); color: var(--accent); }
     .pick-card input[type="file"] { display: none; }
+    .pick-card label.ollama-check {
+      display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; cursor: pointer;
+      font-size: 12px; color: var(--text-muted); line-height: 1.4;
+    }
+    .pick-card label.ollama-check input[type="checkbox"] { width: auto; margin: 2px 0 0 0; flex-shrink: 0; }
+    .pick-card .ollama-fields { margin-top: 6px; display: none; }
+    .pick-card .ollama-fields.visible { display: block; }
     #import-file-name { color: var(--text-muted); font-size: 11px; margin-left: 8px; }
     /* ── Header action buttons ── */
     .header-actions { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -281,6 +288,14 @@
             <option value="">-- Pick a preset theme --</option>
           </select>
           <textarea id="custom-theme" placeholder="Or describe your own adventure theme...&#10;e.g. A haunted Victorian mansion with ghosts, secret passages, and a missing heirloom."></textarea>
+          <label class="ollama-check" for="use-ollama-worldgen">
+            <input type="checkbox" id="use-ollama-worldgen" />
+            <span>Use a local Ollama model to generate the world bible (in-browser Gemma still runs the game).</span>
+          </label>
+          <div class="ollama-fields" id="ollama-fields">
+            <input type="text" id="ollama-base" value="http://127.0.0.1:11434" placeholder="Ollama API URL (default port 11434)" title="Ollama server base URL, no trailing slash" />
+            <input type="text" id="ollama-model" placeholder="Ollama model name, e.g. llama3.2, mistral, qwen2.5" title="Must be pulled in Ollama already (ollama pull …)" />
+          </div>
         </div>
       </div>
 
@@ -547,6 +562,10 @@
 
     // Active world bible — swapped when generating or loading a different adventure
     let activeWorldBible = DEFAULT_WORLD_BIBLE;
+
+    // LLM-debug: world provenance + generation step log (shown in Debug panel before Turn 0).
+    let lastWorldBibleSource = "default_builtin";
+    let pendingWorldGenDebug = null;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PRESET THEMES — mirrored from Python engine
@@ -870,6 +889,145 @@
       return text;
     }
 
+    /** Split long strings for the debug panel (avoids one huge line). */
+    function appendDebugChunks(genDebugArr, prefix, text, maxTotal = 12000, chunkSize = 900) {
+      if (!genDebugArr || text == null) return;
+      const s = String(text);
+      const t = s.length > maxTotal ? s.slice(0, maxTotal) + `\n… [truncated, total ${s.length} chars]` : s;
+      genDebugArr.push(`${prefix} (${s.length} chars logged as ${t.length})`);
+      for (let i = 0; i < t.length; i += chunkSize) {
+        genDebugArr.push(`${prefix} § ${t.slice(i, i + chunkSize)}`);
+      }
+    }
+
+    /** Normalize assistant text from Ollama /api/chat JSON (models differ; some leave message.content empty). */
+    function ollamaExtractAssistantText(data) {
+      if (!data || typeof data !== "object") return "";
+      const msg = data.message;
+      if (!msg) return typeof data.response === "string" ? data.response : "";
+      if (typeof msg.content === "string" && msg.content.length) return msg.content;
+      if (Array.isArray(msg.content)) {
+        return msg.content.map((p) => (p && typeof p === "object" && p.text) ? p.text : "").join("");
+      }
+      if (typeof msg.thinking === "string" && msg.thinking.length) return msg.thinking;
+      return "";
+    }
+
+    /**
+     * World-bible generation via local Ollama.
+     * Retries if chat returns 0 chars (common with some Gemma/Llama builds + system role).
+     */
+    async function runOllamaGeneration(baseUrl, model, systemMsg, userMsg, maxTokens, temperature, onChunk, genDebugArr, ollamaOpts) {
+      const base = (baseUrl || "").trim().replace(/\/+$/, "");
+      const m = (model || "").trim();
+      if (!base) throw new Error("Ollama base URL is empty");
+      if (!m) throw new Error("Ollama model name is required (e.g. llama3.2)");
+      const jsonMode = ollamaOpts && ollamaOpts.jsonMode === true;
+      const dlog = (line) => {
+        if (genDebugArr) genDebugArr.push(`[Ollama API] ${line}`);
+      };
+
+      async function postJson(path, bodyObj, label) {
+        const url = `${base}${path}`;
+        dlog(`${label} POST ${url}`);
+        let res;
+        try {
+          res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bodyObj),
+          });
+        } catch (e) {
+          throw new Error(
+            `Cannot reach Ollama at ${base}. Is ollama running? CORS: set OLLAMA_ORIGINS to this page's origin. ${e.message}`
+          );
+        }
+        const resText = await res.text();
+        dlog(`${label} HTTP ${res.status} bodyLen=${resText.length}`);
+        if (!res.ok) {
+          appendDebugChunks(genDebugArr, "[Ollama API] error body", resText, 8000);
+          throw new Error(`Ollama HTTP ${res.status}: ${resText.slice(0, 500)}`);
+        }
+        let data;
+        try {
+          data = JSON.parse(resText);
+        } catch (pe) {
+          appendDebugChunks(genDebugArr, "[Ollama API] non-JSON body", resText, 8000);
+          throw new Error(`Ollama response not JSON (${label}): ${pe.message}`);
+        }
+        if (data.error) {
+          dlog(`${label} error field: ${data.error}`);
+          throw new Error(`Ollama: ${data.error}`);
+        }
+        return { data, resText, label };
+      }
+
+      const options = { temperature, num_predict: maxTokens };
+
+      async function tryChat(messages, label) {
+        const body = {
+          model: m,
+          messages,
+          stream: false,
+          options,
+        };
+        if (jsonMode) body.format = "json";
+        const { data, resText, label: L } = await postJson("/api/chat", body, label);
+        let out = ollamaExtractAssistantText(data);
+        dlog(`${L} format=${jsonMode ? "json" : "none"} done_reason=${data.done_reason ?? "?"} topKeys=${Object.keys(data).join(",")} contentLen=${out.length} eval_count=${data.eval_count ?? "?"} prompt_eval_count=${data.prompt_eval_count ?? "?"} num_predict=${maxTokens} done=${data.done}`);
+        if (data.done_reason === "length") {
+          dlog(`${L} WARNING: stopped at token limit (num_predict=${maxTokens}) — increase pass token budget or shorten prompt`);
+        }
+        if (!out.length) {
+          dlog(`${L} empty assistant text — JSON preview: ${JSON.stringify(data).slice(0, 2000)}`);
+          appendDebugChunks(genDebugArr, `[Ollama API] ${L} full JSON`, resText, 10000);
+        }
+        return out;
+      }
+
+      async function tryGenerate(label) {
+        const prompt = `SYSTEM:\n${systemMsg}\n\nUSER:\n${userMsg}`;
+        const genBody = {
+          model: m,
+          prompt,
+          stream: false,
+          options,
+        };
+        if (jsonMode) genBody.format = "json";
+        const { data, resText, label: L } = await postJson("/api/generate", genBody, label);
+        const out = typeof data.response === "string" ? data.response : "";
+        dlog(`${L} responseLen=${out.length} eval_count=${data.eval_count ?? "?"}`);
+        if (!out.length) {
+          dlog(`${L} empty — JSON preview: ${JSON.stringify(data).slice(0, 2000)}`);
+          appendDebugChunks(genDebugArr, `[Ollama API] ${L} full JSON`, resText, 10000);
+        }
+        return out;
+      }
+
+      let out = await tryChat(
+        [{ role: "system", content: systemMsg }, { role: "user", content: userMsg }],
+        "chat(system+user)"
+      );
+      if (!out.length) {
+        dlog("retry chat(user-only): merged system+user into one user message (fixes empty content on some models)");
+        const merged = `Follow the system instructions, then answer the user request.\n\nSYSTEM INSTRUCTIONS:\n${systemMsg}\n\n---\n\nUSER REQUEST:\n${userMsg}`;
+        out = await tryChat([{ role: "user", content: merged }], "chat(user-only)");
+      }
+      if (!out.length) {
+        dlog("retry /api/generate: same prompt as one block");
+        out = await tryGenerate("generate");
+      }
+      if (!out.length) {
+        throw new Error(
+          "Ollama returned empty text after chat(system+user), chat(user-only), and /api/generate. " +
+          "Verify the model tag with `ollama list`, run `ollama run " + m + "` in a terminal to confirm it speaks, " +
+          "and read [Ollama API] lines above for raw JSON."
+        );
+      }
+      if (onChunk) onChunk(out);
+      return out;
+    }
+
     /** Helper: extract first valid JSON object from LLM output. */
     function extractFirstJson(raw) {
       const cleaned = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
@@ -881,15 +1039,69 @@
       return null;
     }
 
-    async function generateWorldBible(theme, onStatus) {
-      if (!llmPipe) throw new Error("LLM not loaded yet");
+    /** Map skeleton from pass 1: try several strategies (truncated JSON, prose with embedded object). */
+    function extractMapSkeleton(raw, genDebugArr) {
+      if (raw == null || !String(raw).trim()) return null;
+      let cut = String(raw).trim();
+      const brace = cut.indexOf("{");
+      if (brace > 0) {
+        cut = cut.slice(brace);
+        if (genDebugArr) genDebugArr.push(`[world-gen detail] skeleton: stripped ${brace} chars before first {`);
+      }
+      let sk = extractFirstJson(cut);
+      if (sk && Array.isArray(sk.rooms) && sk.rooms.length) return sk;
+      const all = extractJsonFromText(cut);
+      for (const obj of all) {
+        if (obj && Array.isArray(obj.rooms) && obj.rooms.length) return obj;
+      }
+      if (genDebugArr) genDebugArr.push(`[world-gen detail] skeleton: no object with .rooms[] (${all.length} JSON object(s) found)`);
+      return sk;
+    }
+
+    async function generateWorldBible(theme, onStatus, genOpts) {
+      const useOllama = genOpts && genOpts.useOllama === true;
+      if (!useOllama && !llmPipe) throw new Error("LLM not loaded yet");
+
+      const genDebugArr = genOpts && genOpts.genDebug;
+      // Prefix every load-overlay line so the latest status still shows Ollama vs browser (text replaces each update).
+      const statusTag = useOllama
+        ? `[Ollama · ${(genOpts.ollamaModel || "").trim() || "?"}] `
+        : `[Gemma world-gen] `;
+      const slog = (msg) => {
+        const line = statusTag + msg;
+        if (genDebugArr) genDebugArr.push(line);
+        if (onStatus) onStatus(line);
+      };
+
+      const runGen = async (systemMsg, userMsg, maxTokens, temperature, onChunk) => {
+        if (useOllama) {
+          return runOllamaGeneration(
+            genOpts.ollamaBase, genOpts.ollamaModel, systemMsg, userMsg, maxTokens, temperature, onChunk,
+            genDebugArr,
+            { jsonMode: true }
+          );
+        }
+        return runLlmGeneration(systemMsg, userMsg, maxTokens, temperature, onChunk);
+      };
 
       const sysMsg = "You are a game designer. Output ONLY valid JSON. No markdown, no commentary.";
+      const forbidStockNames =
+        "Do NOT reuse stock names from the built-in sample cave (e.g. Cave Mouth, Mushroom Grotto, Dark Passage, Underground River, Ancient Forge, Dragon's Vault, Starfire Gem, Old Hermit, River Troll, Stone Dragon) unless the user's theme explicitly names them. Invent fresh proper nouns, NPCs, items, and a distinct quest that fit THIS theme.";
+
+      slog(`Theme (start): ${theme.slice(0, 220)}${theme.length > 220 ? "…" : ""}`);
+      if (useOllama) slog(`API ${genOpts.ollamaBase}/api/chat (Ollama uses format=json + higher num_predict than browser)`);
+
+      // Ollama: num_predict 800 often truncates map JSON (done_reason=length); browser Gemma keeps lower caps.
+      const p1Tok = useOllama ? 4096 : 800;
+      const p1RetryTok = useOllama ? 4096 : 600;
+      const p2Tok = useOllama ? 8192 : 1200;
+      const p2RetryTok = useOllama ? 8192 : 1000;
 
       // ── PASS 1: Map Skeleton (rooms + connections) ──
-      if (onStatus) onStatus("Pass 1/2: Generating map layout...");
+      slog("Pass 1/2: Generating map layout...");
       const pass1Prompt =
         `Create a 5-6 room map for this adventure theme: ${theme}\n\n` +
+        `${forbidStockNames}\n\n` +
         `Output JSON with EXACTLY these fields:\n` +
         `{"rooms":[{"name":"Room Name","desc":"one sentence","exits":["OtherRoom"]}],` +
         `"start":"first room name","art_style":"short visual style for this theme"}\n\n` +
@@ -897,25 +1109,40 @@
         `- Each room connects to 1-3 other rooms via exits\n` +
         `- Exits must be bidirectional (if A links to B, B links to A)\n` +
         `- Rooms should form a linear path with optional branches\n` +
-        `- First room is safe, last room holds the goal\n\n` +
+        `- First room is safe, last room holds the goal\n` +
+        `- Keep each room "desc" under 120 characters so the JSON fits in one reply\n\n` +
         `Output ONLY the JSON object.`;
 
-      let pass1Text = await runLlmGeneration(sysMsg, pass1Prompt, 800, 0.5,
-        (t) => { if (onStatus) onStatus(`Pass 1/2: map layout... ${t.length} chars`); });
+      let pass1Text = await runGen(sysMsg, pass1Prompt, p1Tok, 0.5,
+        (t) => { slog(`Pass 1/2: map layout... ${t.length} chars`); });
 
-      let skeleton = extractFirstJson(pass1Text);
+      let skeleton = extractMapSkeleton(pass1Text, genDebugArr);
+      slog(`pass1 raw preview: ${pass1Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass1Text.length > 200 ? "…" : ""}`);
+      if (skeleton && Array.isArray(skeleton.rooms)) slog(`pass1 parsed rooms count: ${skeleton.rooms.length}`);
 
       // Retry pass 1 with even simpler prompt if failed
       if (!skeleton || !Array.isArray(skeleton.rooms) || skeleton.rooms.length < 3) {
-        if (onStatus) onStatus("Pass 1 retry: simpler map prompt...");
-        const retry1 = `Create 5 rooms for: ${theme}\nJSON format: {"rooms":[{"name":"...","desc":"...","exits":["..."]}],"start":"...","art_style":"..."}\nValid JSON only.`;
-        pass1Text = await runLlmGeneration(sysMsg, retry1, 600, 0.4,
-          (t) => { if (onStatus) onStatus(`Pass 1 retry... ${t.length} chars`); });
-        skeleton = extractFirstJson(pass1Text);
+        slog("Pass 1 retry: simpler map prompt...");
+        const retry1 = `Create exactly 5 rooms for: ${theme}\n${forbidStockNames}\nReturn compact JSON only (Ollama JSON mode). Schema: {"rooms":[{"name":"","desc":"","exits":[]}],"start":"","art_style":""}. Short descs. No bullets, no markdown.`;
+        pass1Text = await runGen(sysMsg, retry1, p1RetryTok, 0.4,
+          (t) => { slog(`Pass 1 retry... ${t.length} chars`); });
+        skeleton = extractMapSkeleton(pass1Text, genDebugArr);
+        slog(`pass1 (retry) raw preview: ${pass1Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass1Text.length > 200 ? "…" : ""}`);
+        if (skeleton && Array.isArray(skeleton.rooms)) slog(`pass1 (retry) parsed rooms count: ${skeleton.rooms.length}`);
+      }
+
+      // Third try: minimal instructions (avoids model echoing bullet lists instead of JSON)
+      if (!skeleton || !Array.isArray(skeleton.rooms) || skeleton.rooms.length < 3) {
+        slog("Pass 1 retry 2: minimal JSON map (5 rooms, terse)...");
+        const retry2 = `Theme: ${theme.slice(0, 200)}. JSON object only: {"rooms":[5 rooms with name,desc max 80 chars,exits array],"start":"first room name","art_style":"short"}. Interconnected graph.`;
+        pass1Text = await runGen(sysMsg, retry2, p1RetryTok, 0.35,
+          (t) => { slog(`Pass 1 retry 2... ${t.length} chars`); });
+        skeleton = extractMapSkeleton(pass1Text, genDebugArr);
+        slog(`pass1 (retry2) parsed rooms count: ${skeleton && skeleton.rooms ? skeleton.rooms.length : 0}`);
       }
 
       if (!skeleton || !Array.isArray(skeleton.rooms) || skeleton.rooms.length < 2) {
-        if (onStatus) onStatus("Pass 1 FAILED: could not generate map skeleton");
+        slog("Pass 1 FAILED: could not generate map skeleton");
         throw new Error("Failed to generate map skeleton");
       }
 
@@ -934,12 +1161,16 @@
 
       // Pass 1 summary
       const totalConnections = skeleton.rooms.reduce((n, r) => n + (r.exits?.length || 0), 0);
-      if (onStatus) onStatus(`Pass 1 done: ${skeleton.rooms.length} rooms, ${totalConnections} connections`);
+      slog(`Pass 1 done: ${skeleton.rooms.length} rooms, ${totalConnections} connections`);
+      slog(`pass1 room names: ${skeleton.rooms.map(r => r.name).join(", ")}`);
+      slog(`pass1 art_style: ${skeleton.art_style || "(none)"}`);
 
       // ── PASS 2: Content Population (items, NPCs, puzzles, chain) ──
-      if (onStatus) onStatus("Pass 2/2: Generating gameplay content...");
+      slog("Pass 2/2: Generating gameplay content...");
       const roomList = skeleton.rooms.map(r => `${r.name} (${r.desc})`).join("; ");
       const pass2Prompt =
+        `Theme reminder: ${theme.slice(0, 400)}${theme.length > 400 ? "…" : ""}\n\n` +
+        `${forbidStockNames}\n\n` +
         `Add gameplay to these rooms: ${roomList}\n\n` +
         `Output JSON with ALL these fields:\n` +
         `- objectives: 4 goals in order\n` +
@@ -955,18 +1186,20 @@
         `Place NPCs and items in the rooms listed above. Every item must be useful.\n` +
         `Output ONLY valid JSON.`;
 
-      let pass2Text = await runLlmGeneration(sysMsg, pass2Prompt, 1200, 0.5,
-        (t) => { if (onStatus) onStatus(`Pass 2/2: gameplay content... ${t.length} chars`); });
+      let pass2Text = await runGen(sysMsg, pass2Prompt, p2Tok, 0.5,
+        (t) => { slog(`Pass 2/2: gameplay content... ${t.length} chars`); });
 
       let content = extractFirstJson(pass2Text);
+      slog(`pass2 raw preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
 
       // Retry pass 2 if failed
       if (!content) {
-        if (onStatus) onStatus("Pass 2 retry...");
-        const retry2 = `Add npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition to rooms: ${roomList}\nValid JSON only.`;
-        pass2Text = await runLlmGeneration(sysMsg, retry2, 1000, 0.4,
-          (t) => { if (onStatus) onStatus(`Pass 2 retry... ${t.length} chars`); });
+        slog("Pass 2 retry...");
+        const retry2 = `Theme: ${theme.slice(0, 300)}\n${forbidStockNames}\nAdd npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition to rooms: ${roomList}\nValid JSON only.`;
+        pass2Text = await runGen(sysMsg, retry2, p2RetryTok, 0.4,
+          (t) => { slog(`Pass 2 retry... ${t.length} chars`); });
         content = extractFirstJson(pass2Text);
+        slog(`pass2 (retry) raw preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
       }
 
       // Pass 2 summary
@@ -974,13 +1207,15 @@
         const p2npcs = (content.npcs || []).length;
         const p2items = (content.key_items || []).length;
         const p2chain = (content.puzzle_chain || []).length;
-        if (onStatus) onStatus(`Pass 2 done: ${p2npcs} npcs, ${p2items} items, ${p2chain} chain steps`);
+        slog(`Pass 2 done: ${p2npcs} npcs, ${p2items} items, ${p2chain} chain steps`);
+        const kn = (content.key_items || []).map(k => (typeof k === "object" ? k.name : k)).filter(Boolean);
+        if (kn.length) slog(`pass2 key_items: ${kn.join(", ")}`);
       } else {
-        if (onStatus) onStatus("Pass 2 FAILED: no valid content JSON (using empty defaults)");
+        slog("Pass 2 FAILED: no valid content JSON (using empty defaults)");
       }
 
       // ── MERGE pass 1 + pass 2 into final world bible ──
-      if (onStatus) onStatus("Merging and validating world bible...");
+      slog("Merging and validating world bible...");
 
       const plan = content || {};
 
@@ -1038,7 +1273,8 @@
       const { valid, issues } = validateWorldBible(plan);
       if (!valid) console.warn("[world_bible] Validation issues:", issues);
       const finalSummary = `Final: ${plan.locations.length} rooms, ${plan.key_items.length} items, ${plan.puzzle_chain.length} chain steps`;
-      if (onStatus) onStatus(valid ? `${finalSummary} — valid!` : `${finalSummary} — warnings: ${issues.join("; ")}`);
+      slog(valid ? `${finalSummary} — valid!` : `${finalSummary} — warnings: ${issues.join("; ")}`);
+      slog(`Merged global_theme: ${plan.global_theme || plan.theme || ""}`);
 
       return plan;
     }
@@ -1127,6 +1363,20 @@
       a.href = url;
       const themeName = (activeWorldBible.global_theme || "world").replace(/[^a-z0-9]/gi, "_").slice(0, 30);
       a.download = `world_bible_${themeName}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    // LLM-debug: after Ollama world-gen, save JSON into the user's default Downloads folder (same mechanism as Export World).
+    function downloadWorldBibleToDownloads(wb) {
+      const blob = new Blob([JSON.stringify(wb, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const themeName = (wb.global_theme || wb.theme || "world").replace(/[^a-z0-9]/gi, "_").slice(0, 30);
+      a.download = `world_bible_${themeName}_${Date.now()}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1649,6 +1899,19 @@
     }
     function clearDebug() { $("debug-panel").innerHTML = ""; }
 
+    function worldSourceLabel() {
+      switch (lastWorldBibleSource) {
+        case "default_builtin": return "built-in default cave";
+        case "generated_browser": return "generated (browser Gemma)";
+        case "generated_ollama": return "generated (Ollama)";
+        case "generated_failed_fallback": return "generation failed → built-in default";
+        case "loaded_file": return "imported JSON file";
+        case "loaded_save": return "browser save";
+        case "load_failed_fallback": return "load failed → built-in default";
+        default: return String(lastWorldBibleSource);
+      }
+    }
+
     /** Print a compact world bible summary at the top of the debug panel */
     function debugWorldBible(wb) {
       if (!wb) return;
@@ -1665,7 +1928,7 @@
       const rooms = wb.locations?.length || 0;
       const items = wb.key_items?.length || 0;
       const chain = wb.puzzle_chain?.length || 0;
-      summary.textContent = `World Bible (${rooms} rooms, ${items} items, ${chain}-step chain)`;
+      summary.textContent = `${worldSourceLabel()} — World Bible (${rooms} rooms, ${items} items, ${chain}-step chain)`;
       wrapper.appendChild(summary);
 
       const pre = document.createElement("pre");
@@ -2081,6 +2344,12 @@
       }
     });
 
+    function syncOllamaFieldsVisibility() {
+      $("ollama-fields").classList.toggle("visible", $("use-ollama-worldgen").checked);
+    }
+    $("use-ollama-worldgen").addEventListener("change", syncOllamaFieldsVisibility);
+    syncOllamaFieldsVisibility();
+
     // ── Populate saved adventures list ──
     function refreshSavedList() {
       const listEl = $("saved-list");
@@ -2211,13 +2480,40 @@
           $("btn-start").textContent = "Start Adventure";
           return;
         }
+        const useOllama = $("use-ollama-worldgen").checked;
+        const ollamaBase = $("ollama-base").value.trim() || "http://127.0.0.1:11434";
+        const ollamaModel = $("ollama-model").value.trim();
+        if (useOllama && !ollamaModel) {
+          setLoad({ text: "Ollama: enter a model name (e.g. llama3.2), or turn off the Ollama checkbox." });
+          $("btn-start").disabled = false;
+          $("btn-start").textContent = "Start Adventure";
+          return;
+        }
+        const genDebug = [];
+        const genOpts = { genDebug };
+        if (useOllama) {
+          genOpts.useOllama = true;
+          genOpts.ollamaBase = ollamaBase;
+          genOpts.ollamaModel = ollamaModel;
+        }
         try {
           setLoad({ text: "Generating world bible…" });
-          const wb = await generateWorldBible(theme, (msg) => setLoad({ text: msg }));
+          const wb = await generateWorldBible(theme, (msg) => setLoad({ text: msg }), genOpts);
           activeWorldBible = wb;
           stateMgr.state = createGameState();
+          lastWorldBibleSource = useOllama ? "generated_ollama" : "generated_browser";
+          pendingWorldGenDebug = genDebug;
+          if (useOllama) downloadWorldBibleToDownloads(wb);
         } catch (e) {
-          setLoad({ text: `World bible generation failed: ${e.message}. Using default.` });
+          const msg = (e && e.message) ? e.message : String(e);
+          // Put FAILURE at top of debug block — status lines scroll away; full log may be long.
+          const hint = useOllama
+            ? " Check: model name matches `ollama list`, Ollama is running, OLLAMA_ORIGINS includes this page (e.g. http://localhost:8080)."
+            : " Try a shorter theme, or use Ollama for world-gen if the browser model keeps returning bad JSON.";
+          genDebug.unshift(`FAILURE: ${msg}${hint}`);
+          lastWorldBibleSource = "generated_failed_fallback";
+          pendingWorldGenDebug = genDebug;
+          setLoad({ text: `World bible generation failed: ${msg}. Using default.` });
           activeWorldBible = DEFAULT_WORLD_BIBLE;
           stateMgr.state = createGameState();
           await new Promise(r => setTimeout(r, 2000));
@@ -2228,9 +2524,13 @@
           if (importedFile) {
             const result = await importAdventureJSON(importedFile);
             needsNewStory = !result.hasGameState;
+            lastWorldBibleSource = "loaded_file";
+            pendingWorldGenDebug = ["World bible imported from file — no LLM generation pass."];
           } else if (selectedSaveKey) {
             loadAdventure(selectedSaveKey);
             needsNewStory = false;
+            lastWorldBibleSource = "loaded_save";
+            pendingWorldGenDebug = ["World bible + state loaded from browser save — no generation pass."];
           } else {
             setLoad({ text: "Please select a saved game or import a JSON file." });
             $("btn-start").disabled = false;
@@ -2238,6 +2538,8 @@
             return;
           }
         } catch (e) {
+          lastWorldBibleSource = "load_failed_fallback";
+          pendingWorldGenDebug = [`Load failed: ${e.message}`];
           setLoad({ text: `Load failed: ${e.message}. Using default.` });
           activeWorldBible = DEFAULT_WORLD_BIBLE;
           stateMgr.state = createGameState();
@@ -2248,6 +2550,10 @@
         // "default" — reset to built-in cave adventure
         activeWorldBible = DEFAULT_WORLD_BIBLE;
         stateMgr.state = createGameState();
+        lastWorldBibleSource = "default_builtin";
+        pendingWorldGenDebug = [
+          "Picker: Default Cave Adventure — this is the built-in world (no LLM world-gen). For Tolkien, select Generate New Adventure, choose the preset or paste a theme, then Start.",
+        ];
       }
 
       // 3. Switch to game UI
@@ -2257,12 +2563,20 @@
       if (needsNewStory) {
         $("narrative").innerHTML = "";
         clearDebug();
+        if (pendingWorldGenDebug && pendingWorldGenDebug.length) {
+          setDebug(["── World bible generation / source ──", `active: ${worldSourceLabel()}`, ...pendingWorldGenDebug]);
+          pendingWorldGenDebug = null;
+        }
         debugWorldBible(activeWorldBible);
         await startStory();
       } else {
         // Restored from save — rebuild UI from state
         $("narrative").innerHTML = "";
         clearDebug();
+        if (pendingWorldGenDebug && pendingWorldGenDebug.length) {
+          setDebug(["── World bible generation / source ──", `active: ${worldSourceLabel()}`, ...pendingWorldGenDebug]);
+          pendingWorldGenDebug = null;
+        }
         debugWorldBible(activeWorldBible);
         appendTurn(null, `Adventure resumed. You are in ${stateMgr.state.location}.`);
         updateStatusPanel(stateMgr);

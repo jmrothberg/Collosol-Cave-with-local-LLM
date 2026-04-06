@@ -198,11 +198,13 @@ Win detection uses **`win_condition`** text plus **`game_flags`** / inventory he
 
 The browser version now supports adventure generation, save/load, and preset themes:
 
-- **World Bible Generation**: use the in-browser Gemma 4B to generate a new adventure from a theme description. Pick a preset theme (Tolkien, Star Wars, Colossal Cave, Zork, Myst, Pirate, Cyberpunk) or write your own. Generation takes 30-90 seconds.
+- **World Bible Generation**: use the in-browser Gemma 4B to generate a new adventure from a theme description, or check **Use a local Ollama model** on the “Generate New Adventure” card to run the two-pass world build against your machine’s Ollama API (`http://127.0.0.1:11434` by default). In-browser Gemma still drives narration after the game starts. Pick a preset theme (Tolkien, Star Wars, Colossal Cave, Zork, Myst, Pirate, Cyberpunk) or write your own. Gemma-only generation often takes 30–90 seconds.
+- **Ollama + browser**: the page calls Ollama with `fetch` from your game origin (e.g. `http://localhost:8080`). If the browser blocks the request, allow that origin in Ollama before starting the server, for example: `OLLAMA_ORIGINS=http://localhost:8080 ollama serve` (use your real origin; comma-separate multiple values if needed). Pull the model first (`ollama pull llama3.2`, etc.). While world-gen runs, each line under the progress bar is prefixed **`[Ollama · modelname]`** (or **`[Gemma world-gen]`** if the checkbox is off) so the latest status still shows which backend is active. If Ollama returns **0 characters**, the code retries with a single user message and then **`/api/generate`**; the Debug panel lists **`[Ollama API]`** lines and raw JSON. World-gen uses Ollama’s **`format: json`** and **higher `num_predict`** than the in-browser path so map JSON is not cut off; if you still see **`done_reason=length`**, the model hit the cap—Debug will say so. Use the exact model tag from **`ollama list`** (e.g. `gemma2:9b`); made-up tags like `gemma4:31b` fail unless that model really exists locally. After a successful Ollama world build, the game also downloads a `world_bible_*.json` file to your default **Downloads** folder (same as **Export World**).
 - **Save/Load**: save game state + world bible to browser `localStorage`. Resume later from the adventure picker.
 - **JSON Import/Export**: import a `.json` world bible (like [`default_cave.json`](default_cave.json)) or a full save (world bible + game state) from a file. **Save game** (in the header) stores world bible + progress in this browser only. **Export World** downloads the world bible only—no inventory or flags—so you can share or edit the setting; use **Save game** to keep your place.
 - **Pre-game Adventure Picker**: choose default cave, generate new, or load saved before starting.
 - **In-game buttons**: Save game, Export World, and New Adventure in the header bar.
+- **Debug panel**: open **Debug** to see how the world was chosen (`built-in default` vs `generated` vs import/load). After **Generate New Adventure**, the first block lists each world-gen step (pass 1/2, retries, short raw previews, room names, validation). If you see **`active: generation failed → built-in default`**, the next line in that block is **`FAILURE: …`** with the real error (and a short hint for Ollama vs browser). If your game matches the built-in Starfire Gem cave, you either picked **Default Cave Adventure** or generation failed and the engine fell back to the default bible.
 
 The active world bible is stored in `activeWorldBible` (defaults to `DEFAULT_WORLD_BIBLE`). All game engine functions reference this mutable variable, so swapping it changes the entire adventure.
 
@@ -212,7 +214,7 @@ The browser page is intentionally smaller in a few areas:
 
 - No **MFLUX** / local FLUX paths; images are **only** SD 1.5 via ONNX in the worker.
 - **Advanced directives** from the Python engine (timers, chain reactions, etc.) are not implemented in the browser `applyLlmDirectives`—only the table above.
-- World bible generation uses the **same Gemma 4B** model (vs. a separate heavier model in Python), so generated bibles may be simpler.
+- World bible generation defaults to the **same Gemma 4B** model as gameplay (vs. a separate heavier model in Python), so generated bibles may be simpler unless you use **local Ollama** for the build step.
 
 For full feature parity, run [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py) on Apple Silicon.
 
