@@ -111,7 +111,7 @@
     main.active { display: flex; flex-direction: column; }
     /* ── Narrative ── */
     #narrative {
-      flex: 1; min-height: 220px; max-height: 45vh;
+      flex: 1; min-height: 160px; max-height: 34vh;
       overflow-y: auto;
       padding: 12px 14px;
       background: var(--panel);
@@ -253,7 +253,7 @@
     @media (max-width: 720px) {
       .mid-row { flex-direction: column; }
       .img-panel { width: 100%; min-height: 200px; }
-      #narrative { max-height: 35vh; }
+      #narrative { max-height: 26vh; }
       .adventure-picker { max-width: 100%; }
     }
   </style>
@@ -974,6 +974,11 @@
       }
 
       const options = { temperature, num_predict: maxTokens };
+      // Google-recommended Gemma sampling: top_p 0.95, top_k 64
+      if (ollamaOpts && ollamaOpts.isGemma) {
+        options.top_p = 0.95;
+        options.top_k = 64;
+      }
 
       async function tryChat(messages, label) {
         const body = {
@@ -1089,7 +1094,7 @@
           return runOllamaGeneration(
             genOpts.ollamaBase, genOpts.ollamaModel, systemMsg, userMsg, maxTokens, temperature, onChunk,
             genDebugArr,
-            { jsonMode: true }
+            { jsonMode: true, isGemma: isGemmaOllama }
           );
         }
         return runLlmGeneration(systemMsg, userMsg, maxTokens, temperature, onChunk);
@@ -1108,6 +1113,13 @@
       const p2Tok = useOllama ? 8192 : 1200;
       const p2RetryTok = useOllama ? 8192 : 1000;
 
+      // Gemma models are calibrated for temp 1.0 + top_p 0.95 + top_k 64 (Google recommendation).
+      // Non-Gemma local models generally do better with lower temp for structured JSON.
+      const isGemmaOllama = useOllama && /gemma/i.test(genOpts.ollamaModel || "");
+      const ollamaTemp = isGemmaOllama ? 1.0 : 0.4;
+      const ollamaRetryTemp = isGemmaOllama ? 1.0 : 0.35;
+      if (isGemmaOllama) slog("Detected Gemma model — using temp 1.0 (Google-recommended calibration)");
+
       // ── PASS 1: Map Skeleton (rooms + connections) ──
       slog("Pass 1/2: Generating map layout...");
       const pass1Prompt =
@@ -1124,7 +1136,7 @@
         `- Keep each room "desc" under 120 characters so the JSON fits in one reply\n\n` +
         `Output ONLY the JSON object.`;
 
-      let pass1Text = await runGen(sysMsg, pass1Prompt, p1Tok, 0.5,
+      let pass1Text = await runGen(sysMsg, pass1Prompt, p1Tok, useOllama ? ollamaTemp : 0.5,
         (t) => { slog(`Pass 1/2: map layout... ${t.length} chars`); });
 
       let skeleton = extractMapSkeleton(pass1Text, genDebugArr);
@@ -1135,7 +1147,7 @@
       if (!skeleton || !Array.isArray(skeleton.rooms) || skeleton.rooms.length < 3) {
         slog("Pass 1 retry: simpler map prompt...");
         const retry1 = `Create exactly 5 rooms for: ${theme}\n${forbidStockNames}\nReturn compact JSON only (Ollama JSON mode). Schema: {"rooms":[{"name":"","desc":"","exits":[]}],"start":"","art_style":""}. Short descs. No bullets, no markdown.`;
-        pass1Text = await runGen(sysMsg, retry1, p1RetryTok, 0.4,
+        pass1Text = await runGen(sysMsg, retry1, p1RetryTok, useOllama ? ollamaRetryTemp : 0.4,
           (t) => { slog(`Pass 1 retry... ${t.length} chars`); });
         skeleton = extractMapSkeleton(pass1Text, genDebugArr);
         slog(`pass1 (retry) raw preview: ${pass1Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass1Text.length > 200 ? "…" : ""}`);
@@ -1146,7 +1158,7 @@
       if (!skeleton || !Array.isArray(skeleton.rooms) || skeleton.rooms.length < 3) {
         slog("Pass 1 retry 2: minimal JSON map (5 rooms, terse)...");
         const retry2 = `Theme: ${theme.slice(0, 200)}. JSON object only: {"rooms":[5 rooms with name,desc max 80 chars,exits array],"start":"first room name","art_style":"short"}. Interconnected graph.`;
-        pass1Text = await runGen(sysMsg, retry2, p1RetryTok, 0.35,
+        pass1Text = await runGen(sysMsg, retry2, p1RetryTok, useOllama ? ollamaRetryTemp : 0.35,
           (t) => { slog(`Pass 1 retry 2... ${t.length} chars`); });
         skeleton = extractMapSkeleton(pass1Text, genDebugArr);
         slog(`pass1 (retry2) parsed rooms count: ${skeleton && skeleton.rooms ? skeleton.rooms.length : 0}`);
@@ -1176,55 +1188,155 @@
       slog(`pass1 room names: ${skeleton.rooms.map(r => r.name).join(", ")}`);
       slog(`pass1 art_style: ${skeleton.art_style || "(none)"}`);
 
-      // ── PASS 2: Content Population (items, NPCs, puzzles, chain) ──
-      slog("Pass 2/2: Generating gameplay content...");
+      // ── PASS 2: Content Population ──
+      // Ollama: split into 2a (inhabitants + items) and 2b (chain + arc) with concrete examples.
+      // Browser Gemma: single pass (smaller model, lower token budget, works OK for simpler bibles).
       const roomList = skeleton.rooms.map(r => `${r.name} (${r.desc})`).join("; ");
-      const pass2Prompt =
-        `Theme reminder: ${theme.slice(0, 400)}${theme.length > 400 ? "…" : ""}\n\n` +
-        `${forbidStockNames}\n\n` +
-        `Add gameplay to these rooms: ${roomList}\n\n` +
-        `Output JSON with ALL these fields:\n` +
-        `- objectives: 4 goals in order\n` +
-        `- npcs: 2 characters (name, location, personality, provides)\n` +
-        `- monsters: 2 enemies (name, location, difficulty, weakness)\n` +
-        `- riddles: 1-2 puzzles (location, hint, solution, reward)\n` +
-        `- key_items: 6 items (name, purpose)\n` +
-        `- item_locations: {"item name":"which room"} for each item\n` +
-        `- puzzle_chain: ordered steps [{step:1,action:"do X",gives:"item",unlocks:"room or null"}]\n` +
-        `- mechanics: 2-3 rules (action, effect, location)\n` +
-        `- main_arc: 1 sentence story\n` +
-        `- win_condition: how to win\n` +
-        `- author_walkthrough: plain text, 8-20 numbered lines; full solution in order (puzzle_chain + win); must match puzzle_chain exactly.\n\n` +
-        `SOLVABILITY (required): puzzle_chain must be logically completable in order — every "gives" item obtainable when that step applies, NPC/monster/item_locations consistent with rooms, win_condition achievable. Fix contradictions before output.\n\n` +
-        `Place NPCs and items in the rooms listed above. Every item must be useful.\n` +
-        `Output ONLY valid JSON.`;
+      const firstRoom = skeleton.rooms[0].name;
+      const lastRoom = skeleton.rooms[skeleton.rooms.length - 1].name;
+      let content = null;
 
-      let pass2Text = await runGen(sysMsg, pass2Prompt, p2Tok, 0.5,
-        (t) => { slog(`Pass 2/2: gameplay content... ${t.length} chars`); });
+      if (useOllama) {
+        // ── PASS 2a: NPCs, monsters, items, item_locations ──
+        slog("Pass 2a/3: Generating inhabitants & items (Ollama)...");
+        const p2aPrompt =
+          `Theme: ${theme.slice(0, 300)}\nRooms: ${roomList}\n\n` +
+          `Output ONE JSON object with EXACTLY these 4 fields:\n` +
+          `1. "npcs": array of 2 NPCs [{name, location (one of the rooms above), personality, provides}]\n` +
+          `2. "monsters": array of 2 monsters [{name, location, difficulty, weakness}]\n` +
+          `3. "key_items": array of 6 items [{name, purpose}] — each item is needed to solve a puzzle\n` +
+          `4. "item_locations": object mapping each item name to the room where it is found or obtained\n\n` +
+          `EXAMPLE (do NOT copy these names — invent new ones for the theme):\n` +
+          `{"npcs":[{"name":"Sage Alara","location":"${firstRoom}","personality":"wise but cryptic","provides":"gives a crystal lens and warns of the shadow beast"}],` +
+          `"monsters":[{"name":"Shadow Beast","location":"${lastRoom}","difficulty":"hard","weakness":"blinded by crystal lens light"}],` +
+          `"key_items":[{"name":"crystal lens","purpose":"focuses light to blind the Shadow Beast"}],` +
+          `"item_locations":{"crystal lens":"${firstRoom}"}}\n\n` +
+          `Place NPCs in early/mid rooms and monsters in mid/late rooms. Every item must be useful.\n` +
+          `Output ONLY the JSON object, nothing else.`;
+        let p2aText = await runGen(sysMsg, p2aPrompt, p2Tok, ollamaTemp,
+          (t) => { slog(`Pass 2a: inhabitants... ${t.length} chars`); });
+        let inhabitants = extractFirstJson(p2aText);
+        slog(`pass2a raw preview: ${p2aText.replace(/\s+/g, " ").trim().slice(0, 300)}${p2aText.length > 300 ? "…" : ""}`);
+        if (!inhabitants || !Array.isArray(inhabitants.key_items) || inhabitants.key_items.length < 2) {
+          slog("Pass 2a retry...");
+          p2aText = await runGen(sysMsg,
+            `Theme: ${theme.slice(0, 200)}\nRooms: ${roomList}\nJSON only. Fields: npcs (2 objects), monsters (2 objects), key_items (6 objects with name+purpose), item_locations (object).`,
+            p2RetryTok, ollamaRetryTemp,
+            (t) => { slog(`Pass 2a retry... ${t.length} chars`); });
+          inhabitants = extractFirstJson(p2aText);
+          slog(`pass2a (retry) preview: ${p2aText.replace(/\s+/g, " ").trim().slice(0, 200)}${p2aText.length > 200 ? "…" : ""}`);
+        }
+        if (!inhabitants) inhabitants = {};
+        const inhNpcs = (inhabitants.npcs || []).length;
+        const inhItems = (inhabitants.key_items || []).length;
+        slog(`Pass 2a done: ${inhNpcs} npcs, ${(inhabitants.monsters || []).length} monsters, ${inhItems} items`);
 
-      let content = extractFirstJson(pass2Text);
-      slog(`pass2 raw preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
+        // ── PASS 2b: puzzle_chain, objectives, mechanics, arc, win, walkthrough ──
+        slog("Pass 2b/3: Generating puzzle chain & arc (Ollama)...");
+        const itemNames = (inhabitants.key_items || []).map(k => (typeof k === "object" ? k.name : String(k))).filter(Boolean);
+        const npcNames = (inhabitants.npcs || []).map(n => n.name).filter(Boolean);
+        const monNames = (inhabitants.monsters || []).map(m => m.name).filter(Boolean);
+        const p2bPrompt =
+          `Theme: ${theme.slice(0, 200)}\n` +
+          `Rooms (in order): ${skeleton.rooms.map(r => r.name).join(" → ")}\n` +
+          `NPCs: ${npcNames.join(", ") || "none"}\n` +
+          `Monsters: ${monNames.join(", ") || "none"}\n` +
+          `Items available: ${itemNames.join(", ") || "none"}\n\n` +
+          `Output ONE JSON object with EXACTLY these 7 fields:\n` +
+          `1. "objectives": array of 4 goal strings in order\n` +
+          `2. "puzzle_chain": array of 6-8 steps [{step (number), action (string), gives (item name or null), unlocks (room name or "win" or null)}]\n` +
+          `3. "mechanics": array of 2-3 rules [{action, effect, location}]\n` +
+          `4. "riddles": array of 1-2 puzzles [{location, hint, solution, reward}]\n` +
+          `5. "main_arc": 1 sentence story summary\n` +
+          `6. "win_condition": how the player wins (1 sentence)\n` +
+          `7. "author_walkthrough": full numbered solution, 8-12 lines, matching puzzle_chain exactly\n\n` +
+          `SOLVABILITY RULES:\n` +
+          `- puzzle_chain steps must be doable IN ORDER: each "gives" item must be obtainable at that step\n` +
+          `- items come from NPCs, rooms, or defeating monsters — reference them by the exact names above\n` +
+          `- the chain must end with getting the final treasure and returning to ${firstRoom}\n` +
+          `- author_walkthrough must match puzzle_chain step by step\n\n` +
+          `EXAMPLE (do NOT copy — invent for this theme):\n` +
+          `{"objectives":["Find the sage","Cross the chasm","Defeat the guardian","Claim the prize"],` +
+          `"puzzle_chain":[{"step":1,"action":"talk to sage","gives":"crystal lens","unlocks":null},` +
+          `{"step":2,"action":"use lens on chasm","gives":null,"unlocks":"Dark Hall"}],` +
+          `"mechanics":[{"action":"use lens on shadow","effect":"shadow retreats","location":"Dark Hall"}],` +
+          `"riddles":[{"location":"Dark Hall","hint":"Light reveals truth","solution":"use crystal lens","reward":"shadow clears"}],` +
+          `"main_arc":"A hero seeks the lost crown hidden in shadow-haunted halls.",` +
+          `"win_condition":"Obtain the Lost Crown and return to the entrance.",` +
+          `"author_walkthrough":"1. Talk to sage, get lens.\\n2. Use lens on chasm..."}\n\n` +
+          `Output ONLY the JSON object.`;
+        let p2bText = await runGen(sysMsg, p2bPrompt, p2Tok, ollamaTemp,
+          (t) => { slog(`Pass 2b: chain & arc... ${t.length} chars`); });
+        let chain = extractFirstJson(p2bText);
+        slog(`pass2b raw preview: ${p2bText.replace(/\s+/g, " ").trim().slice(0, 300)}${p2bText.length > 300 ? "…" : ""}`);
+        if (!chain || !Array.isArray(chain.puzzle_chain) || chain.puzzle_chain.length < 2) {
+          slog("Pass 2b retry...");
+          p2bText = await runGen(sysMsg,
+            `Rooms: ${skeleton.rooms.map(r => r.name).join(", ")}. Items: ${itemNames.join(", ")}. NPCs: ${npcNames.join(", ")}. Monsters: ${monNames.join(", ")}.\n` +
+            `JSON only. Fields: objectives (4 strings), puzzle_chain (6-8 steps with step/action/gives/unlocks), mechanics (2-3), riddles (1-2), main_arc (string), win_condition (string), author_walkthrough (numbered string).`,
+            p2RetryTok, ollamaRetryTemp,
+            (t) => { slog(`Pass 2b retry... ${t.length} chars`); });
+          chain = extractFirstJson(p2bText);
+          slog(`pass2b (retry) preview: ${p2bText.replace(/\s+/g, " ").trim().slice(0, 200)}${p2bText.length > 200 ? "…" : ""}`);
+        }
+        if (!chain) chain = {};
 
-      // Retry pass 2 if failed
-      if (!content) {
-        slog("Pass 2 retry...");
-        const retry2 = `Theme: ${theme.slice(0, 300)}\n${forbidStockNames}\nAdd npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition, author_walkthrough (numbered full solution) to rooms: ${roomList}\nValid JSON only.`;
-        pass2Text = await runGen(sysMsg, retry2, p2RetryTok, 0.4,
-          (t) => { slog(`Pass 2 retry... ${t.length} chars`); });
-        content = extractFirstJson(pass2Text);
-        slog(`pass2 (retry) raw preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
-      }
-
-      // Pass 2 summary
-      if (content) {
+        // Merge 2a + 2b
+        content = { ...inhabitants, ...chain };
         const p2npcs = (content.npcs || []).length;
         const p2items = (content.key_items || []).length;
         const p2chain = (content.puzzle_chain || []).length;
-        slog(`Pass 2 done: ${p2npcs} npcs, ${p2items} items, ${p2chain} chain steps`);
+        slog(`Pass 2 merged: ${p2npcs} npcs, ${p2items} items, ${p2chain} chain steps`);
         const kn = (content.key_items || []).map(k => (typeof k === "object" ? k.name : k)).filter(Boolean);
         if (kn.length) slog(`pass2 key_items: ${kn.join(", ")}`);
+
       } else {
-        slog("Pass 2 FAILED: no valid content JSON (using empty defaults)");
+        // ── Browser Gemma: single pass (works OK for simpler bibles) ──
+        slog("Pass 2/2: Generating gameplay content (browser)...");
+        const pass2Prompt =
+          `Theme reminder: ${theme.slice(0, 400)}${theme.length > 400 ? "…" : ""}\n\n` +
+          `${forbidStockNames}\n\n` +
+          `Add gameplay to these rooms: ${roomList}\n\n` +
+          `Output JSON with ALL these fields:\n` +
+          `- objectives: 4 goals in order\n` +
+          `- npcs: 2 characters (name, location, personality, provides)\n` +
+          `- monsters: 2 enemies (name, location, difficulty, weakness)\n` +
+          `- riddles: 1-2 puzzles (location, hint, solution, reward)\n` +
+          `- key_items: 6 items (name, purpose)\n` +
+          `- item_locations: {"item name":"which room"} for each item\n` +
+          `- puzzle_chain: ordered steps [{step:1,action:"do X",gives:"item",unlocks:"room or null"}]\n` +
+          `- mechanics: 2-3 rules (action, effect, location)\n` +
+          `- main_arc: 1 sentence story\n` +
+          `- win_condition: how to win\n` +
+          `- author_walkthrough: plain text, numbered full solution matching puzzle_chain.\n\n` +
+          `SOLVABILITY: puzzle_chain must be completable in order. Fix contradictions before output.\n\n` +
+          `Place NPCs and items in the rooms listed above. Every item must be useful.\n` +
+          `Output ONLY valid JSON.`;
+
+        let pass2Text = await runGen(sysMsg, pass2Prompt, p2Tok, 0.5,
+          (t) => { slog(`Pass 2/2: gameplay content... ${t.length} chars`); });
+        content = extractFirstJson(pass2Text);
+        slog(`pass2 raw preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
+
+        if (!content) {
+          slog("Pass 2 retry...");
+          const retry2 = `Theme: ${theme.slice(0, 300)}\n${forbidStockNames}\nAdd npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition, author_walkthrough to rooms: ${roomList}\nValid JSON only.`;
+          pass2Text = await runGen(sysMsg, retry2, p2RetryTok, 0.4,
+            (t) => { slog(`Pass 2 retry... ${t.length} chars`); });
+          content = extractFirstJson(pass2Text);
+          slog(`pass2 (retry) preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
+        }
+
+        if (content) {
+          const p2npcs = (content.npcs || []).length;
+          const p2items = (content.key_items || []).length;
+          const p2chain = (content.puzzle_chain || []).length;
+          slog(`Pass 2 done: ${p2npcs} npcs, ${p2items} items, ${p2chain} chain steps`);
+          const kn = (content.key_items || []).map(k => (typeof k === "object" ? k.name : k)).filter(Boolean);
+          if (kn.length) slog(`pass2 key_items: ${kn.join(", ")}`);
+        } else {
+          slog("Pass 2 FAILED: no valid content JSON (using empty defaults)");
+        }
       }
 
       // ── MERGE pass 1 + pass 2 into final world bible ──
