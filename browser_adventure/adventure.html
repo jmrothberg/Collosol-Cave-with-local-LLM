@@ -1740,13 +1740,70 @@
     }
 
     /** Serialize entire bible for meta-help prompts (LLM discretion on how much to reveal). */
-    function fullWorldBibleJsonForHelp(wb) {
-      if (!wb) return "{}";
-      try {
-        return JSON.stringify(wb);
-      } catch {
-        return "{}";
+    /**
+     * Build a compact text summary of the world bible for help/hint prompts.
+     * Full JSON can be 6-10 KB — far too large for the small in-browser Gemma model
+     * (causes WebGPU OOM). This keeps it under ~1.5 KB while preserving the info
+     * the LLM needs to give useful hints.
+     */
+    function compactWorldBibleForHelp(wb) {
+      if (!wb) return "(no world bible loaded)";
+      const lines = [];
+      if (wb.story_arc) lines.push("Arc: " + wb.story_arc);
+      if (wb.win_condition) lines.push("Win: " + wb.win_condition);
+
+      // Rooms (name + exits only)
+      if (wb.locations && wb.locations.length) {
+        lines.push("Rooms:");
+        for (const loc of wb.locations) {
+          if (!loc || !loc.name) continue;
+          const exits = (loc.exits || []).join(", ");
+          lines.push("  " + loc.name + (exits ? " → " + exits : ""));
+        }
       }
+
+      // NPCs (name + location + what they provide)
+      if (wb.npcs && wb.npcs.length) {
+        lines.push("NPCs:");
+        for (const n of wb.npcs) {
+          if (!n || !n.name) continue;
+          let s = "  " + n.name;
+          if (n.location) s += " @ " + n.location;
+          if (n.provides) s += " — " + n.provides;
+          lines.push(s);
+        }
+      }
+
+      // Key items (name + purpose)
+      if (wb.key_items && wb.key_items.length) {
+        lines.push("Items:");
+        for (const it of wb.key_items) {
+          if (!it || !it.name) continue;
+          let s = "  " + it.name;
+          if (it.purpose) s += " — " + it.purpose;
+          lines.push(s);
+        }
+      }
+
+      // Puzzle chain (step-by-step)
+      if (wb.puzzle_chain && wb.puzzle_chain.length) {
+        lines.push("Puzzle chain:");
+        for (const step of wb.puzzle_chain) {
+          if (!step) continue;
+          const num = step.step || "?";
+          const act = step.action || step.description || "?";
+          let s = "  " + num + ". " + act;
+          if (step.gives) s += " → " + step.gives;
+          if (step.unlocks) s += " [unlocks: " + step.unlocks + "]";
+          lines.push(s);
+        }
+      }
+
+      // Author walkthrough (already compact text)
+      const wt = getAuthorWalkthrough(wb);
+      if (wt) lines.push("Walkthrough:\n" + wt);
+
+      return lines.join("\n");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1826,15 +1883,15 @@
       let metaBlock = "";
       if (metaHelp) {
         metaBlock =
-          "\n---\nFULL_WORLD_BIBLE_JSON (for meta questions only; narrator uses discretion—do not paste wholesale unless asked):\n" +
-          fullWorldBibleJsonForHelp(activeWorldBible) +
+          "\n---\nWORLD BIBLE SUMMARY (use to give helpful hints without spoiling everything):\n" +
+          compactWorldBibleForHelp(activeWorldBible) +
           "\n---\n";
       }
 
       // Build a short summary of which cues were injected (for debug panel)
       const cueSummary = (cues.length
         ? "cues: " + cues.map(c => c.split(":")[0].trim()).join(", ")
-        : "cues: none") + (metaHelp ? " | metaHelp: full bible JSON attached" : "");
+        : "cues: none") + (metaHelp ? " | metaHelp: compact bible summary attached" : "");
 
       // Compact JSON (no indentation) to save tokens; meta help adds full bible in one pass
       const prompt = (
@@ -2336,7 +2393,11 @@
         llmText = await generateLlmResponse(systemPrompt, userPrompt);
       } catch (e) {
         removeThinking();
-        appendTurn(playerInput, `(Error generating response: ${e.message})`);
+        const isOom = /buffer|memory|allocat/i.test(e.message);
+        const msg = isOom
+          ? "(WebGPU ran out of memory. Try a shorter command, or type 'look' to continue playing.)"
+          : `(Error generating response: ${e.message})`;
+        appendTurn(playerInput, msg);
         setInputEnabled(true);
         return;
       }
