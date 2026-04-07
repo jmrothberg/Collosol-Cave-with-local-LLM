@@ -226,12 +226,19 @@ After a successful **Ollama** build, a **`world_bible_*.json`** is saved to your
 
 ### Ollama setup (short checklist)
 
-1. Install and run **Ollama** on the same machine as the browser (`ollama serve` or the Mac app).
-2. **`ollama pull <model>`** then use the **exact** name from **`ollama list`** in the game (e.g. `llama3.2`, `gemma2:9b`). Typos or fake tags (e.g. `gemma4:31b`) will fail or behave oddly.
-3. **CORS:** the game page calls `http://127.0.0.1:11434` from **whatever origin you opened**. Ollama must allow that origin:
-   - **Local:** e.g. `OLLAMA_ORIGINS=http://localhost:8080 ollama serve` if you use port 8080 (match your URL).
-   - **GitHub Pages:** e.g. `OLLAMA_ORIGINS=https://jmrothberg.github.io ollama serve` (or your fork’s `https://YOURUSER.github.io`) so the **hosted** page can reach your laptop’s Ollama. Without this, the browser blocks the request.
-4. Status lines under the progress bar: **`[Ollama · model]`** vs **`[Gemma world-gen]`** so you always see which backend is building.
+1. **Install Ollama** on the same machine as the browser — [ollama.com](https://ollama.com).
+2. **Pull a model:** `ollama pull gemma4:12b` (or any model you like). Use the **exact** name from `ollama list` in the game UI.
+3. **Start Ollama with CORS enabled.** The game’s browser tab needs permission to call `http://127.0.0.1:11434`. Open a terminal and run:
+
+   ```bash
+   OLLAMA_ORIGINS="https://jmrothberg.github.io,http://localhost:*,http://127.0.0.1:*" ollama serve
+   ```
+
+   **That’s it.** Works on Mac, Linux, and WSL. Covers both GitHub Pages and local use. The setting is temporary — it only lasts while the terminal is open and does not change any system config.
+
+   > **If you see `address already in use`:** the Mac Ollama desktop app (or another `ollama serve`) is already running. Quit it first (menu-bar llama icon → Quit Ollama), then run the command above. For forks replace `jmrothberg` with your GitHub username.
+
+4. Status lines under the progress bar show **`[Ollama · model]`** vs **`[Gemma world-gen]`** so you always see which backend is generating.
 
 ### Ollama troubleshooting (Debug panel)
 
