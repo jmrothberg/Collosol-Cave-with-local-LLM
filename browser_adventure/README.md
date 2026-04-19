@@ -68,6 +68,7 @@ from huggingface_hub import snapshot_download
 snapshot_download('onnx-community/gemma-4-E4B-it-ONNX',
     allow_patterns=['config.json','generation_config.json','tokenizer.json',
         'tokenizer_config.json','preprocessor_config.json','processor_config.json',
+        'chat_template.jinja',
         'onnx/decoder_model_merged_q4.onnx','onnx/decoder_model_merged_q4.onnx_data',
         'onnx/decoder_model_merged_q4.onnx_data_1'],
     local_dir='local_models/onnx-community/gemma-4-E4B-it-ONNX')

@@ -1934,6 +1934,38 @@
     // ═══════════════════════════════════════════════════════════════════════════
     let llmPipe = null;
 
+    /**
+     * Gemma 4 ONNX repo stores the Jinja template in chat_template.jinja; tokenizer_config.json
+     * does not set chat_template. Transformers.js then leaves tokenizer.chat_template empty, so
+     * apply_chat_template() throws on fresh loads (common on GitHub Pages). Local runs may appear
+     * fine if an older cache had populated the field. We fetch the small .jinja file explicitly.
+     */
+    async function ensureLlmChatTemplate(onProgress) {
+      const tok = llmPipe?.tokenizer;
+      if (!tok) return;
+      if (tok.chat_template != null && String(tok.chat_template).trim() !== "") return;
+      if (onProgress) onProgress({ text: "LLM: loading chat template (chat_template.jinja)…" });
+      const hfUrl = `https://huggingface.co/${LLM_MODEL_ID}/resolve/main/chat_template.jinja`;
+      const urls = useLocalLlm
+        ? [`${LOCAL_MODELS_BASE}/${LLM_MODEL_ID}/chat_template.jinja`, hfUrl]
+        : [hfUrl];
+      let lastErr = null;
+      for (const url of urls) {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) {
+            lastErr = new Error(`chat_template.jinja ${r.status} (${url})`);
+            continue;
+          }
+          tok.chat_template = await r.text();
+          return;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error("Could not load chat_template.jinja");
+    }
+
     async function loadLlm(onProgress) {
       if (useLocalLlm) {
         env.allowLocalModels = true;
@@ -1961,6 +1993,13 @@
             }
           },
         });
+        try {
+          await ensureLlmChatTemplate(onProgress);
+        } catch (te) {
+          onProgress({ text: `LLM chat template failed: ${te.message}` });
+          llmPipe = null;
+          return false;
+        }
         onProgress({ text: "LLM loaded.", pct: 100 });
         return true;
       } catch (e) {
@@ -1971,6 +2010,13 @@
               dtype: "q4", device: "wasm",
               progress_callback: (r) => { if (r?.status === "progress") onProgress({ text: `LLM (WASM): ${r.progress?.toFixed(1)}%`, pct: r.progress }); },
             });
+            try {
+              await ensureLlmChatTemplate(onProgress);
+            } catch (te) {
+              onProgress({ text: `LLM chat template failed: ${te.message}` });
+              llmPipe = null;
+              return false;
+            }
             onProgress({ text: "LLM loaded (WASM).", pct: 100 });
             return true;
           } catch (e2) { onProgress({ text: `LLM load failed: ${e2.message}` }); return false; }
