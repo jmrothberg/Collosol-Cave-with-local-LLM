@@ -10,6 +10,7 @@
 # - MFLUX (for FLUX image generation on Apple Silicon): pip install mflux
 # - Gradio (for web UI): pip install gradio
 # - Local FLUX models in ~/Diffusion_Models/ (e.g. FLUX2-klein-9B-mlx-8bit)
+# - Optional Ollama (same machine): pip install ollama — LLM dropdown includes ollama:<tag> entries
 #
 # The LLM is instructed via system prompt to use these JSON tools, making this
 # a powerful general-purpose adventure engine that can run ANY adventure the
@@ -35,6 +36,16 @@ from mlx_lm.sample_utils import make_sampler
 
 # MLX model discovery
 MLX_MODELS_DIR = "/Users/jonathanrothberg/MLX_Models"
+
+# Ollama: dropdown values use this prefix so tags like "qwen3.6:27b-coding-mxfp8" never collide with MLX folder names.
+OLLAMA_CHOICE_PREFIX = "ollama:"
+# CHANGE: default Ollama tag for this workflow (must match `ollama list` after `ollama pull …`).
+OLLAMA_PREFERRED_MODEL = "qwen3.6:27b-coding-mxfp8"
+
+try:
+    import ollama as ollama_pkg  # type: ignore
+except ImportError:
+    ollama_pkg = None
 
 from mflux_image_gen import MfluxImageGenerator
 
@@ -258,9 +269,6 @@ def execute_world_bible_generation(state_mgr: "StateManager", model_id: str, the
     """
     global WORLD_BIBLE
     
-    if not check_mlx_available():
-        return False, "MLX not available. Cannot generate world bible.", None
-
     # Handle auto model selection
     if model_id == "(auto)":
         heavy_model_id = select_llm_interactively()
@@ -269,6 +277,13 @@ def execute_world_bible_generation(state_mgr: "StateManager", model_id: str, the
 
     if not heavy_model_id:
         return False, "No heavy model selected for world bible generation.", None
+
+    # CHANGE: Ollama-backed world bible does not require MLX_MODELS_DIR; MLX-only path still does.
+    if llm_choice_is_ollama(heavy_model_id):
+        if ollama_pkg is None:
+            return False, "Ollama backend selected but Python package missing: pip install ollama", None
+    elif not check_mlx_available():
+        return False, "MLX not available. Cannot generate world bible.", None
 
     print(f"Generating world bible using model: {heavy_model_id}")
     result = generate_world_bible(state_mgr, heavy_model_id, theme, max_tokens)
@@ -1283,10 +1298,52 @@ class StateManager:
 # LLM ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def llm_choice_is_ollama(model_path: str) -> bool:
+    """True if this dropdown / CLI value selects Ollama (ollama:<tag>) instead of an MLX weights folder."""
+    return bool(model_path) and model_path.startswith(OLLAMA_CHOICE_PREFIX)
+
+
+def ollama_model_from_choice(model_path: str) -> str:
+    """Strip ollama: prefix; return tag for ollama.chat(model=...)."""
+    if llm_choice_is_ollama(model_path):
+        return model_path[len(OLLAMA_CHOICE_PREFIX) :]
+    return model_path
+
+
+def ollama_chat_generate(
+    model_name: str, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float
+) -> str:
+    # CHANGE: Ollama path for LLMEngine — uses native chat API (no MLX load).
+    if ollama_pkg is None:
+        return "(LLM error: ollama package not installed; pip install ollama)"
+    try:
+        r = ollama_pkg.chat(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            options={"num_predict": max_tokens, "temperature": temperature},
+        )
+        if hasattr(r, "message") and r.message is not None:
+            content = getattr(r.message, "content", None) or ""
+        elif isinstance(r, dict):
+            content = ((r.get("message") or {}) or {}).get("content") or ""
+        else:
+            content = ""
+        return (content or "").strip()
+    except Exception as e:
+        return f"(LLM error: {e})"
+
+
 class LLMEngine:
     def __init__(self, model_path: str, max_new_tokens: int = 1500, temperature: float = 0.7) -> None:
         self.model_path = model_path
-        self.model_id = os.path.basename(model_path) if model_path else ""
+        self._uses_ollama = llm_choice_is_ollama(model_path)
+        if self._uses_ollama:
+            self.model_id = ollama_model_from_choice(model_path)
+        else:
+            self.model_id = os.path.basename(model_path) if model_path else ""
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.model = None
@@ -1295,6 +1352,9 @@ class LLMEngine:
             self._load()
 
     def _load(self):
+        if self._uses_ollama:
+            print(f"[LLMEngine] Ollama model {self.model_id!r} (no MLX weights load).")
+            return
         print(f"[LLMEngine] Loading model from {self.model_path} ...")
         self.model, self.tokenizer = mlx_load(self.model_path)
         print(f"[LLMEngine] Model loaded: {self.model_id}")
@@ -1302,6 +1362,8 @@ class LLMEngine:
     def _unload(self):
         self.model = None
         self.tokenizer = None
+        if self._uses_ollama:
+            return
         import gc
         gc.collect()
         try:
@@ -1311,6 +1373,10 @@ class LLMEngine:
             pass
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
+        if self._uses_ollama:
+            return ollama_chat_generate(
+                self.model_id, system_prompt, user_prompt, self.max_new_tokens, self.temperature
+            )
         if self.model is None or self.tokenizer is None:
             return "(LLM error: no model loaded)"
         try:
@@ -1511,6 +1577,76 @@ def extract_json_from_text(text: str) -> List[Dict[str, Any]]:
             candidates.append(partial_dict)
 
     return candidates
+
+
+def strip_llm_thinking_blocks(text: str) -> str:
+    """
+    Remove chain-of-thought / analysis wrappers so balanced-brace JSON scan
+    starts at the real world-bible object (not a tiny snippet inside reasoning).
+    """
+    t = text
+    # Common tag pairs (reasoning models; strip so the first `{` is the world bible)
+    for pat in (
+        r"<redacted_thinking>[\s\S]*?</redacted_thinking>",
+        r"<think>[\s\S]*?</think>",
+        r"<\|channel>thought[\s\S]*?<channel\|>",  # Gemma-style thought channel
+    ):
+        t = re.sub(pat, "", t, flags=re.IGNORECASE)
+    return t.strip()
+
+
+def score_world_bible_candidate(d: Dict[str, Any]) -> int:
+    """Heuristic: prefer objects that look like a full world bible, not inline JSON fragments."""
+    if not isinstance(d, dict):
+        return -1
+    s = 0
+    ob = d.get("objectives")
+    if isinstance(ob, list) and len(ob) > 0:
+        s += 80 + min(len(ob), 10) * 8
+    loc = d.get("locations")
+    if isinstance(loc, list) and len(loc) > 0:
+        s += 80 + min(len(loc), 12) * 12
+    ki = d.get("key_items")
+    if isinstance(ki, list) and len(ki) > 0:
+        s += 80 + min(len(ki), 12) * 6
+    wc = d.get("win_condition")
+    if isinstance(wc, str) and wc.strip():
+        s += 100
+    for k in ("npcs", "monsters", "riddles", "mechanics", "progression_hints", "main_arc"):
+        v = d.get(k)
+        if isinstance(v, list) and len(v) > 0:
+            s += 15 + min(len(v), 8) * 2
+        elif isinstance(v, str) and v.strip():
+            s += 12
+    il = d.get("item_locations")
+    if isinstance(il, dict) and len(il) > 0:
+        s += 20 + min(len(il), 12) * 2
+    if d.get("global_theme") or d.get("theme"):
+        s += 15
+    # Prefer larger coherent payloads (ties broken toward full bible)
+    try:
+        s += min(len(json.dumps(d, ensure_ascii=False)), 8000) // 80
+    except Exception:
+        pass
+    return s
+
+
+def pick_world_bible_from_candidates(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Local models often emit many valid JSON objects (reasoning snippets, examples).
+    Pick one that validates; else the highest schema score (closest to recoverable).
+    """
+    if not candidates:
+        return None
+    dicts = [c for c in candidates if isinstance(c, dict)]
+    if not dicts:
+        return None
+    ranked = sorted(dicts, key=score_world_bible_candidate, reverse=True)
+    for c in ranked:
+        ok, _ = validate_world_bible(c)
+        if ok:
+            return c
+    return ranked[0]
 
 
 def extract_fallback_directives(text: str) -> Optional[Dict[str, Any]]:
@@ -1768,7 +1904,7 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str],
     """
     # Ensure max_tokens is valid
     if max_tokens is None or not isinstance(max_tokens, int) or max_tokens < 250:
-        max_tokens = 600  # Use safe default
+        max_tokens = 4096  # Single-shot world JSON needs headroom (was 600; caused truncation)
 
     # Default cave adventure - well-designed and always available
     default_plan = {
@@ -1881,23 +2017,36 @@ Example flow: torch (entrance) -> lights dark cave -> find key -> unlock temple 
 
 Every item must be useful. Every NPC must help. The game must be winnable.
 
-Output ONLY valid JSON. No markdown, no commentary."""
+Keep each description one short sentence so the entire object fits in one reply.
+
+Output ONLY valid JSON. No markdown, no commentary, no reasoning — your message must begin with {{ and end with }}."""
+
+        # Build model path: Ollama uses ollama:<tag>; MLX uses folder under MLX_MODELS_DIR or an absolute dir.
+        if llm_choice_is_ollama(heavy_model_id):
+            wb_model_path = heavy_model_id
+        elif os.path.isdir(heavy_model_id):
+            wb_model_path = heavy_model_id
+        else:
+            wb_model_path = os.path.join(MLX_MODELS_DIR, heavy_model_id)
+
+        # Reasoning models emit many small JSON-like objects before the real bible; need token headroom.
+        gen_tokens = max_tokens if isinstance(max_tokens, int) else 4096
+        if gen_tokens < 4096:
+            gen_tokens = 4096
 
         # DEBUG: Show full prompt being sent to LLM
         print(f"[world_bible] PROMPT BEING SENT TO {heavy_model_id} ({len(prompt)} chars):")
         print("=" * 80)
         print(prompt)
         print("=" * 80)
-        print(f"[world_bible] Calling {heavy_model_id} with max_tokens={max_tokens}")
+        print(f"[world_bible] Calling {heavy_model_id} with max_new_tokens={gen_tokens} (requested was {max_tokens})")
 
-        # Build model path (if not already a full path, look in MLX_MODELS_DIR)
-        if os.path.isdir(heavy_model_id):
-            wb_model_path = heavy_model_id
-        else:
-            wb_model_path = os.path.join(MLX_MODELS_DIR, heavy_model_id)
-
-        wb_engine = LLMEngine(model_path=wb_model_path, max_new_tokens=max_tokens, temperature=0.5)
-        system_msg = "You are a game designer. Output ONLY a single valid JSON object. No markdown, no commentary."
+        wb_engine = LLMEngine(model_path=wb_model_path, max_new_tokens=gen_tokens, temperature=0.5)
+        system_msg = (
+            "You are a game designer. Output ONLY one valid JSON object for the whole game design. "
+            "Do not wrap output in tags, do not write analysis before or after the JSON, and do not use markdown. "
+            "The first character of your reply must be { and the last must be }."
+        )
         raw_response = wb_engine.generate(system_msg, prompt)
 
         print(f"[world_bible] RAW LLM RESPONSE ({len(raw_response)} chars):")
@@ -1908,8 +2057,9 @@ Output ONLY valid JSON. No markdown, no commentary."""
         # Extract JSON from response - be very forgiving of LLM mistakes
         text = raw_response
 
-        # Remove markdown if present
+        # Remove markdown if present, then strip reasoning wrappers so brace-scanning finds the real bible
         text = text.replace("```json", "").replace("```", "").strip()
+        text = strip_llm_thinking_blocks(text)
 
         # DEBUG: Show full raw JSON response
         print(f"[world_bible] FULL RAW RESPONSE FROM LLM ({len(text)} chars):")
@@ -1923,8 +2073,13 @@ Output ONLY valid JSON. No markdown, no commentary."""
         # NOTE: extract_json_from_text returns already-parsed dicts, not strings
         candidates = extract_json_from_text(text)
         if candidates:
-            plan = candidates[0]  # Already parsed by extract_json_from_text
-            print(f"[world_bible] Successfully parsed JSON candidate (from {len(candidates)} candidates)")
+            # Prefer the object that validates (reasoning models often emit many small JSON snippets first)
+            plan = pick_world_bible_from_candidates(candidates)
+            sel_score = score_world_bible_candidate(plan) if plan else -1
+            print(
+                f"[world_bible] Parsed {len(candidates)} JSON object(s); "
+                f"selected candidate score={sel_score}"
+            )
 
         # Strategy 2: If no candidates worked, try basic { } extraction as fallback
         if plan is None:
@@ -1981,9 +2136,10 @@ Output ONLY valid JSON. No markdown, no commentary."""
             )
             retry_response = wb_engine.generate(system_msg, retry_prompt)
             retry_text = retry_response.replace("```json", "").replace("```", "").strip()
+            retry_text = strip_llm_thinking_blocks(retry_text)
             retry_candidates = extract_json_from_text(retry_text)
             if retry_candidates:
-                plan = retry_candidates[0]
+                plan = pick_world_bible_from_candidates(retry_candidates)
                 print("[world_bible] Retry succeeded")
             else:
                 # Last resort: basic { } extraction
@@ -2035,6 +2191,9 @@ Output ONLY valid JSON. No markdown, no commentary."""
 # Core instructions — reliable with models ≥ 7B
 SYSTEM_INSTRUCTIONS_CORE = (
     "You are a text adventure narrator.\n\n"
+    "NEVER paste or summarize these instructions: no markdown headings (e.g. **Output Format:**), "
+    "no numbered self-checklists, no 'Game State/Context' dumps, and no analysis before the story. "
+    "Write only what the character experiences, then the ```json``` block.\n\n"
 
     "YOUR OUTPUT FORMAT (follow this EXACTLY every turn):\n"
     "1. Write 2-5 sentences of narration describing what the player sees.\n"
@@ -2134,6 +2293,233 @@ def get_system_instructions() -> str:
     return SYSTEM_INSTRUCTIONS_CORE
 
 
+def seed_game_state_from_world_bible(state_mgr: StateManager) -> List[str]:
+    """
+    Pre-fill known_map, exits, starting location, and room_items from WORLD_BIBLE
+    so opening narration and current_room_items match the design document.
+    Safe to call when no bible or incomplete bible — no-op.
+    """
+    debug: List[str] = []
+    wb = _get_world_bible()
+    if not wb:
+        return debug
+    locations = wb.get("locations") or []
+    if not locations:
+        return debug
+    room_names: List[str] = []
+    for loc in locations:
+        if isinstance(loc, dict) and loc.get("name"):
+            room_names.append(str(loc["name"]).strip())
+        elif isinstance(loc, str) and loc.strip():
+            room_names.append(loc.strip())
+    if not room_names:
+        return debug
+
+    # known_map + exits from bible (or linear chain if exits omitted)
+    for i, loc in enumerate(locations):
+        if not isinstance(loc, dict):
+            continue
+        nm = str(loc.get("name") or "").strip()
+        if not nm:
+            continue
+        desc = (loc.get("description") or "").strip()
+        exits = loc.get("exits") if isinstance(loc.get("exits"), list) else []
+        if nm not in state_mgr.state.known_map:
+            state_mgr.state.known_map[nm] = {"exits": [], "notes": (desc[:1200] if desc else "")}
+        else:
+            if desc and not (state_mgr.state.known_map[nm].get("notes") or "").strip():
+                state_mgr.state.known_map[nm]["notes"] = desc[:1200]
+        for e in exits:
+            if isinstance(e, str) and e.strip():
+                state_mgr.connect_rooms(nm, e.strip())
+        if not exits and i + 1 < len(locations):
+            nxt = locations[i + 1]
+            if isinstance(nxt, dict) and str(nxt.get("name") or "").strip():
+                state_mgr.connect_rooms(nm, str(nxt["name"]).strip())
+
+    start = room_names[0]
+    state_mgr.move_to(start)
+    debug.append(f"[seed] location={start}, rooms={len(room_names)}")
+
+    il = wb.get("item_locations") or {}
+    if isinstance(il, dict):
+        for item_name, loc_desc in il.items():
+            if not item_name or not isinstance(loc_desc, str):
+                continue
+            ld = loc_desc.lower().strip()
+            placed_room: Optional[str] = None
+            for rn in room_names:
+                rnl = rn.lower()
+                if rnl in ld or ld in rnl:
+                    placed_room = rn
+                    break
+            if placed_room is None and start.lower() in ld:
+                placed_room = start
+            if placed_room is None:
+                for w in re.findall(r"[a-z]{4,}", start.lower()):
+                    if w in ld:
+                        placed_room = start
+                        break
+            if placed_room:
+                state_mgr.place_item_in_room(str(item_name), room=placed_room)
+                debug.append(f"[seed] {item_name} @ {placed_room}")
+    return debug
+
+
+def opening_narration_fallback_from_bible(state_mgr: StateManager) -> str:
+    """Short player-facing opening when the LLM returns no usable prose (planning dump, empty)."""
+    wb = _get_world_bible()
+    if not wb:
+        return ""
+    here = (state_mgr.state.location or "").strip()
+    desc = ""
+    for loc in wb.get("locations", []) or []:
+        if isinstance(loc, dict) and str(loc.get("name", "")).strip().lower() == here.lower():
+            desc = (loc.get("description") or "").strip()
+            break
+    items = state_mgr.list_room_items(here)
+    parts = [f"You stand in {here}."]
+    if desc:
+        parts.append(desc)
+    if items:
+        parts.append(f"You can see: {', '.join(items)}.")
+    for npc in wb.get("npcs", wb.get("key_characters", [])) or []:
+        if isinstance(npc, dict) and str(npc.get("location", "")).strip().lower() == here.lower():
+            n = npc.get("name", "Someone")
+            p = (npc.get("personality") or "").strip()
+            parts.append(f"{n} is here{f' ({p})' if p else ''}.")
+    return " ".join(parts).strip()
+
+
+def _strip_untagged_planning_preface(text: str) -> str:
+    """
+    Drop obvious meta/planning lines at the start when the model forgets delimiters.
+    (JSON is extracted separately from the raw reply — do not cut at ```json here.)
+    """
+    if not text:
+        return text
+    lines = text.splitlines()
+    out: List[str] = []
+    started = False
+    bad_starts = (
+        "the user wants", "i need to check", "current location:", "items in room:",
+        "wait,", "looking at the provided", "the prompt says", "action:", "json:",
+        "one detail:", "let's refine", "i will output", "state updates:",
+        "analyze user", "check constraints", "draft narration", "let's construct",
+        "everything looks solid", "output matches", "requirements:", "json format:",
+        "game state/context", "crucial constraint", "opening setup (already",
+    )
+    for line in lines:
+        ls = line.strip()
+        if not ls:
+            if started:
+                out.append(line)
+            continue
+        lsl = ls.lower()
+        if not started:
+            if any(lsl.startswith(b) for b in bad_starts):
+                continue
+            if len(ls) > 55 and not lsl.startswith("the prompt"):
+                started = True
+        if started:
+            out.append(line)
+    joined = "\n".join(out).strip()
+    return joined if len(joined) > 40 else text
+
+
+def _is_instruction_echo_line(line: str) -> bool:
+    """True when the line is model meta (echoing the prompt / checklist), not in-world narration."""
+    s = line.strip()
+    if not s:
+        return False
+    sl = s.lower()
+    if sl.startswith("**") and any(
+        k in sl
+        for k in (
+            "output format",
+            "json structure",
+            "game state",
+            "constraint",
+            "requirements",
+            "analyze",
+            "check constraints",
+            "draft narration",
+        )
+    ):
+        return True
+    if re.match(r"^\d+[\.)]\s+\*\*", s):
+        return True
+    if re.match(r"^[-*]\s+\*\*", s):
+        return True
+    if "[output generation]" in sl or "self-correction" in sl or "[final check" in sl:
+        return True
+    if sl.startswith(("proceeds.", "proceeds", "ready.✅", "ready.")) and len(s) < 120:
+        return True
+    if "✅" in s and len(s) < 100:
+        return True
+    if sl.startswith("*(note:") or sl.startswith("*(self-") or sl.startswith("*("):
+        return True
+    if "opening setup (already in engine state" in sl:
+        return True
+    return False
+
+
+def _strip_instruction_echo_lines(text: str) -> str:
+    """Remove lines that echo system markdown / planning (anywhere in the reply)."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    kept = [ln for ln in lines if not _is_instruction_echo_line(ln)]
+    out = "\n".join(kept).strip()
+    if len(out) < 30:
+        return text
+    # Drop paragraphs that are still mostly meta (double-newline blocks)
+    paras = [p.strip() for p in out.split("\n\n") if p.strip()]
+    if len(paras) <= 1:
+        return out
+    junk_markers = (
+        "**output format**",
+        "**json structure**",
+        "game state/context",
+        "crucial constraint",
+        "check constraints &",
+        "let's construct the json",
+        "[output generation]",
+    )
+    filtered: List[str] = []
+    for p in paras:
+        pl = p.lower()
+        if any(m in pl for m in junk_markers):
+            continue
+        if pl.count("**") > 4 and not re.search(r"\b(you|your|the)\s+[a-z]+", pl[:120], re.I):
+            continue
+        filtered.append(p)
+    if not filtered:
+        return out
+    return "\n\n".join(filtered).strip()
+
+
+def _collapse_runaway_repetition(text: str, max_chars: int = 6000) -> str:
+    """Some MLX models loop the same planning paragraph dozens of times — keep one copy."""
+    if len(text) <= max_chars:
+        return text
+    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(paras) < 12:
+        return text[:max_chars]
+    out: List[str] = []
+    seen_recent: List[str] = []
+    for p in paras:
+        if p in seen_recent[-4:]:
+            break
+        out.append(p)
+        seen_recent.append(p)
+        seen_recent = seen_recent[-6:]
+        if sum(len(x) for x in out) > max_chars - 200:
+            break
+    s = "\n\n".join(out).strip()
+    return s if s else text[:max_chars]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GAME LOOP CORE (start_story, build_user_prompt, apply_llm_directives)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2209,23 +2595,55 @@ def start_story(state_mgr: StateManager, llm: "LLMEngine", image_gen: Optional["
     except Exception:
         wb_hint = ""
 
+    # Pre-seed map, starting room, and items from world bible so opening matches the design doc
+    try:
+        for line in seed_game_state_from_world_bible(state_mgr):
+            print(line)
+    except Exception as e:
+        print(f"[start_story] seed_game_state_from_world_bible skipped: {e}")
+
+    try:
+        if _get_world_bible():
+            here = state_mgr.state.location
+            ex = state_mgr.state.known_map.get(here, {}).get("exits", [])
+            seen = state_mgr.list_room_items(here)
+            kickoff += (
+                "\n\nOPENING SETUP (already in engine state — describe this faithfully, do not contradict): "
+                f"room={here}; exits: {', '.join(ex) if ex else '(use JSON connect if you add exits)'}; "
+                f"visible items here now: {', '.join(seen) if seen else '(none seeded)'}. "
+                "Then output your ```json``` block with state_updates + images."
+            )
+    except Exception:
+        pass
+
     llm_text = llm.generate(get_system_instructions() + wb_hint, kickoff)
     final_text, new_images, payloads, tool_logs = apply_llm_directives(state_mgr, llm_text, image_gen)
     # If LLM failed to seed a location, ensure we have at least 'Start'.
     if not state_mgr.state.location:
         state_mgr.move_to("Start")
-    
+
+    ft = (final_text or "").strip()
+    if len(ft) < 50:
+        fb = opening_narration_fallback_from_bible(state_mgr)
+        if fb:
+            final_text = fb
+            print("[start_story] Used world-bible narration fallback (LLM prose too short or empty)")
+
+    ft = (final_text or "").strip()
+    narr_for_img = None
+    if ft and len(ft) < 3500 and ft.lower().count("the user wants") < 2:
+        narr_for_img = ft
+
     # ENSURE opening room image: If no images were generated, generate one directly
-    # Pass narrative context so image matches what was described
+    # Pass narrative context so image matches what was described (skip if narration looks like CoT)
     if not new_images and state_mgr.state.location and image_gen:
-        # Generate image directly for starting room using the narrative for context
         start_image = generate_room_image_if_needed(
             state_mgr, image_gen, state_mgr.state.location,
-            narrative_context=final_text
+            narrative_context=narr_for_img,
         )
         if start_image:
             new_images.append(start_image)
-    
+
     return final_text or "Your journey begins...", new_images
 
 
@@ -2497,6 +2915,11 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
     text = text.strip()
 
     cleaned_text = text
+    cleaned_text = _strip_untagged_planning_preface(cleaned_text)
+    t_echo = _strip_instruction_echo_lines(cleaned_text)
+    if len(t_echo) + 20 < len(cleaned_text):
+        debug_lines.append("[clean] Stripped instruction-echo / markdown checklist lines from narration")
+    cleaned_text = t_echo
 
     # FLEXIBLE DIRECTIVE FALLBACK SYSTEM
     # If no JSON was found but text contains directive-like patterns, try to extract them
@@ -2720,6 +3143,11 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
 
     # Final cleanup of any extra whitespace
     cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text).strip()
+    cleaned_text = _strip_instruction_echo_lines(cleaned_text)
+    cleaned_text = _collapse_runaway_repetition(cleaned_text)
+    if len(cleaned_text) > 14000:
+        cleaned_text = cleaned_text[:14000].rstrip() + "\n…"
+        debug_lines.append("[clean] Truncated extremely long narration/planning spill")
     return cleaned_text, image_paths, json_payloads, debug_lines
 
 
@@ -2747,6 +3175,41 @@ def list_mlx_models() -> List[str]:
         if os.path.isdir(full) and os.path.isfile(os.path.join(full, "config.json")):
             names.append(entry)
     return names
+
+
+def list_ollama_model_choices() -> List[str]:
+    """Return dropdown-ready ids: ollama:<tag> for each running Ollama model, plus preferred tag if missing."""
+    # CHANGE: surface Ollama tags alongside MLX dirs; prefix avoids collision with MLX folder names.
+    if ollama_pkg is None:
+        return []
+    raw: List[str] = []
+    try:
+        response = ollama_pkg.list()
+        if hasattr(response, "models"):
+            for model in response.models:
+                if hasattr(model, "model"):
+                    raw.append(model.model)
+                else:
+                    raw.append(str(model))
+        elif isinstance(response, dict) and "models" in response:
+            for model in response["models"]:
+                if isinstance(model, dict) and "name" in model:
+                    raw.append(model["name"])
+                elif isinstance(model, dict) and "model" in model:
+                    raw.append(model["model"])
+                else:
+                    raw.append(str(model))
+    except Exception as e:
+        print(f"[ollama] list failed: {e}")
+        raw = []
+
+    prefixed = [OLLAMA_CHOICE_PREFIX + n for n in sorted(set(raw))]
+    preferred = OLLAMA_CHOICE_PREFIX + OLLAMA_PREFERRED_MODEL
+    if preferred not in prefixed:
+        prefixed.insert(0, preferred)
+    else:
+        prefixed = [preferred] + [x for x in prefixed if x != preferred]
+    return prefixed
 
 
 def diffusion_models_root() -> str:
@@ -2790,13 +3253,13 @@ def combined_diffuser_choices(include_skip: bool = True) -> List[str]:
 
 
 def select_llm_interactively() -> str:
-    if not check_mlx_available():
-        raise SystemExit(1)
-    models = list_mlx_models()
+    mlx = list_mlx_models() if check_mlx_available() else []
+    ollama_opts = list_ollama_model_choices()
+    models = ollama_opts + mlx
     if not models:
-        print(f"No MLX models found in {MLX_MODELS_DIR}. Add model directories containing config.json.")
+        print(f"No LLM choices: MLX dirs in {MLX_MODELS_DIR} or Ollama models (ollama list).")
         raise SystemExit(1)
-    print("Select an MLX model (same list as GUI):")
+    print("Select an LLM (Ollama entries first; same list as GUI):")
     for idx, name in enumerate(models, 1):
         print(f"  {idx}. {name}")
     choice = input("Enter a number (default 1): ").strip() or "1"
@@ -3433,15 +3896,23 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
     def do_reload_llm(model_name: str, max_tokens: int):
         # Reload just the LLM
         nonlocal llm
-        # CHANGE: skip reload if model unchanged to avoid no-op reinitialization
-        if model_name and getattr(llm, "model_id", None) == model_name and getattr(llm, "max_new_tokens", None) == max_tokens:
+        # CHANGE: skip reload if model unchanged to avoid no-op reinitialization (compare full path / choice id).
+        if (
+            model_name
+            and getattr(llm, "model_path", None) == model_name
+            and getattr(llm, "max_new_tokens", None) == max_tokens
+        ):
             _append_debug("[reload] LLM unchanged; skipping")
             return f"✅ LLM unchanged: {model_name}"
         if model_name:
             # Unload previous model to free memory
-            if llm and llm.model is not None:
+            if llm and (getattr(llm, "model", None) is not None or getattr(llm, "_uses_ollama", False)):
                 llm._unload()
-            model_path = os.path.join(MLX_MODELS_DIR, model_name)
+            # CHANGE: ollama:<tag> uses Ollama; otherwise MLX folder under MLX_MODELS_DIR.
+            if llm_choice_is_ollama(model_name):
+                model_path = model_name
+            else:
+                model_path = os.path.join(MLX_MODELS_DIR, model_name)
             llm = LLMEngine(model_path=model_path, max_new_tokens=max_tokens, temperature=0.7)
             _append_debug(f"[reload] LLM -> {model_name} ({max_tokens} tokens)")
             return f"✅ LLM loaded: {model_name} ({max_tokens} tokens)"
@@ -3590,7 +4061,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                     ### Quick Start Guide
                     
                     **Starting a New Game:**
-                    1. **Select an MLX model** from the dropdown
+                    1. **Select an LLM** from the dropdown (MLX folders or **ollama:**… tags from `ollama list`)
                     2. **Click Load/Reload LLM** (orange button) to load the model
                     3. **Optional:** Set the Theme (world/art style)
                     4. **Optional:** Pick and LLM and click "Generate World Bible" for a new adventure (or use the default)
@@ -3632,9 +4103,11 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 with gr.Row():
                     with gr.Column():
                         mlx_models = list_mlx_models() if check_mlx_available() else []
-                        choices = mlx_models or ["(select later)"]
+                        ollama_models = list_ollama_model_choices()
+                        choices = ollama_models + mlx_models if (ollama_models or mlx_models) else ["(select later)"]
+                        # CHANGE: prefer first Ollama entry (includes qwen3.6:27b-coding-mxfp8 when listed).
                         default_choice = choices[0]
-                        llm_drop = gr.Dropdown(choices, label="MLX Model", value=default_choice)
+                        llm_drop = gr.Dropdown(choices, label="LLM (MLX or Ollama)", value=default_choice)
                         reload_llm_btn = gr.Button("Load/Reload Turn-LLM", variant="primary")
                         llm_status = gr.Markdown()
                         # Save/Load/New Game buttons - grouped below LLM controls
@@ -4298,7 +4771,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(description="LLM Adventure — MLX-LM + MFLUX on Apple Silicon")
     parser.add_argument("--player", type=str, default="Adventurer", help="Player name")
-    parser.add_argument("--model", type=str, default=None, help="MLX model name (directory name in MLX_Models)")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="LLM: MLX folder name under MLX_Models, or ollama:<tag> (e.g. ollama:qwen3.6:27b-coding-mxfp8)",
+    )
     parser.add_argument("--max_tokens", type=int, default=600, help="Max new tokens per turn")
     parser.add_argument("--no-images", action="store_true", help="Disable image generation entirely")
     parser.add_argument("--cli", action="store_true", help="Run in command-line mode instead of Gradio UI")
@@ -4317,10 +4795,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         image_gen = MfluxImageGenerator(model_name="flux2-klein-9b")
         print("Images: enabled via MFLUX (FLUX.2-klein-9B)")
 
-    # Build full model path for MLX
+    # Build full model path for MLX, or pass through ollama:<tag> for Ollama.
     if model_name:
-        model_path = os.path.join(MLX_MODELS_DIR, model_name) if not os.path.isdir(model_name) else model_name
-        print(f"Using LLM (MLX): {model_name}")
+        if llm_choice_is_ollama(model_name):
+            model_path = model_name
+            print(f"Using LLM (Ollama): {ollama_model_from_choice(model_name)}")
+        else:
+            model_path = os.path.join(MLX_MODELS_DIR, model_name) if not os.path.isdir(model_name) else model_name
+            print(f"Using LLM (MLX): {model_name}")
     else:
         model_path = ""
         print("Using LLM (MLX): (select in UI)")

@@ -62,7 +62,7 @@ Then follow the README in whichever game folder you want to play.
 │
 ├── llm_adventure/                     # Game 2: LLM as game master
 │   ├── README.md
-│   ├── LMM_adventure_Feb_15_26.py     # Main game (MLX-LM + MFLUX)
+│   ├── LMM_adventure_April_30.py     # Main game (MLX-LM + MFLUX)
 │   ├── mflux_image_gen.py             # FLUX image generation (Apple Silicon)
 │   └── deprecated_diffuser_server/    # Old diffusion server approach
 │

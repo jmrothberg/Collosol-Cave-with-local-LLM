@@ -21,16 +21,16 @@ huggingface-cli download Qwen/Qwen3-30B-A3B-8bit --local-dir ~/MLX_Models/Qwen3-
 huggingface-cli download AITRADER/FLUX2-klein-9B-mlx-8bit --local-dir ~/Diffusion_Models/FLUX2-klein-9B-mlx-8bit
 
 # Run
-python LMM_adventure_Feb_15_26.py
+python LMM_adventure_April_30.py
 ```
 
 Command-line options:
 
 ```bash
-python LMM_adventure_Feb_15_26.py --model Qwen3-30B-A3B-8bit   # Specify LLM model
-python LMM_adventure_Feb_15_26.py --no-images                    # Disable image generation
-python LMM_adventure_Feb_15_26.py --cli                          # CLI mode (no Gradio UI)
-python LMM_adventure_Feb_15_26.py --player "Gandalf"             # Set player name
+python LMM_adventure_April_30.py --model Qwen3-30B-A3B-8bit   # Specify LLM model
+python LMM_adventure_April_30.py --no-images                    # Disable image generation
+python LMM_adventure_April_30.py --cli                          # CLI mode (no Gradio UI)
+python LMM_adventure_April_30.py --player "Gandalf"             # Set player name
 ```
 
 ---
@@ -179,7 +179,7 @@ The key: all improvements come from the LLM better using the same simple tools.
 
 | File | Description |
 |------|-------------|
-| `LMM_adventure_Feb_15_26.py` | Main game engine (MLX-LM + MFLUX + Gradio) |
+| `LMM_adventure_April_30.py` | Main game engine (MLX-LM + MFLUX + Gradio) |
 | [`../browser_adventure/`](../browser_adventure/) | **JMR's LLM Adventure** (browser) — game + detailed docs ([`adventure.html`](../browser_adventure/adventure.html), [`README.md`](../browser_adventure/README.md)) |
 | `llm_adventure/adventure.html` | Redirect to `../browser_adventure/adventure.html` (keep old bookmarks working) |
 | Root `adventure.html` | Redirect stub when `http.server` runs from repo root (→ `browser_adventure/adventure.html`) |

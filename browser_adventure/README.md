@@ -1,6 +1,6 @@
 # JMR's LLM Adventure — browser edition
 
-In-browser text adventure: **Gemma 4B** (Transformers.js) narrates and runs game logic; **Stable Diffusion 1.5** draws scenes. Same design idea as the Python engine [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py).
+In-browser text adventure: **Gemma 4B** (Transformers.js) narrates and runs game logic; **Stable Diffusion 1.5** draws scenes. Same design idea as the Python engine [`../llm_adventure/LMM_adventure_April_30.py`](../llm_adventure/LMM_adventure_April_30.py).
 
 | File | Role |
 |------|------|
@@ -28,10 +28,20 @@ GitHub Pages serves the **whole repository**, so `adventure.html` can load `../l
 
 For hacking on the repo locally, serve from the **repository root** (`Colossal_Cave/`), not from `browser_adventure/` alone — the page loads workers from **`../llm_adventure/vendor/web-txt2img/`**.
 
+**Finding the script:** `python3 scripts/serve-threaded.py` only works if your shell is already in the repo root; otherwise use the full path to `scripts/serve-threaded.py`.
+
+**Files served:** The dev server always serves from the **repository root** (the folder that contains `browser_adventure/`), even if you start Python from home (`~`). You should see `Root: …/Colossal_Cave` in the terminal when it starts.
+
 ```bash
-cd /path/to/Colossal_Cave   # repo root
+cd /path/to/Colossal_Cave   # repo root — needed for the relative form below
 python3 scripts/serve-threaded.py 8080
 # Open http://localhost:8080/browser_adventure/adventure.html
+```
+
+From any directory (absolute path to the script):
+
+```bash
+python3 /path/to/Colossal_Cave/scripts/serve-threaded.py 8080
 ```
 
 > **Why not `python3 -m http.server`?** The default module does not send `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy`, so the page may not get `crossOriginIsolated` and ONNX can fall back to slower single-threaded WASM.
@@ -286,7 +296,7 @@ The browser page is intentionally smaller in a few areas:
 - **Advanced directives** from the Python engine (timers, chain reactions, etc.) are not implemented in the browser `applyLlmDirectives`—only the table above.
 - World bible generation defaults to the **same Gemma 4B** model as gameplay (vs. a separate heavier model in Python), so generated bibles may be simpler unless you use **local Ollama** for the build step.
 
-For full feature parity, run [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py) on Apple Silicon.
+For full feature parity, run [`../llm_adventure/LMM_adventure_April_30.py`](../llm_adventure/LMM_adventure_April_30.py) on Apple Silicon.
 
 ---
 
@@ -303,4 +313,4 @@ See [Models — internet vs. local](#models--internet-vs-local) above for downlo
 ## More documentation
 
 - Overview and repo layout: [`../llm_adventure/README.md`](../llm_adventure/README.md)
-- Python engine source (full prompts, validation, image pipeline): [`../llm_adventure/LMM_adventure_Feb_15_26.py`](../llm_adventure/LMM_adventure_Feb_15_26.py)
+- Python engine source (full prompts, validation, image pipeline): [`../llm_adventure/LMM_adventure_April_30.py`](../llm_adventure/LMM_adventure_April_30.py)

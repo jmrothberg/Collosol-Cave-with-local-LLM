@@ -9,12 +9,18 @@ Usage:
     # Open http://localhost:8080/browser_adventure/adventure.html
 """
 
+import os
 import sys
 import http.server
 import socketserver
 import threading
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+
+# SimpleHTTPRequestHandler serves the process cwd, not the script's folder. Anchor to repo
+# root (parent of scripts/) so /browser_adventure/... works when launched from ~ or anywhere.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(_REPO_ROOT)
 
 
 class COOPCOEPHandler(http.server.SimpleHTTPRequestHandler):
@@ -32,6 +38,7 @@ class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 with ThreadedServer(("", PORT), COOPCOEPHandler) as httpd:
     print(f"Serving on http://localhost:{PORT}")
+    print(f"  Root: {_REPO_ROOT}")
     print(f"  Game: http://localhost:{PORT}/browser_adventure/adventure.html")
     print(f"  crossOriginIsolated: enabled (COOP + COEP headers)")
     print(f"  Press Ctrl+C to stop.")

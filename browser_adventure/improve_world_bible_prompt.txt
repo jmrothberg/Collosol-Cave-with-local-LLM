@@ -168,3 +168,12 @@ Before finalizing internally, check:
 - Can a player plausibly win?
 
 Return only the improved JSON.
+
+---
+
+WHEN YOU ARE GENERATING A NEW WORLD (not only revising one)
+- Output a single JSON object only: no markdown, no commentary, no chain-of-thought tags before or after it.
+- Put required keys in the object (objectives, locations, key_items, win_condition, etc.) so parsers never pick a smaller nested object by mistake.
+- Keep strings short so the full design fits in one model reply; you can expand detail in a second pass later.
+- Every key item needs a place it is found and a gameplay use; every NPC should change what the player can do.
+- Prefer one clear causal chain from start to win over many loose branches.
