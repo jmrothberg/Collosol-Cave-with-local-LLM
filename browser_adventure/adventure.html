@@ -369,6 +369,11 @@
     import { pipeline, TextStreamer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.1/+esm";
     import { Txt2ImgWorkerClient } from "../llm_adventure/vendor/web-txt2img/index.js";
 
+    // #8 Cache the ORT-Web WASM runtime in the browser so the second visit doesn't re-download
+    // it (useful on flaky networks; harmless when offline). Added in Transformers.js v4.
+    // Feature-detected so 4.0.1 (which lacks this) silently skips it.
+    if ("useWasmCache" in env) env.useWasmCache = true;
+
     // ═══════════════════════════════════════════════════════════════════════════
     // CONFIGURATION
     // ═══════════════════════════════════════════════════════════════════════════
@@ -379,6 +384,26 @@
     const LLM_TEMPERATURE = 1.0;
     const LLM_TOP_P = 0.95;
     const LLM_TOP_K = 64;
+    // #2 Gemma 4 thinking-mode toggles (about_Gemma_4_E4B.txt: <|think|> in system prompt
+    // enables thinking; absence disables). World-bible generation benefits from thinking
+    // (one-time cost, quality matters); per-turn play does not (faster TTFT, more budget
+    // for narration + JSON).
+    // DISABLED 2026-05-02: thinking ON during world-gen contradicts the "output ONLY valid
+    // JSON, no commentary" instruction — Gemma 4 E4B emits thought tokens that pollute the
+    // JSON, retry loop hangs ("dungeon master thinking" never stops). Reverting to original
+    // behavior. Re-enable only after testing thinking + JSON in isolation.
+    const GEMMA_THINK_TOKEN = "<|think|>";
+    const GEMMA_THINKING_FOR_GENERATION = false;
+    const GEMMA_THINKING_FOR_TURNS = false;
+
+    // #3 KV cache reuse across turns (Transformers.js v4.1+ exposes past_key_values via the
+    // pipeline). The system prompt is identical every turn, so re-prefilling it wastes seconds
+    // on a 4B WebGPU model. With this on, only the new user message is prefilled per turn.
+    // Gated behind a flag so a regression is one toggle away; on any past-KV error we
+    // automatically fall back to the full-prompt path for that one turn.
+    // DISABLED 2026-05-02: user reported game not playing after enabling this; reverting to
+    // the v4.0.1-equivalent full-prompt path while we diagnose. Set back to true to re-enable.
+    const USE_KV_CACHE = false;
     const IMG_STEPS = 20;
     const IMG_GUIDANCE = 7.5;
     const IMAGE_THEME = "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere";
@@ -631,6 +656,31 @@
     };
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // PRE-BAKED PRESET WORLD BIBLES (#1 from infrastructure plan)
+    // Map preset name (must match a PRESET_THEMES key) → JSON file shipped with the page.
+    // If a file exists for the picked preset AND the user did not edit the description text,
+    // the start handler short-circuits live generation and uses the validated bible directly.
+    // Other presets fall through to live generateWorldBible — we ship as we validate them.
+    // ═══════════════════════════════════════════════════════════════════════════
+    const PRESET_BIBLE_FILES = {
+      "Colossal Cave (Classic)": "default_cave.json",
+    };
+
+    /** Fetch + lightly validate a pre-baked preset bible. Returns null on any failure
+     *  (caller falls through to live generateWorldBible). */
+    async function loadPresetWorldBible(presetName) {
+      const file = PRESET_BIBLE_FILES[presetName];
+      if (!file) return null;
+      try {
+        const r = await fetch(file);
+        if (!r.ok) return null;
+        const wb = await r.json();
+        if (!wb || !Array.isArray(wb.locations) || wb.locations.length < 1) return null;
+        return wb;
+      } catch { return null; }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // SYSTEM PROMPT — instructs the LLM how to run the adventure
     // ═══════════════════════════════════════════════════════════════════════════
     const SYSTEM_INSTRUCTIONS =
@@ -669,6 +719,12 @@
       "- When a monster is defeated or flees: set_flag {\"name\":\"MONSTER_defeated\",\"value\":true} (MONSTER = monster name with spaces replaced by underscores)\n" +
       "- Use double quotes, no trailing commas in JSON\n" +
       "- META HELP: If the user message includes FULL_WORLD_BIBLE_JSON, they are asking for out-of-character help (goals, strategy, reminders). Use that JSON accurately but answer in natural language. Judge how much to say: a light nudge vs a clearer plan—your discretion. Do not dump the raw JSON unless they explicitly ask for it. For normal in-room actions, that section is omitted—stay in character.\n";
+
+    // #2 Wrap a system prompt with the Gemma 4 thinking token when the per-turn toggle is on.
+    // Default (toggle off) returns the prompt unchanged — current behavior is preserved.
+    function withTurnThinking(systemPrompt) {
+      return GEMMA_THINKING_FOR_TURNS ? GEMMA_THINK_TOKEN + systemPrompt : systemPrompt;
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GAME STATE
@@ -1100,7 +1156,13 @@
         return runLlmGeneration(systemMsg, userMsg, maxTokens, temperature, onChunk);
       };
 
-      const sysMsg = "You are a game designer. Output ONLY valid JSON. No markdown, no commentary.";
+      // #2 Prepend Gemma 4 thinking-mode token for browser world-gen ONLY (not Ollama, which
+      // uses its own thinking control). Thinking ON = better, more solvable bibles at the cost
+      // of one-time generation latency. Per about_Gemma_4_E4B.txt the token must lead the system
+      // prompt. Ollama path is unchanged.
+      const sysMsg = (!useOllama && GEMMA_THINKING_FOR_GENERATION ? GEMMA_THINK_TOKEN : "")
+        + "You are a game designer. Output ONLY valid JSON. No markdown, no commentary.";
+      if (!useOllama && GEMMA_THINKING_FOR_GENERATION) slog("Gemma thinking-mode: ON for world generation");
       const forbidStockNames =
         "Do NOT reuse stock names from the built-in sample cave (e.g. Cave Mouth, Mushroom Grotto, Dark Passage, Underground River, Ancient Forge, Dragon's Vault, Starfire Gem, Old Hermit, River Troll, Stone Dragon) unless the user's theme explicitly names them. Invent fresh proper nouns, NPCs, items, and a distinct quest that fit THIS theme.";
 
@@ -1806,6 +1868,69 @@
       return lines.join("\n");
     }
 
+    /**
+     * #9 Build a state-grounded help context. Small models drop the ball on set-difference
+     * reasoning ("you don't have a torch yet"), so we precompute the deltas the model needs
+     * to give actionable hints anchored in WHAT THE PLAYER HAS AND DOES NOT HAVE.
+     * Returns a small object suitable for JSON.stringify(); empty fields are omitted.
+     */
+    function computeHelpContext(stateMgr, wb) {
+      const out = {};
+      if (!wb || typeof wb !== "object") return out;
+      const s = stateMgr.state;
+      const invLower = new Set((s.inventory || []).map(i => String(i).toLowerCase()));
+      const visited = new Set(Object.keys(s.knownMap || {}));
+
+      // key_items the player neither holds nor has seen in any visited room
+      const seenInRoom = new Set();
+      for (const room of Object.keys(s.roomItems || {})) {
+        if (!visited.has(room)) continue;
+        for (const it of (s.roomItems[room] || [])) seenInRoom.add(String(it).toLowerCase());
+      }
+      const missing = [];
+      const seenNotTaken = [];
+      for (const k of (wb.key_items || [])) {
+        if (!k || typeof k.name !== "string" || !k.name) continue;
+        const nameLower = k.name.toLowerCase();
+        if (invLower.has(nameLower)) continue;
+        if (seenInRoom.has(nameLower)) seenNotTaken.push(k.name);
+        else missing.push(k.name);
+      }
+      if (missing.length) out.missing_items = missing;
+      if (seenNotTaken.length) out.seen_but_not_taken = seenNotTaken;
+
+      // First puzzle_chain step whose `gives` item is not yet in inventory
+      const chain = wb.puzzle_chain || [];
+      for (const step of chain) {
+        if (!step) continue;
+        const givesLower = step.gives ? String(step.gives).toLowerCase() : "";
+        if (givesLower && !invLower.has(givesLower)) {
+          out.next_chain_step = {
+            step: step.step,
+            action: step.action,
+            gives: step.gives || null,
+            unlocks: step.unlocks || null,
+          };
+          break;
+        }
+      }
+
+      // Rooms in the bible the player has never entered
+      const allRooms = (wb.locations || []).map(l => l && l.name).filter(Boolean);
+      const unvisited = allRooms.filter(n => !visited.has(n));
+      if (unvisited.length) out.unvisited_rooms = unvisited;
+
+      // Current-room blocker if the matching `_unblocked` flag isn't set
+      for (const loc of (wb.locations || [])) {
+        if (!loc || loc.name !== s.location) continue;
+        const ubKey = String(loc.name).replace(/[^a-zA-Z0-9]+/g, "_") + "_unblocked";
+        if (loc.blocked_by && !s.gameFlags[ubKey]) out.blocked_here = loc.blocked_by;
+        break;
+      }
+
+      return out;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // BUILD USER PROMPT — provides game state context to the LLM
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1881,17 +2006,29 @@
 
       const metaHelp = playerWantsMetaHelp(playerInput);
       let metaBlock = "";
+      let helpCtxKeys = [];
       if (metaHelp) {
+        // #9 Anchor hints in the player's actual state — what they have AND what they don't.
+        // Small models do this badly when asked to "diff inventory against key_items"; we
+        // precompute the diff so the model just narrates it.
+        const helpCtx = computeHelpContext(stateMgr, activeWorldBible);
+        helpCtxKeys = Object.keys(helpCtx);
+        const helpCtxBlock = helpCtxKeys.length
+          ? "\nPLAYER STATE FOR HINTS (anchor your answer in these — what they have, what they're missing, where to go next):\n"
+            + JSON.stringify(helpCtx)
+          : "";
         metaBlock =
           "\n---\nWORLD BIBLE SUMMARY (use to give helpful hints without spoiling everything):\n" +
           compactWorldBibleForHelp(activeWorldBible) +
+          helpCtxBlock +
           "\n---\n";
       }
 
       // Build a short summary of which cues were injected (for debug panel)
       const cueSummary = (cues.length
         ? "cues: " + cues.map(c => c.split(":")[0].trim()).join(", ")
-        : "cues: none") + (metaHelp ? " | metaHelp: compact bible summary attached" : "");
+        : "cues: none")
+        + (metaHelp ? ` | metaHelp: bible + helpCtx[${helpCtxKeys.join(",") || "empty"}]` : "");
 
       // Compact JSON (no indentation) to save tokens; meta help adds full bible in one pass
       const prompt = (
@@ -1933,6 +2070,14 @@
     // LLM ENGINE — Gemma 4B via Transformers.js
     // ═══════════════════════════════════════════════════════════════════════════
     let llmPipe = null;
+    // #3 KV cache reuse — see USE_KV_CACHE flag above. null = next call rebuilds from
+    // [system, user]; non-null = next call sends only [user] with this past KV. Reset on
+    // new game / theme change / restart, and automatically on any past-KV decode error.
+    let llmKvCache = null;
+    function resetLlmKvCache(reason) {
+      if (llmKvCache !== null && reason) console.log(`[kv-cache] reset: ${reason}`);
+      llmKvCache = null;
+    }
 
     /**
      * Gemma 4 ONNX repo stores the Jinja template in chat_template.jinja; tokenizer_config.json
@@ -2028,23 +2173,51 @@
 
     async function generateLlmResponse(systemPrompt, userPrompt) {
       if (!llmPipe) return "(LLM not loaded)";
-      const messages = [
+      // #3 KV-cache path: reuse past_key_values across turns (Transformers.js v4.1+).
+      // When llmKvCache is non-null we send ONLY the new user message; the past KV represents
+      // [system + prior turns] and we save several seconds of re-prefill on a 4B WebGPU model.
+      // Default-on; on any past-KV failure we fall back to the full [system, user] path for
+      // this single turn (and reset the cache) so the game never breaks because of #3.
+      const useKv = USE_KV_CACHE && llmKvCache !== null;
+      const fullMessages = [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ];
+      const messages = useKv ? [{ role: "user", content: userPrompt }] : fullMessages;
       let text = "";
       const streamer = new TextStreamer(llmPipe.tokenizer, {
         skip_prompt: true,
         callback_function: (piece) => { text += piece; },
       });
-      await llmPipe(messages, {
+      const baseArgs = {
         max_new_tokens: LLM_MAX_TOKENS,
         temperature: LLM_TEMPERATURE,
         top_p: LLM_TOP_P,
         top_k: LLM_TOP_K,
         do_sample: true,
         streamer,
-      });
+      };
+      const genArgs = USE_KV_CACHE
+        ? { ...baseArgs, past_key_values: llmKvCache, return_dict_in_generate: true }
+        : baseArgs;
+      try {
+        const out = await llmPipe(messages, genArgs);
+        if (USE_KV_CACHE && out && typeof out === "object" && out.past_key_values) {
+          llmKvCache = out.past_key_values;
+        }
+      } catch (e) {
+        if (useKv) {
+          // Past KV may be incompatible (model restart, context overflow, API mismatch).
+          // Reset and retry once with the full prompt — exactly the v4.0.1-equivalent path.
+          console.warn("[kv-cache] decode failed with past KV — falling back:", e.message);
+          resetLlmKvCache("decode error");
+          text = "";
+          const fallbackArgs = { ...baseArgs };
+          await llmPipe(fullMessages, fallbackArgs);
+        } else {
+          throw e;
+        }
+      }
       return text;
     }
 
@@ -2201,6 +2374,7 @@
     function worldSourceLabel() {
       switch (lastWorldBibleSource) {
         case "default_builtin": return "built-in default cave";
+        case "preset_baked": return "pre-baked preset (validated)";
         case "generated_browser": return "generated (browser Gemma)";
         case "generated_ollama": return "generated (Ollama)";
         case "generated_failed_fallback": return "generation failed → built-in default";
@@ -2342,6 +2516,8 @@
       const wb = activeWorldBible;
       const theme = wb.global_theme || IMAGE_THEME;
       turnCounter = 0;
+      // #3 New story = new system prompt (kickoff) — past KV from any prior game is invalid.
+      resetLlmKvCache("new story");
 
       // Seed the game state from world bible before LLM kickoff
       seedGameFromBible(stateMgr, wb);
@@ -2365,7 +2541,7 @@
         "IMPORTANT: Include an image prompt in your JSON.\n\n" +
         `Theme: ${theme}`;
 
-      const sysPrompt = SYSTEM_INSTRUCTIONS + wbHint;
+      const sysPrompt = withTurnThinking(SYSTEM_INSTRUCTIONS + wbHint);
       const debugHeader = [`── Turn 0 (start) ──`, `prompt: sys=${sysPrompt.length} user=${kickoff.length} chars`];
 
       showThinking();
@@ -2429,7 +2605,7 @@
       stateMgr.state.recentHistory.push({ player: playerInput, response: "" });
       if (stateMgr.state.recentHistory.length > 5) stateMgr.state.recentHistory.shift();
 
-      const systemPrompt = SYSTEM_INSTRUCTIONS;
+      const systemPrompt = withTurnThinking(SYSTEM_INSTRUCTIONS);
       const { prompt: userPrompt, cueSummary } = buildUserPrompt(stateMgr, playerInput);
       const debugHeader = [`── Turn ${turnCounter} ──`, `prompt: sys=${systemPrompt.length} user=${userPrompt.length} chars`];
 
@@ -2811,7 +2987,29 @@
           genOpts.ollamaBase = ollamaBase;
           genOpts.ollamaModel = ollamaModel;
         }
-        try {
+        // #1 PRESET SHORT-CIRCUIT: if the user picked a preset name AND did not edit the
+        // description text, try to load the pre-baked bible. Only short-circuits when both
+        // conditions hold so custom themes still always run live generation (hard rule #2).
+        const presetName = themeSelect.value || "";
+        const presetUntouched = !!presetName
+          && !!PRESET_THEMES[presetName]
+          && PRESET_THEMES[presetName] === theme;
+        let presetWb = null;
+        if (presetUntouched && PRESET_BIBLE_FILES[presetName]) {
+          setLoad({ text: `Loading pre-baked preset: ${presetName}…` });
+          presetWb = await loadPresetWorldBible(presetName);
+        }
+        if (presetWb) {
+          activeWorldBible = presetWb;
+          stateMgr.state = createGameState();
+          lastWorldBibleSource = "preset_baked";
+          pendingWorldGenDebug = [
+            `Loaded pre-baked preset: ${presetName} (${PRESET_BIBLE_FILES[presetName]})`,
+            `rooms=${presetWb.locations.length} items=${(presetWb.key_items || []).length} chain=${(presetWb.puzzle_chain || []).length}`,
+            "Skipped live world-bible LLM generation (preset already validated).",
+          ];
+          // fall through to scene-image / start-story below; skip generation block
+        } else try {
           setLoad({ text: "Generating world bible…" });
           const wb = await generateWorldBible(theme, (msg) => setLoad({ text: msg }), genOpts);
           activeWorldBible = wb;
@@ -2928,6 +3126,8 @@
     $("btn-new-adventure").addEventListener("click", () => {
       if (!confirm("Leave current game and choose a new adventure?")) return;
       setInputEnabled(false);
+      // #3 Different adventure = different bible cues = invalid past KV.
+      resetLlmKvCache("new adventure");
       switchToPicker();
     });
 

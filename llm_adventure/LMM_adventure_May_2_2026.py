@@ -212,6 +212,19 @@ PRESET_THEMES = {
 # When True, include timer_event, conditional_action, chain_reaction, mechanics.
 ADVANCED_DIRECTIVES = False
 
+# CHANGE (chunk D): Verbose tool logs are noisy. By default the UI only shows the per-turn
+# [SUMMARY] line plus any [WARN]/[WARNING] lines from apply_llm_directives. Set the env var
+# ADV_VERBOSE_DEBUG=1 to see every tool.* entry (room_take, place_item, etc.) — useful when
+# debugging a specific bad turn.
+ADV_VERBOSE_DEBUG = os.environ.get("ADV_VERBOSE_DEBUG", "").lower() in {"1", "true", "yes"}
+
+# CHANGE (chunk O): engine-note injection into the next user prompt is OFF by default.
+# 30B-class local models tend to narrate better when not constantly nagged with
+# "fix this now" notes. The notes are still emitted into [SUMMARY] / debug for the
+# user. Set ADV_INJECT_ENGINE_NOTES=1 to feed them to the model on the next turn
+# (useful when actively diagnosing why a model keeps making the same mistake).
+ADV_INJECT_ENGINE_NOTES = os.environ.get("ADV_INJECT_ENGINE_NOTES", "").lower() in {"1", "true", "yes"}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HELPER UTILITIES
@@ -233,6 +246,54 @@ def _is_small_model(model_id: str) -> bool:
         '32b', '35b', 'qwen', 'gemma', 'phi', 'mistral-7',
     ]
     return any(ind in lower for ind in small_indicators)
+
+
+# CHANGE (chunk D): minimum-but-rich debug helpers — produce one [SUMMARY] line per turn
+# and let callers filter the rest down to warnings unless ADV_VERBOSE_DEBUG is on.
+def _format_turn_summary(
+    prev: Dict[str, Any],
+    post: Dict[str, Any],
+    warning_count: int,
+    payload_count: int,
+) -> str:
+    """Single line capturing what changed this turn — keep it tight and act-on-able."""
+    inv_prev = set(prev.get("inventory", []))
+    inv_post = set(post.get("inventory", []))
+    inv_added = sorted(inv_post - inv_prev)
+    inv_removed = sorted(inv_prev - inv_post)
+
+    flags_prev = set(prev.get("flags", []))
+    flags_post = set(post.get("flags", []))
+    flags_added = sorted(flags_post - flags_prev)
+
+    loc_prev = prev.get("location") or "?"
+    loc_post = post.get("location") or "?"
+    loc_part = f"loc={loc_post}" if loc_prev == loc_post else f"loc={loc_prev}->{loc_post}"
+
+    hp_prev = prev.get("health", 0)
+    hp_post = post.get("health", 0)
+    hp_part = f"hp={hp_post}" if hp_prev == hp_post else f"hp={hp_prev}->{hp_post}"
+
+    inv_part = ""
+    if inv_added:
+        inv_part += f" inv+={','.join(inv_added)}"
+    if inv_removed:
+        inv_part += f" inv-={','.join(inv_removed)}"
+    flag_part = f" flags+={','.join(flags_added)}" if flags_added else ""
+
+    return (
+        f"[SUMMARY] {loc_part} {hp_part}"
+        f"{inv_part}{flag_part}"
+        f" json={payload_count} warns={warning_count}"
+    )
+
+
+def _filter_tool_logs_for_display(tool_logs: List[str], verbose: bool) -> List[str]:
+    """Return only summary + warning lines unless verbose is on (chunk D)."""
+    if verbose:
+        return list(tool_logs)
+    keep_prefixes = ("[SUMMARY]", "[WARN]", "[WARNING]")
+    return [ln for ln in tool_logs if any(ln.startswith(p) for p in keep_prefixes)]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -691,6 +752,24 @@ class GameState:
     # === GAME FLAGS (LLM-defined states) ===
     # Flexible flags the LLM can set for any purpose (puzzles, states, timers, etc.)
     game_flags: Dict[str, Any] = field(default_factory=dict)
+
+    # === ENGINE NOTES (chunk J) ===
+    # Warnings produced by the engine on the previous turn (e.g. room_take MISS,
+    # add+remove auto-corrected). These are surfaced into the NEXT user prompt so
+    # the LLM stops repeating the same mistake within one session. Cleared after use.
+    engine_notes_for_next_turn: List[str] = field(default_factory=list)
+
+    # === SESSION COUNTERS (chunk K post-mortem) ===
+    # Aggregated tallies that drive the end-of-session report. Strictly grow.
+    session_turns: int = 0
+    warnings_history: List[str] = field(default_factory=list)
+    chain_steps_completed: List[int] = field(default_factory=list)
+
+    # === RUNTIME PROMPT TIGHTENING (chunk N) ===
+    # We only dump full world-bible cues for a room on the FIRST turn the player is
+    # there. After that the LLM has the description in its recent_history. Reset to
+    # "" on death/restart so the new run gets a full opening.
+    last_described_room: str = ""
     
     # === IMAGE CACHING SYSTEM (belongs in game state - prevents regeneration) ===
     # CRITICAL FOR EFFICIENCY: Tracks which locations/items already have images
@@ -1311,13 +1390,18 @@ def ollama_model_from_choice(model_path: str) -> str:
 
 
 def ollama_chat_generate(
-    model_name: str, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float
+    model_name: str, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float,
+    json_mode: bool = False,
 ) -> str:
     # CHANGE: Ollama path for LLMEngine — uses native chat API (no MLX load).
+    # CHANGE (Qwen3.6/Gemma4 calibration): when json_mode=True we pass `format="json"`
+    # to Ollama. Ollama's runtime will then ENFORCE strict JSON output at decode time,
+    # which is the single biggest reliability win for world-bible generation on local
+    # 30B models. (Ignored on the MLX backend; we keep prompt-level JSON guidance there.)
     if ollama_pkg is None:
         return "(LLM error: ollama package not installed; pip install ollama)"
     try:
-        r = ollama_pkg.chat(
+        kwargs = dict(
             model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -1325,6 +1409,9 @@ def ollama_chat_generate(
             ],
             options={"num_predict": max_tokens, "temperature": temperature},
         )
+        if json_mode:
+            kwargs["format"] = "json"
+        r = ollama_pkg.chat(**kwargs)
         if hasattr(r, "message") and r.message is not None:
             content = getattr(r.message, "content", None) or ""
         elif isinstance(r, dict):
@@ -1372,10 +1459,14 @@ class LLMEngine:
         except Exception:
             pass
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
+    def generate(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
+        # CHANGE (Qwen3.6/Gemma4 calibration): json_mode flag plumbs Ollama's strict
+        # JSON output mode through to the runtime. World-bible generators set this to
+        # True; runtime narrator leaves it False (it needs free-form prose + a JSON block).
         if self._uses_ollama:
             return ollama_chat_generate(
-                self.model_id, system_prompt, user_prompt, self.max_new_tokens, self.temperature
+                self.model_id, system_prompt, user_prompt, self.max_new_tokens, self.temperature,
+                json_mode=json_mode,
             )
         if self.model is None or self.tokenizer is None:
             return "(LLM error: no model loaded)"
@@ -1583,14 +1674,43 @@ def strip_llm_thinking_blocks(text: str) -> str:
     """
     Remove chain-of-thought / analysis wrappers so balanced-brace JSON scan
     starts at the real world-bible object (not a tiny snippet inside reasoning).
+    Also used in apply_llm_directives so player-facing narration drops reasoning prefixes.
     """
     t = text
-    # Common tag pairs (reasoning models; strip so the first `{` is the world bible)
+    # Common tag pairs (reasoning models; strip so the first `{` is the world bible / json)
     for pat in (
-        r"<redacted_thinking>[\s\S]*?</redacted_thinking>",
         r"<think>[\s\S]*?</think>",
-        r"<\|channel>thought[\s\S]*?<channel\|>",  # Gemma-style thought channel
+        r"<redacted_thinking>[\s\S]*?</redacted_thinking>",
+        r"<\|think\|>[\s\S]*?<\|/think\|>",
+        r"<\|channel\|>thought[\s\S]*?<\|channel\|>",
+        r"<\|channel\|>[\s\S]*?<\|channel\|>",
+        r"<channel\|>[\s\S]*?\|>",
     ):
+        t = re.sub(pat, "", t, flags=re.IGNORECASE)
+    # Unclosed reasoning tail (cap length so we do not wipe a whole reply by mistake)
+    t = re.sub(r"<think>[\s\S]{0,50000}$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"<redacted_thinking>[\s\S]{0,50000}$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^[\s\n]*<channel\|>\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^[\s\n]*<\|channel\|>\s*", "", t, flags=re.IGNORECASE)
+
+    # CHANGE (Qwen3.6/Gemma4 calibration): chat-template control tokens that occasionally
+    # leak through when sampling near a turn boundary. Stripping them is always safe —
+    # they are never legitimate game content.
+    qwen_gemma_tokens = [
+        r"<\|im_start\|>(?:system|user|assistant)?\s*",
+        r"<\|im_end\|>",
+        r"<\|endoftext\|>",
+        r"<\|begin_of_text\|>",
+        r"<\|end_of_text\|>",
+        r"<\|start_header_id\|>(?:system|user|assistant)?<\|end_header_id\|>",
+        r"<\|eot_id\|>",
+        r"<start_of_turn>(?:user|model)?\s*",  # Gemma
+        r"<end_of_turn>",                       # Gemma
+        r"<bos>",
+        r"<eos>",
+        r"<pad>",
+    ]
+    for pat in qwen_gemma_tokens:
         t = re.sub(pat, "", t, flags=re.IGNORECASE)
     return t.strip()
 
@@ -1609,9 +1729,16 @@ def score_world_bible_candidate(d: Dict[str, Any]) -> int:
     ki = d.get("key_items")
     if isinstance(ki, list) and len(ki) > 0:
         s += 80 + min(len(ki), 12) * 6
+    # CHANGE (chunk G): structured win_condition scores higher than free-form string.
     wc = d.get("win_condition")
-    if isinstance(wc, str) and wc.strip():
-        s += 100
+    if isinstance(wc, dict):
+        # Structured form is preferred; reward presence of either required_items or required_location.
+        if wc.get("required_items") or wc.get("required_location"):
+            s += 130
+        else:
+            s += 60
+    elif isinstance(wc, str) and wc.strip():
+        s += 80
     for k in ("npcs", "monsters", "riddles", "mechanics", "progression_hints", "main_arc"):
         v = d.get(k)
         if isinstance(v, list) and len(v) > 0:
@@ -1867,7 +1994,19 @@ def validate_world_bible(world_bible: Dict[str, Any]) -> Tuple[bool, List[str]]:
     for field in required_fields:
         if field not in world_bible or not world_bible[field]:
             issues.append(f"Missing or empty required field: {field}")
-    
+
+    # CHANGE (chunk G): allow either the new struct or a string (string is normalized later).
+    wc = world_bible.get("win_condition")
+    if wc is not None:
+        if isinstance(wc, dict):
+            if not wc.get("required_items") and not wc.get("required_location"):
+                issues.append("win_condition has no required_items and no required_location — not winnable")
+        elif isinstance(wc, str):
+            if not wc.strip():
+                issues.append("win_condition is an empty string")
+        else:
+            issues.append(f"win_condition must be a dict or string, got {type(wc).__name__}")
+
     # Check minimum complexity
     if "locations" in world_bible:
         if len(world_bible["locations"]) < 5:
@@ -1897,6 +2036,856 @@ def validate_world_bible(world_bible: Dict[str, Any]) -> Tuple[bool, List[str]]:
     return len(issues) == 0, issues
 
 
+# CHANGE (chunk A): solvability validator. Builds the room graph from `locations[].exits`,
+# verifies reachability from the start to the win-condition location, checks every key_item
+# is placed somewhere, every blocker references a real item, and the solution_chain steps
+# move along the actual graph. Returns (ok, gaps, human_readable_report) — the report is
+# what we print so users can see WHY a generated bible failed.
+def validate_world_bible_solvability(world_bible: Dict[str, Any]) -> Tuple[bool, List[str], str]:
+    gaps: List[str] = []
+    report: List[str] = []
+    if not isinstance(world_bible, dict):
+        return False, ["world_bible is not a dict"], "world_bible is not a dict"
+
+    # ---- Build room graph (treat exits as bidirectional, same as the engine) ----
+    locs = world_bible.get("locations") or []
+    loc_names: List[str] = []
+    graph: Dict[str, List[str]] = {}
+    for loc in locs:
+        if not isinstance(loc, dict):
+            continue
+        nm = str(loc.get("name") or "").strip()
+        if not nm:
+            continue
+        loc_names.append(nm)
+        graph[nm] = [str(e).strip() for e in (loc.get("exits") or []) if isinstance(e, str)]
+    loc_set = set(loc_names)
+    if not loc_set:
+        return False, ["no usable locations in world bible"], "no usable locations"
+
+    sym: Dict[str, Set[str]] = {n: set() for n in loc_set}
+    for a, neigh in graph.items():
+        for b in neigh:
+            if b in loc_set:
+                sym[a].add(b)
+                sym[b].add(a)
+            else:
+                gaps.append(f"location '{a}' lists exit to unknown room '{b}'")
+
+    # Reachability from start (first listed location)
+    start = loc_names[0]
+    seen: Set[str] = {start}
+    stack = [start]
+    while stack:
+        cur = stack.pop()
+        for nxt in sym.get(cur, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    unreachable = sorted(loc_set - seen)
+    if unreachable:
+        gaps.append(f"unreachable rooms from start '{start}': {', '.join(unreachable)}")
+
+    # ---- Items ----
+    item_names: List[str] = []
+    for ki in world_bible.get("key_items") or []:
+        if isinstance(ki, dict):
+            n = str(ki.get("name") or "").strip()
+            if n:
+                item_names.append(n)
+    item_set = set(item_names)
+
+    item_locations = world_bible.get("item_locations") or {}
+    placed_count = 0
+    for it in item_names:
+        if it not in item_locations:
+            gaps.append(f"key_item '{it}' has no entry in item_locations (player cannot obtain it)")
+            continue
+        loc_desc = str(item_locations[it])
+        if any(rn.lower() in loc_desc.lower() for rn in loc_set):
+            placed_count += 1
+        else:
+            gaps.append(f"item_locations['{it}'] = '{loc_desc}' references no known room")
+
+    # ---- Win condition (structured form from chunk G) ----
+    parsed_win = _parse_win_condition(world_bible)
+    win_loc = parsed_win.get("required_location")
+    win_items = parsed_win.get("required_items") or []
+    if win_loc and win_loc not in loc_set:
+        gaps.append(f"win_condition.required_location '{win_loc}' is not a known room")
+    elif win_loc and win_loc not in seen:
+        gaps.append(f"win_condition.required_location '{win_loc}' not reachable from start '{start}'")
+    for it in win_items:
+        if it not in item_set:
+            gaps.append(f"win_condition.required_items references '{it}' missing from key_items")
+    if not win_items and not win_loc:
+        gaps.append("win_condition has no required_items and no required_location — cannot determine victory")
+
+    # ---- NPCs / monsters / riddles must live in known rooms ----
+    for who_key, label in (("npcs", "npc"), ("monsters", "monster"), ("riddles", "riddle")):
+        for entry in world_bible.get(who_key, []) or []:
+            if not isinstance(entry, dict):
+                continue
+            loc_at = str(entry.get("location") or "").strip()
+            who = str(entry.get("name") or entry.get("hint") or "?")
+            if loc_at and loc_at not in loc_set:
+                gaps.append(f"{label} '{who}' lives in unknown room '{loc_at}'")
+
+    # ---- Monster weaknesses should reference at least one key_item ----
+    for m in world_bible.get("monsters", []) or []:
+        if not isinstance(m, dict):
+            continue
+        wk = str(m.get("weakness") or "").lower()
+        if wk and not any(it.lower() in wk for it in item_set):
+            gaps.append(
+                f"monster '{m.get('name', '?')}' weakness '{m.get('weakness')}' "
+                "does not reference any key_item — player has no defined way to defeat it"
+            )
+
+    # ---- solution_chain consistency (the strongest solvability signal) ----
+    chain = world_bible.get("solution_chain") or []
+    if not chain:
+        gaps.append("no solution_chain provided — cannot verify the puzzle is winnable")
+    else:
+        prev_loc: Optional[str] = None
+        for i, step in enumerate(chain):
+            if not isinstance(step, dict):
+                gaps.append(f"solution_chain[{i}] is not an object")
+                continue
+            sl = str(step.get("location") or "").strip()
+            req = step.get("requires_item")
+            if sl and sl not in loc_set:
+                gaps.append(f"solution_chain[{i}].location '{sl}' is unknown")
+            if isinstance(req, str) and req and req not in item_set:
+                gaps.append(f"solution_chain[{i}].requires_item '{req}' missing from key_items")
+            if prev_loc and sl in loc_set and prev_loc in loc_set and sl != prev_loc:
+                # Allow multi-hop reachability via the graph
+                sub = {prev_loc}
+                st = [prev_loc]
+                while st:
+                    cu = st.pop()
+                    for nx in sym.get(cu, ()):
+                        if nx not in sub:
+                            sub.add(nx)
+                            st.append(nx)
+                if sl not in sub:
+                    gaps.append(f"solution_chain[{i}] jumps from '{prev_loc}' to '{sl}' with no path")
+            prev_loc = sl
+        if win_loc and isinstance(chain[-1], dict):
+            last_loc = str(chain[-1].get("location") or "").strip()
+            if last_loc and last_loc != win_loc:
+                gaps.append(f"solution_chain ends at '{last_loc}' but win_condition requires '{win_loc}'")
+
+    # ---- Build the report ----
+    report.append(f"[solvability] rooms={len(loc_set)} reachable_from_'{start}'={len(seen)}/{len(loc_set)}")
+    report.append(f"[solvability] items={len(item_set)} placed_in_known_rooms={placed_count}/{len(item_set)}")
+    if win_loc:
+        report.append(
+            f"[solvability] win_location='{win_loc}' reachable={'yes' if win_loc in seen else 'NO'}"
+        )
+    report.append(f"[solvability] solution_chain steps={len(chain)}")
+    if gaps:
+        report.append(f"[solvability] gaps ({len(gaps)}):")
+        for g in gaps[:25]:
+            report.append(f"  - {g}")
+        if len(gaps) > 25:
+            report.append(f"  - … {len(gaps) - 25} more")
+    else:
+        report.append("[solvability] gaps: none — looks solvable")
+    return (len(gaps) == 0), gaps, "\n".join(report)
+
+
+# CHANGE (chunk M): per-gap LLM micro-repair.
+# Asking a 30B-class model to regenerate the whole world bible to fix one issue
+# is unreliable — it tends to introduce new mistakes elsewhere. Instead, ask
+# ONE narrow multiple-choice question per gap and apply the answer in code.
+# This plays to the strength of small instruction-following models (pick one
+# from a list) and avoids exercising their weakness (long, cross-referenced
+# JSON generation).
+def _ask_one_choice(
+    wb_engine: "LLMEngine", system_msg: str, question: str, choices: List[str]
+) -> Optional[str]:
+    """Ask the LLM to pick ONE entry from `choices`. Returns the matched choice or None.
+
+    The model only has to copy a string from a list — far more reliable than
+    open-ended JSON. We accept exact, case-insensitive, and substring matches.
+    """
+    if not choices:
+        return None
+    prompt = (
+        f"{question}\n\n"
+        "Pick exactly ONE option from this list. Reply with the chosen text on a single line, "
+        "with no quotes, no JSON, no explanation, no markdown — just the option text.\n"
+        "Options:\n"
+        + "\n".join(f"  - {c}" for c in choices)
+    )
+    resp = wb_engine.generate(system_msg, prompt) or ""
+    cleaned = strip_llm_thinking_blocks(resp).strip().strip("`'\" \n")
+    if not cleaned:
+        return None
+    first_line = cleaned.splitlines()[0].strip().strip("`'\" -*")
+    if not first_line:
+        return None
+    # Exact match
+    for c in choices:
+        if c == first_line:
+            return c
+    # Case-insensitive
+    fl = first_line.lower()
+    for c in choices:
+        if c.lower() == fl:
+            return c
+    # Substring match in either direction
+    for c in choices:
+        if c.lower() in fl or fl in c.lower():
+            return c
+    return None
+
+
+def micro_repair_world_bible(
+    world_bible: Dict[str, Any], wb_engine: "LLMEngine", system_msg: str
+) -> List[str]:
+    """Run targeted, narrow LLM questions for gaps that benefit from a thematic
+    choice (monster weaknesses, chain step items, broken exits). Each fix is one
+    short LLM call with a constrained answer set. Returns repair messages.
+    """
+    repairs: List[str] = []
+    if not isinstance(world_bible, dict):
+        return repairs
+
+    loc_names = [
+        str((l or {}).get("name", "")).strip()
+        for l in (world_bible.get("locations") or [])
+        if isinstance(l, dict)
+    ]
+    loc_names = [l for l in loc_names if l]
+    loc_set = set(loc_names)
+
+    item_names = [
+        str((i or {}).get("name", "")).strip()
+        for i in (world_bible.get("key_items") or [])
+        if isinstance(i, dict)
+    ]
+    item_names = [n for n in item_names if n]
+
+    # Items that auto_repair (chunk H) speculatively added end up with purposes
+    # like "Defeats Golem" or "Reward of riddle …". They're placeholders the LLM
+    # should replace with thematically real items when possible.
+    h_placeholders = set()
+    for ki in world_bible.get("key_items", []) or []:
+        if not isinstance(ki, dict):
+            continue
+        purpose = str(ki.get("purpose") or "")
+        if purpose.startswith("Defeats ") or purpose.startswith("Reward of "):
+            n = str(ki.get("name") or "").strip()
+            if n:
+                h_placeholders.add(n)
+
+    real_items = [n for n in item_names if n not in h_placeholders]
+
+    # ─── (1) Monster weaknesses pointing at H-placeholder items ────────────
+    for m in world_bible.get("monsters", []) or []:
+        if not isinstance(m, dict):
+            continue
+        wk = str(m.get("weakness") or "").strip()
+        if wk and wk in h_placeholders and real_items:
+            question = (
+                f"Monster '{m.get('name','?')}' (in {m.get('location','?')}) currently has "
+                f"weakness '{wk}', which was auto-generated and is not a real game item. "
+                "Choose the most thematic existing item the player would use to defeat this monster."
+            )
+            chosen = _ask_one_choice(wb_engine, system_msg, question, real_items)
+            if chosen and chosen != wk:
+                m["weakness"] = chosen
+                # Drop the placeholder item so it doesn't pollute the inventory.
+                world_bible["key_items"] = [
+                    ki for ki in world_bible.get("key_items", []) or []
+                    if not (isinstance(ki, dict) and ki.get("name") == wk)
+                ]
+                repairs.append(
+                    f"micro: monster '{m.get('name','?')}' weakness '{wk}' → existing item '{chosen}' "
+                    f"(removed placeholder item)"
+                )
+                # Keep our local lists in sync
+                if wk in item_names:
+                    item_names.remove(wk)
+                h_placeholders.discard(wk)
+                real_items = [n for n in item_names if n not in h_placeholders]
+
+    # ─── (2) Solution-chain steps whose requires_item was cleared by H ─────
+    chain = world_bible.get("solution_chain") or []
+    if isinstance(chain, list):
+        for i, step in enumerate(chain):
+            if not isinstance(step, dict):
+                continue
+            if step.get("requires_item") is None:
+                blk = str(step.get("blocker") or "").strip()
+                sl = str(step.get("location") or "?")
+                if blk and len(real_items) >= 2:
+                    question = (
+                        f"In solution_chain step {i+1} at room '{sl}', the player faces blocker "
+                        f"'{blk}'. Choose ONE existing item the player would need to overcome this "
+                        "blocker, or pick 'NONE' if no item is needed."
+                    )
+                    chosen = _ask_one_choice(
+                        wb_engine, system_msg, question, real_items + ["NONE"]
+                    )
+                    if chosen and chosen != "NONE":
+                        step["requires_item"] = chosen
+                        repairs.append(
+                            f"micro: solution_chain[{i}].requires_item set to '{chosen}' "
+                            f"(blocker: {blk[:40]})"
+                        )
+
+    # ─── (3) Room exits pointing at unknown rooms ──────────────────────────
+    for loc in world_bible.get("locations", []) or []:
+        if not isinstance(loc, dict):
+            continue
+        nm = str(loc.get("name") or "").strip()
+        ex_list = loc.get("exits")
+        if not isinstance(ex_list, list):
+            continue
+        new_list: List[str] = []
+        for ex in ex_list:
+            if not isinstance(ex, str):
+                continue
+            ex_s = ex.strip()
+            if not ex_s:
+                continue
+            if ex_s in loc_set:
+                if ex_s not in new_list:
+                    new_list.append(ex_s)
+                continue
+            others = [l for l in loc_names if l != nm and l not in new_list]
+            if not others:
+                continue
+            question = (
+                f"Room '{nm}' lists an exit to '{ex_s}', but '{ex_s}' is not a real room in "
+                "this game. Choose ONE real room name from the list to replace it (the player "
+                "should be able to move from one to the other)."
+            )
+            chosen = _ask_one_choice(wb_engine, system_msg, question, others)
+            if chosen and chosen not in new_list:
+                new_list.append(chosen)
+                repairs.append(
+                    f"micro: exit '{nm}' → '{ex_s}' replaced with real room '{chosen}'"
+                )
+        if new_list != ex_list:
+            loc["exits"] = new_list
+
+    # Invalidate cached parsed win condition so it re-derives if needed
+    world_bible.pop("_win_parsed", None)
+    return repairs
+
+
+# CHANGE (chunk H): deterministic, surgical auto-repair of common world-bible gaps.
+# Most generation problems on local models are mechanical: a name typo, a missing
+# item_locations entry, an unreachable room, an NPC parked in an invented room.
+# Fixing these in code BEFORE asking the LLM to retry saves a generation round-trip
+# and produces playable bibles even from sloppy generators. Mutates world_bible.
+def auto_repair_world_bible(world_bible: Dict[str, Any]) -> List[str]:
+    """
+    Apply local fixes to world_bible IN PLACE. Returns a list of human-readable
+    repair messages so the generator can show the user exactly what changed.
+    Idempotent: running it twice on a clean bible returns [].
+    """
+    repairs: List[str] = []
+    if not isinstance(world_bible, dict):
+        return repairs
+
+    locs = world_bible.get("locations")
+    if not isinstance(locs, list) or not locs:
+        return repairs
+
+    loc_names: List[str] = []
+    for loc in locs:
+        if isinstance(loc, dict):
+            nm = str(loc.get("name") or "").strip()
+            if nm:
+                loc_names.append(nm)
+    if not loc_names:
+        return repairs
+
+    loc_set = set(loc_names)
+    start_room = loc_names[0]
+
+    # ─── Items: collect names from key_items ────────────────────────────────
+    key_items = world_bible.get("key_items")
+    if not isinstance(key_items, list):
+        key_items = []
+        world_bible["key_items"] = key_items
+    item_names: List[str] = []
+    for it in key_items:
+        if isinstance(it, dict):
+            n = str(it.get("name") or "").strip()
+            if n:
+                item_names.append(n)
+    item_set = set(item_names)
+
+    # ─── (1) Add items referenced by win/chain/weakness/reward but missing  ──
+    referenced: Dict[str, str] = {}  # name -> derived purpose hint
+
+    wc = world_bible.get("win_condition")
+    if isinstance(wc, dict):
+        for it in wc.get("required_items") or []:
+            it = str(it).strip()
+            if it and it not in item_set:
+                referenced.setdefault(it, "Required to win the game")
+
+    chain = world_bible.get("solution_chain") or []
+    if isinstance(chain, list):
+        for step in chain:
+            if not isinstance(step, dict):
+                continue
+            req = step.get("requires_item")
+            if isinstance(req, str) and req.strip() and req.strip() not in item_set:
+                referenced.setdefault(req.strip(), f"Used at {step.get('location','?')}")
+
+    for m in world_bible.get("monsters", []) or []:
+        if isinstance(m, dict):
+            wk = str(m.get("weakness") or "").strip()
+            # Only treat short noun-phrase weaknesses as item references; long
+            # sentences like "fears fire from a torch" are kept as-is.
+            if wk and len(wk) < 40 and wk not in item_set and re.match(r"^[A-Za-z][A-Za-z\s'\-]+$", wk):
+                referenced.setdefault(wk, f"Defeats {m.get('name','enemy')}")
+
+    for rid in world_bible.get("riddles", []) or []:
+        if isinstance(rid, dict):
+            rew = str(rid.get("reward") or "").strip()
+            if rew and len(rew) < 40 and rew not in item_set and re.match(r"^[A-Za-z][A-Za-z\s'\-]+$", rew):
+                referenced.setdefault(rew, f"Reward of riddle at {rid.get('location','?')}")
+
+    for new_item, purpose in referenced.items():
+        key_items.append({"name": new_item, "purpose": purpose})
+        item_set.add(new_item)
+        item_names.append(new_item)
+        repairs.append(f"added missing key_item '{new_item}' ({purpose})")
+
+    # ─── (2) item_locations: ensure each key_item has an entry that names a real room
+    item_locations = world_bible.get("item_locations")
+    if not isinstance(item_locations, dict):
+        item_locations = {}
+        world_bible["item_locations"] = item_locations
+
+    chain_loc_for_item: Dict[str, Optional[str]] = {}
+    if isinstance(chain, list):
+        for step in chain:
+            if not isinstance(step, dict):
+                continue
+            loc_at = str(step.get("location") or "").strip()
+            loc_at = loc_at if loc_at in loc_set else None
+            req = step.get("requires_item")
+            if isinstance(req, str) and req.strip():
+                chain_loc_for_item.setdefault(req.strip(), loc_at)
+            res_text = str(step.get("result") or "")
+            for it in item_names:
+                if it and it.lower() in res_text.lower():
+                    chain_loc_for_item.setdefault(it, loc_at)
+
+    for it in item_names:
+        if it not in item_locations:
+            target_loc = chain_loc_for_item.get(it) or start_room
+            item_locations[it] = f"{target_loc}: placed by auto-repair"
+            repairs.append(f"placed item '{it}' at '{target_loc}' (was missing from item_locations)")
+        else:
+            loc_desc = str(item_locations[it])
+            if not any(rn.lower() in loc_desc.lower() for rn in loc_set):
+                target_loc = chain_loc_for_item.get(it) or start_room
+                item_locations[it] = f"{target_loc}: {loc_desc}"
+                repairs.append(f"item_locations['{it}']: prefixed with real room '{target_loc}'")
+
+    # ─── (3) Connectivity: from start, BFS through exits; for any unreachable
+    # room, attach an exit to its previous neighbor in the locations list.
+    sym: Dict[str, Set[str]] = {n: set() for n in loc_set}
+    for loc in locs:
+        if not isinstance(loc, dict):
+            continue
+        nm = str(loc.get("name") or "").strip()
+        if not nm:
+            continue
+        for ex in loc.get("exits") or []:
+            if isinstance(ex, str) and ex.strip() in loc_set:
+                sym[nm].add(ex.strip())
+                sym[ex.strip()].add(nm)
+
+    seen: Set[str] = {start_room}
+    stack = [start_room]
+    while stack:
+        cur = stack.pop()
+        for nxt in sym.get(cur, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+
+    if seen != loc_set:
+        unreachable = [n for n in loc_names if n not in seen]
+        for room in unreachable:
+            idx = loc_names.index(room)
+            anchor = loc_names[idx - 1] if idx > 0 else start_room
+            for loc in locs:
+                if not isinstance(loc, dict):
+                    continue
+                nm = str(loc.get("name") or "").strip()
+                if nm == anchor:
+                    ex_list = loc.setdefault("exits", [])
+                    if isinstance(ex_list, list) and room not in ex_list:
+                        ex_list.append(room)
+                if nm == room:
+                    ex_list = loc.setdefault("exits", [])
+                    if isinstance(ex_list, list) and anchor not in ex_list:
+                        ex_list.append(anchor)
+            sym[anchor].add(room)
+            sym[room].add(anchor)
+            repairs.append(f"auto-connected '{anchor}' <-> '{room}' (room was unreachable from start)")
+
+    # ─── (4) NPCs / monsters / riddles in unknown rooms: relocate ────────────
+    for who_key in ("npcs", "monsters", "riddles"):
+        for entry in world_bible.get(who_key, []) or []:
+            if not isinstance(entry, dict):
+                continue
+            loc_at = str(entry.get("location") or "").strip()
+            if loc_at and loc_at not in loc_set:
+                target = start_room
+                # Try to find a chain step that mentions this entry's name
+                ent_name = str(entry.get("name") or entry.get("hint") or "").lower()
+                if ent_name and isinstance(chain, list):
+                    for step in chain:
+                        if not isinstance(step, dict):
+                            continue
+                        if (
+                            ent_name in str(step.get("blocker", "")).lower()
+                            or ent_name in str(step.get("result", "")).lower()
+                        ):
+                            sl = str(step.get("location") or "").strip()
+                            if sl in loc_set:
+                                target = sl
+                                break
+                entry["location"] = target
+                label = who_key[:-1]
+                repairs.append(f"{label} '{entry.get('name','?')}' moved to '{target}' (was unknown room '{loc_at}')")
+
+    # ─── (5) win_condition.required_location must be a real room ────────────
+    if isinstance(wc, dict):
+        rl = wc.get("required_location")
+        if rl and rl not in loc_set:
+            wc["required_location"] = start_room
+            repairs.append(f"win_condition.required_location '{rl}' set to start room '{start_room}'")
+        # Also drop required_items entries that don't exist (shouldn't happen post step 1, but defensive)
+        ri = wc.get("required_items") or []
+        if isinstance(ri, list):
+            cleaned_ri = [x for x in ri if isinstance(x, str) and x.strip() in item_set]
+            if cleaned_ri != ri:
+                wc["required_items"] = cleaned_ri
+                repairs.append(f"win_condition.required_items pruned to items present in key_items")
+
+    # ─── (6) solution_chain steps: rebind unknown locations / items ─────────
+    if isinstance(chain, list):
+        for i, step in enumerate(chain):
+            if not isinstance(step, dict):
+                continue
+            sl = str(step.get("location") or "").strip()
+            if sl and sl not in loc_set:
+                step["location"] = start_room
+                repairs.append(f"solution_chain[{i}].location '{sl}' set to '{start_room}' (unknown room)")
+            req = step.get("requires_item")
+            if isinstance(req, str) and req.strip() and req.strip() not in item_set:
+                step["requires_item"] = None
+                repairs.append(f"solution_chain[{i}].requires_item '{req}' cleared (not in key_items)")
+
+    # Invalidate cached parsed win condition so the next read normalizes the new shape.
+    world_bible.pop("_win_parsed", None)
+    return repairs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE (chunk F): Two-pass world-bible generation.
+# Pass 1 ("skeleton") generates ONLY the structural pieces a small model can
+# reliably emit at once: locations[name+description+exits], key_items[name+purpose],
+# objectives[], structured win_condition. Pass 2 ("expansion") receives the
+# skeleton verbatim and fills in npcs, monsters, riddles, item_locations,
+# progression_hints, mechanics, main_arc, and solution_chain — every reference
+# is constrained to the skeleton's exact room and item names. This is far more
+# reliable than asking a 27B-class local model to produce a perfectly cross-
+# referenced 12-field JSON in one shot. If either pass fails, we fall back to
+# the legacy single-shot prompt below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _wb_robust_parse(text: str) -> Optional[Dict[str, Any]]:
+    """Reusable JSON-from-LLM-text parser used by both world-bible passes.
+    Mirrors the multi-strategy logic from the legacy single-shot path so callers
+    don't duplicate it. Returns the best parsed dict or None.
+    """
+    if not text:
+        return None
+    cleaned = text.replace("```json", "").replace("```", "").strip()
+    cleaned = strip_llm_thinking_blocks(cleaned)
+
+    # Strategy 1: balanced-brace candidates, pick highest-scoring.
+    cands = extract_json_from_text(cleaned)
+    if cands:
+        chosen = pick_world_bible_from_candidates(cands)
+        if isinstance(chosen, dict) and chosen:
+            return chosen
+
+    # Strategy 2: outer-most { ... } slice + json.loads + fix_common_json_errors.
+    s, e = cleaned.find("{"), cleaned.rfind("}") + 1
+    if s >= 0 and e > s:
+        try:
+            return json.loads(fix_common_json_errors(cleaned[s:e]))
+        except Exception:
+            pass
+
+    # Strategy 3: aggressive multi-round fix on the whole string.
+    js = cleaned.strip()
+    if not js.startswith("{"):
+        i = js.find("{")
+        if i >= 0:
+            js = js[i:]
+    for _ in range(3):
+        js = fix_common_json_errors(js)
+        try:
+            return json.loads(js)
+        except Exception:
+            continue
+    return None
+
+
+def _validate_skeleton(sk: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    """Light validation specific to pass 1: enough rooms, items, structured win_condition."""
+    issues: List[str] = []
+    if not isinstance(sk, dict):
+        return False, ["skeleton is not a dict"]
+    locs = sk.get("locations") or []
+    if not isinstance(locs, list) or len(locs) < 5:
+        issues.append(f"skeleton needs >=5 locations, got {len(locs) if isinstance(locs, list) else 'none'}")
+    items = sk.get("key_items") or []
+    if not isinstance(items, list) or len(items) < 4:
+        issues.append(f"skeleton needs >=4 key_items, got {len(items) if isinstance(items, list) else 'none'}")
+    # Each location must have a name and exits list (auto-filled empty is OK at this stage).
+    for i, loc in enumerate(locs if isinstance(locs, list) else []):
+        if not isinstance(loc, dict) or not str(loc.get("name") or "").strip():
+            issues.append(f"locations[{i}] has no name")
+    # win_condition must be a dict with at least one of required_items/required_location.
+    wc = sk.get("win_condition")
+    if not isinstance(wc, dict):
+        issues.append("win_condition must be an object (required_items / required_location / description)")
+    elif not (wc.get("required_items") or wc.get("required_location")):
+        issues.append("win_condition needs at least one required_item or a required_location")
+    return (len(issues) == 0), issues
+
+
+def _generate_world_skeleton(
+    wb_engine: "LLMEngine", enforced_theme: str, system_msg: str
+) -> Optional[Dict[str, Any]]:
+    """Pass 1: ONLY the structural skeleton. Smaller prompt, easier to keep coherent."""
+    prompt = f"""You are designing a SOLVABLE text-adventure game.
+
+This is PASS 1 of 2. In this pass output ONLY the structural skeleton. Do NOT
+include npcs, monsters, riddles, item_locations, progression_hints, mechanics,
+main_arc, or solution_chain — those are pass 2.
+
+Return ONE JSON object with EXACTLY these fields:
+- objectives: 4 short goal strings, in the order the player should accomplish them.
+- global_theme: set this string EXACTLY to: {enforced_theme}
+- locations: 5 rooms. Each room is an object with:
+    - name: short title (no punctuation, used as a stable identifier)
+    - description: ONE sentence describing what the player sees on entering
+    - exits: list of OTHER `name`s reachable from this room (graph must be connected
+      so the starting room reaches every other room)
+  The FIRST location in this list is the starting room.
+- key_items: 6-8 items. Each item is an object with:
+    - name: short noun phrase (used as a stable identifier)
+    - purpose: ONE sentence saying what the player uses it for
+- win_condition: an OBJECT with these keys (NOT a string):
+    - required_items: list of EXACT item names from `key_items` the player must hold
+    - required_location: EXACT room name from `locations` (use null only if location is irrelevant)
+    - description: one sentence the narrator can show on victory
+
+Hard rules:
+- Start room reaches every other room via exits (treated bidirectionally).
+- The win_condition.required_location MUST be one of the locations you listed.
+- All required_items MUST be names that appear in key_items.
+- Output ONLY the JSON object. Begin with {{ and end with }}. No markdown, no commentary."""
+
+    print("[world_bible/F] PASS 1 (skeleton) — prompting...")
+    # CHANGE (Qwen3.6/Gemma4 calibration): json_mode forces strict JSON on Ollama.
+    resp = wb_engine.generate(system_msg, prompt, json_mode=True)
+    print(f"[world_bible/F] pass-1 raw ({len(resp)} chars):")
+    print("=" * 80)
+    print(resp)
+    print("=" * 80)
+    parsed = _wb_robust_parse(resp)
+    if not parsed:
+        print("[world_bible/F] pass-1 parse failed")
+        return None
+    ok, issues = _validate_skeleton(parsed)
+    if not ok:
+        print("[world_bible/F] pass-1 invalid skeleton — gaps:")
+        for i in issues:
+            print(f"  - {i}")
+        # ONE retry with the gaps fed back
+        retry_prompt = (
+            "Your previous PASS 1 skeleton has these issues:\n"
+            + "\n".join(f"  - {i}" for i in issues[:8])
+            + "\n\nReturn a CORRECTED single JSON object with the same field set "
+            "(objectives, global_theme, locations[name+description+exits], "
+            "key_items[name+purpose], win_condition[required_items+required_location+description])."
+            " Output ONLY the JSON. Begin with { and end with }."
+        )
+        retry_resp = wb_engine.generate(system_msg, retry_prompt, json_mode=True)
+        retry_parsed = _wb_robust_parse(retry_resp)
+        if retry_parsed:
+            ok2, issues2 = _validate_skeleton(retry_parsed)
+            if ok2:
+                print("[world_bible/F] pass-1 retry succeeded")
+                # Force theme to the enforced UI value.
+                retry_parsed["global_theme"] = enforced_theme
+                return retry_parsed
+            print(f"[world_bible/F] pass-1 retry still invalid ({len(issues2)} gaps); skipping two-pass")
+        return None
+    parsed["global_theme"] = enforced_theme
+    return parsed
+
+
+def _validate_expansion(ex: Dict[str, Any], sk: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    """Light validation that the expansion only references skeleton names."""
+    issues: List[str] = []
+    if not isinstance(ex, dict):
+        return False, ["expansion is not a dict"]
+    sk_locs = {str(l.get("name") or "").strip() for l in (sk.get("locations") or []) if isinstance(l, dict)}
+    sk_items = {str(i.get("name") or "").strip() for i in (sk.get("key_items") or []) if isinstance(i, dict)}
+    for who_key, label in (("npcs", "npc"), ("monsters", "monster"), ("riddles", "riddle")):
+        for entry in ex.get(who_key, []) or []:
+            if not isinstance(entry, dict):
+                continue
+            loc_at = str(entry.get("location") or "").strip()
+            if loc_at and loc_at not in sk_locs:
+                issues.append(f"{label} '{entry.get('name', entry.get('hint', '?'))}' uses unknown location '{loc_at}'")
+    il = ex.get("item_locations") or {}
+    if isinstance(il, dict):
+        for it in il:
+            if it not in sk_items:
+                issues.append(f"item_locations references unknown key_item '{it}'")
+    chain = ex.get("solution_chain") or []
+    if not isinstance(chain, list) or not chain:
+        issues.append("solution_chain is empty")
+    else:
+        for i, step in enumerate(chain):
+            if not isinstance(step, dict):
+                continue
+            sl = str(step.get("location") or "").strip()
+            req = step.get("requires_item")
+            if sl and sl not in sk_locs:
+                issues.append(f"solution_chain[{i}].location '{sl}' is not a skeleton room")
+            if isinstance(req, str) and req and req not in sk_items:
+                issues.append(f"solution_chain[{i}].requires_item '{req}' is not a skeleton item")
+    return (len(issues) == 0), issues
+
+
+def _generate_world_expansion(
+    wb_engine: "LLMEngine", skeleton: Dict[str, Any], system_msg: str
+) -> Optional[Dict[str, Any]]:
+    """Pass 2: NPCs, monsters, riddles, item_locations, hints, mechanics, arc, solution_chain.
+    The skeleton is provided so all references stay consistent with pass 1."""
+    sk_compact = {
+        "locations": [
+            {"name": l.get("name"), "exits": l.get("exits", [])}
+            for l in skeleton.get("locations", []) if isinstance(l, dict)
+        ],
+        "key_items": [{"name": i.get("name"), "purpose": i.get("purpose", "")}
+                      for i in skeleton.get("key_items", []) if isinstance(i, dict)],
+        "win_condition": skeleton.get("win_condition"),
+    }
+    sk_json = json.dumps(sk_compact, ensure_ascii=False, indent=2)
+
+    prompt = f"""You already designed PASS 1 (the skeleton). It is fixed.
+Below is the skeleton. Do NOT invent new room names or new key_item names — every
+reference you write MUST use the EXACT names from the skeleton.
+
+SKELETON (do not modify, just reference):
+{sk_json}
+
+This is PASS 2 of 2. Return ONE JSON object with EXACTLY these fields:
+- npcs: 2-3 characters. Each: {{name, location, personality, provides}}.
+  `location` MUST be a skeleton room name.
+- monsters: 2-3 enemies. Each: {{name, location, difficulty, weakness}}.
+  `location` MUST be a skeleton room name. `weakness` MUST be the EXACT name
+  of a skeleton key_item (so the player has a way to defeat it).
+- riddles: 2 puzzles. Each: {{location, hint, solution, reward}}.
+  `location` MUST be a skeleton room name. `reward` SHOULD be a skeleton item.
+- item_locations: object mapping EVERY skeleton key_item name to a string of the
+  form "<RoomName>: short hint" using ONLY skeleton room names.
+- progression_hints: 3-4 short hint strings.
+- mechanics: 3 cause-effect rules. Each: {{action, effect, location}}. `location`
+  MUST be a skeleton room name.
+- main_arc: 2-sentence story summary.
+- solution_chain: ORDERED list of steps proving the game is winnable. Each step:
+  {{step:int, location:RoomName, requires_item:item_or_null, blocker:str, result:str}}.
+  - Use ONLY skeleton room names and skeleton item names.
+  - Each step's `location` must be reachable from the previous step's `location`
+    via the skeleton's `exits` graph (multi-hop is fine).
+  - The final step's `location` must equal `win_condition.required_location` and
+    by then the player must hold every `win_condition.required_items`.
+
+Output ONLY the JSON object. Begin with {{ and end with }}. No markdown, no commentary."""
+
+    print("[world_bible/F] PASS 2 (expansion) — prompting...")
+    # CHANGE (Qwen3.6/Gemma4 calibration): json_mode forces strict JSON on Ollama.
+    resp = wb_engine.generate(system_msg, prompt, json_mode=True)
+    print(f"[world_bible/F] pass-2 raw ({len(resp)} chars):")
+    print("=" * 80)
+    print(resp)
+    print("=" * 80)
+    parsed = _wb_robust_parse(resp)
+    if not parsed:
+        print("[world_bible/F] pass-2 parse failed")
+        return None
+    ok, issues = _validate_expansion(parsed, skeleton)
+    if not ok:
+        print("[world_bible/F] pass-2 has consistency issues:")
+        for i in issues[:8]:
+            print(f"  - {i}")
+        retry_prompt = (
+            "Your previous PASS 2 expansion uses names that are not in the skeleton. "
+            "Fix these issues:\n"
+            + "\n".join(f"  - {i}" for i in issues[:10])
+            + "\n\nReturn a CORRECTED single JSON object with the same fields. "
+            "Use ONLY skeleton room names and skeleton key_item names. "
+            "Output ONLY the JSON. Begin with { and end with }."
+        )
+        retry_resp = wb_engine.generate(system_msg, retry_prompt, json_mode=True)
+        retry_parsed = _wb_robust_parse(retry_resp)
+        if retry_parsed:
+            ok2, issues2 = _validate_expansion(retry_parsed, skeleton)
+            if ok2 or len(issues2) < len(issues):
+                print(f"[world_bible/F] pass-2 retry produced {len(issues2)} issues (was {len(issues)}) — using retry")
+                return retry_parsed
+        print("[world_bible/F] pass-2 retry did not help; using original")
+    return parsed
+
+
+def _merge_skeleton_and_expansion(skel: Dict[str, Any], exp: Dict[str, Any]) -> Dict[str, Any]:
+    """Combine the two passes into a full world-bible dict.
+    Skeleton fields win on conflict (the structural truth)."""
+    plan: Dict[str, Any] = {}
+    plan.update(exp or {})
+    plan.update(skel or {})  # skeleton overrides
+    # Make sure both halves are present
+    for k in ("npcs", "monsters", "riddles", "mechanics"):
+        if k not in plan:
+            plan[k] = exp.get(k, []) if isinstance(exp, dict) else []
+    if "item_locations" not in plan:
+        plan["item_locations"] = exp.get("item_locations", {}) if isinstance(exp, dict) else {}
+    if "progression_hints" not in plan:
+        plan["progression_hints"] = exp.get("progression_hints", []) if isinstance(exp, dict) else []
+    if "main_arc" not in plan:
+        plan["main_arc"] = exp.get("main_arc", "") if isinstance(exp, dict) else ""
+    if "solution_chain" not in plan:
+        plan["solution_chain"] = exp.get("solution_chain", []) if isinstance(exp, dict) else []
+    return plan
+
+
 def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str], theme: Optional[str] = None, max_tokens: int = 4000) -> Optional[Dict[str, Any]]:
     """
     SIMPLE world bible generation - just call LLM and return result.
@@ -1915,12 +2904,14 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str],
             "Claim the legendary treasure"
         ],
         "theme": "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere",
+        # CHANGE (chunk B): each location now declares its `exits` so the solvability validator
+        # in chunk A can build a real connectivity graph (start -> win-condition reachable).
         "locations": [
-            {"name": "Entrance", "description": "rocky cave mouth with supplies left by previous explorers"},
-            {"name": "Dark Passage", "description": "pitch black tunnel that requires light"},
-            {"name": "Underground River", "description": "rushing water with narrow ledge"},
-            {"name": "Ancient Temple", "description": "locked stone doors with riddle inscription"},
-            {"name": "Treasury", "description": "golden vault guarded by stone sentinel"}
+            {"name": "Entrance", "description": "rocky cave mouth with supplies left by previous explorers", "exits": ["Dark Passage"]},
+            {"name": "Dark Passage", "description": "pitch black tunnel that requires light", "exits": ["Entrance", "Underground River"]},
+            {"name": "Underground River", "description": "rushing water with narrow ledge", "exits": ["Dark Passage", "Ancient Temple"]},
+            {"name": "Ancient Temple", "description": "locked stone doors with riddle inscription", "exits": ["Underground River", "Treasury"]},
+            {"name": "Treasury", "description": "golden vault guarded by stone sentinel", "exits": ["Ancient Temple"]}
         ],
         "npcs": [
             {"name": "Old Hermit", "location": "Entrance", "personality": "helpful guide", "provides": "torch and warning about troll"},
@@ -1962,7 +2953,25 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str],
             {"action": "place sword in altar slot", "effect": "opens secret treasury door", "location": "Ancient Temple"}
         ],
         "main_arc": "A brave explorer seeks legendary treasure in mysterious caves. They must use wit and courage to overcome guardians and puzzles.",
-        "win_condition": "Obtain the golden treasure and return to entrance"
+        # CHANGE (chunk G): structured win_condition replaces the free-form string. The runtime
+        # checks `required_items` ⊂ inventory AND location == required_location.
+        "win_condition": {
+            "required_items": ["golden treasure"],
+            "required_location": "Entrance",
+            "description": "Carry the golden treasure back to the cave Entrance to escape with the prize.",
+        },
+        # CHANGE (chunk B): explicit ordered solution that the validator (chunk A) checks.
+        # Each step references a real location, the item required (must be in key_items), the
+        # blocker it overcomes, and the result. This is the puzzle dependency graph in plain JSON.
+        "solution_chain": [
+            {"step": 1, "location": "Entrance", "requires_item": None, "blocker": "no light for the passage", "result": "Receive torch from Old Hermit"},
+            {"step": 2, "location": "Dark Passage", "requires_item": "torch", "blocker": "darkness", "result": "Reveals rope on the floor"},
+            {"step": 3, "location": "Underground River", "requires_item": "torch", "blocker": "River Troll", "result": "Troll flees, drops map"},
+            {"step": 4, "location": "Ancient Temple", "requires_item": "map", "blocker": "Cave Spirit's riddle", "result": "Receive temple key"},
+            {"step": 5, "location": "Ancient Temple", "requires_item": "temple key", "blocker": "locked inner sanctum", "result": "Pick up ancient sword"},
+            {"step": 6, "location": "Treasury", "requires_item": "ancient sword", "blocker": "Stone Golem", "result": "Defeat golem; pick up golden treasure"},
+            {"step": 7, "location": "Entrance", "requires_item": "golden treasure", "blocker": "return trip", "result": "Win condition met"}
+        ]
     }
 
     # If no theme provided, return the default cave adventure
@@ -1996,30 +3005,59 @@ def generate_world_bible(state_mgr: StateManager, heavy_model_id: Optional[str],
         if not enforced_theme or not enforced_theme.strip():
             enforced_theme = DEFAULT_IMAGE_THEME
         
-        prompt = f"""Create a solvable adventure game as JSON for: {snapshot}
+        # CHANGE (chunk B): require `exits` per location and a `solution_chain` so the
+        # solvability validator (chunk A) can verify the puzzle is actually winnable before
+        # play starts. Names referenced inside item_locations / solution_chain must match
+        # entries in `locations` and `key_items` exactly.
+        prompt = f"""Create a SOLVABLE adventure game as ONE JSON object for: {snapshot}
 
 Theme (set "global_theme" to this exact string): {enforced_theme}
 
 Required JSON fields:
 - objectives: 4 goals in order
-- locations: 5 rooms (name, description)
-- npcs: 2-3 characters (name, location, personality, provides)
-- monsters: 2-3 enemies (name, location, difficulty, weakness)
-- riddles: 2 puzzles (location, hint, solution, reward)
-- key_items: 6-8 items (name, purpose)
-- item_locations: where each item is found
+- locations: 5 rooms; EACH room MUST include `exits: ["RoomName", ...]` listing which
+  other rooms (by exact `name`) you can travel to from it. The graph must connect the
+  starting room to the room used in `win_condition`.
+- npcs: 2-3 characters (name, location, personality, provides). `location` MUST match a
+  room name from `locations`.
+- monsters: 2-3 enemies (name, location, difficulty, weakness). `location` MUST match a
+  room name. `weakness` SHOULD reference an item name from `key_items` so the player has
+  a way to defeat it.
+- riddles: 2 puzzles (location, hint, solution, reward). `location` MUST match a room.
+- key_items: 6-8 items (name, purpose). EVERY item used in `solution_chain.requires_item`,
+  `monsters.weakness`, `riddles.reward`, or `win_condition` MUST appear here.
+- item_locations: {{ "item_name": "where the player FIRST gets it" }}. The location string
+  MUST contain the exact name of a room from `locations`. Every item in `key_items` SHOULD
+  have an entry.
 - progression_hints: 3-4 hints
 - mechanics: 3 cause-effect rules (action, effect, location)
 - main_arc: 2-sentence story summary
-- win_condition: what completes the game
+- win_condition: an OBJECT with these keys (do NOT use a free-form string):
+    - required_items: list of EXACT item names from `key_items` the player must hold to win
+      (often just the final treasure / artifact). At least one entry.
+    - required_location: EXACT room name from `locations` the player must be in to win
+      (often the starting room for "return" quests). Use `null` only if the game is
+      strictly an inventory completion with no location requirement.
+    - description: one sentence the narrator can show the player on victory.
+- solution_chain: ORDERED list of steps proving the game is winnable. Each step is an
+  object: {{"step": int, "location": "RoomName", "requires_item": "item_or_null",
+  "blocker": "what stops the player", "result": "what the step gives the player"}}.
+  Steps must respect map connectivity: each step's `location` must be reachable from the
+  previous step's `location` via `exits`. The final step must satisfy `win_condition`.
 
-Example flow: torch (entrance) -> lights dark cave -> find key -> unlock temple -> get sword -> defeat guardian -> claim treasure
+Example flow: torch (Entrance) -> lights Dark Passage -> reveals rope -> get map from
+troll -> solve Temple riddle -> sword unlocks Treasury -> claim treasure -> return to
+Entrance.
 
-Every item must be useful. Every NPC must help. The game must be winnable.
+Every item in `key_items` must be referenced by something (a blocker, a riddle, the win
+condition, or another item's purpose). Every NPC and monster must live in a room that
+appears in `locations`. Every room in `locations` should be reachable from the starting
+room. The game MUST be winnable using only items the player can actually obtain.
 
 Keep each description one short sentence so the entire object fits in one reply.
 
-Output ONLY valid JSON. No markdown, no commentary, no reasoning — your message must begin with {{ and end with }}."""
+Output ONLY valid JSON. No markdown, no commentary, no reasoning — your message must
+begin with {{ and end with }}."""
 
         # Build model path: Ollama uses ollama:<tag>; MLX uses folder under MLX_MODELS_DIR or an absolute dir.
         if llm_choice_is_ollama(heavy_model_id):
@@ -2041,38 +3079,65 @@ Output ONLY valid JSON. No markdown, no commentary, no reasoning — your messag
         print("=" * 80)
         print(f"[world_bible] Calling {heavy_model_id} with max_new_tokens={gen_tokens} (requested was {max_tokens})")
 
-        wb_engine = LLMEngine(model_path=wb_model_path, max_new_tokens=gen_tokens, temperature=0.5)
+        # CHANGE (Qwen3.6/Gemma4 calibration): drop generation temperature 0.5 → 0.3.
+        # 30B local models still produce creative content at 0.3 (the world bible's
+        # creativity comes from the theme + structure, not from sampling), and lower
+        # temperature gives much cleaner JSON / less drift on names.
+        wb_engine = LLMEngine(model_path=wb_model_path, max_new_tokens=gen_tokens, temperature=0.3)
         system_msg = (
             "You are a game designer. Output ONLY one valid JSON object for the whole game design. "
             "Do not wrap output in tags, do not write analysis before or after the JSON, and do not use markdown. "
             "The first character of your reply must be { and the last must be }."
         )
-        raw_response = wb_engine.generate(system_msg, prompt)
 
-        print(f"[world_bible] RAW LLM RESPONSE ({len(raw_response)} chars):")
-        print("=" * 80)
-        print(raw_response)
-        print("=" * 80)
-
-        # Extract JSON from response - be very forgiving of LLM mistakes
-        text = raw_response
-
-        # Remove markdown if present, then strip reasoning wrappers so brace-scanning finds the real bible
-        text = text.replace("```json", "").replace("```", "").strip()
-        text = strip_llm_thinking_blocks(text)
-
-        # DEBUG: Show full raw JSON response
-        print(f"[world_bible] FULL RAW RESPONSE FROM LLM ({len(text)} chars):")
-        print("=" * 80)
-        print(text)
-        print("=" * 80)
-
+        # CHANGE (chunk F): try TWO-PASS generation first. Pass 1 = skeleton, pass 2 = expansion.
+        # If both succeed and validate, skip the legacy single-shot prompt entirely. If the two-pass
+        # path fails at any step, fall through to the existing single-shot logic below.
         plan = None
+        try:
+            skeleton = _generate_world_skeleton(wb_engine, enforced_theme, system_msg)
+            if skeleton is not None:
+                expansion = _generate_world_expansion(wb_engine, skeleton, system_msg)
+                if expansion is not None:
+                    plan = _merge_skeleton_and_expansion(skeleton, expansion)
+                    print(f"[world_bible/F] Two-pass produced full plan ({len(json.dumps(plan, ensure_ascii=False))} chars)")
+                else:
+                    # Skeleton without expansion is still playable, just sparse — use it.
+                    plan = dict(skeleton)
+                    print("[world_bible/F] Two-pass: pass 2 failed; using skeleton-only plan")
+        except Exception as ex_e:
+            print(f"[world_bible/F] Two-pass crashed ({ex_e}); falling back to single-shot")
+            plan = None
+
+        # CHANGE (chunk F): only run the legacy single-shot path if two-pass did not produce a plan.
+        # When two-pass succeeded, we set `text = ""` so the parsing strategies below find nothing
+        # and leave `plan` untouched (each strategy after the first already guards on `plan is None`).
+        if plan is None:
+            # CHANGE (Qwen3.6/Gemma4 calibration): single-shot fallback also gets JSON mode.
+            raw_response = wb_engine.generate(system_msg, prompt, json_mode=True)
+
+            print(f"[world_bible] RAW LLM RESPONSE ({len(raw_response)} chars):")
+            print("=" * 80)
+            print(raw_response)
+            print("=" * 80)
+
+            # Extract JSON from response - be very forgiving of LLM mistakes
+            text = raw_response
+            # Remove markdown if present, then strip reasoning wrappers so brace-scanning finds the real bible
+            text = text.replace("```json", "").replace("```", "").strip()
+            text = strip_llm_thinking_blocks(text)
+
+            print(f"[world_bible] FULL RAW RESPONSE FROM LLM ({len(text)} chars):")
+            print("=" * 80)
+            print(text)
+            print("=" * 80)
+        else:
+            text = ""  # two-pass produced a plan; nothing to parse below
 
         # Strategy 1: Try to extract complete JSON objects using balanced braces
         # NOTE: extract_json_from_text returns already-parsed dicts, not strings
         candidates = extract_json_from_text(text)
-        if candidates:
+        if candidates and plan is None:
             # Prefer the object that validates (reasoning models often emit many small JSON snippets first)
             plan = pick_world_bible_from_candidates(candidates)
             sel_score = score_world_bible_candidate(plan) if plan else -1
@@ -2134,7 +3199,7 @@ Output ONLY valid JSON. No markdown, no commentary, no reasoning — your messag
                 "key_items (6 with name/purpose), win_condition.\n"
                 "Output valid JSON only."
             )
-            retry_response = wb_engine.generate(system_msg, retry_prompt)
+            retry_response = wb_engine.generate(system_msg, retry_prompt, json_mode=True)
             retry_text = retry_response.replace("```json", "").replace("```", "").strip()
             retry_text = strip_llm_thinking_blocks(retry_text)
             retry_candidates = extract_json_from_text(retry_text)
@@ -2151,11 +3216,12 @@ Output ONLY valid JSON. No markdown, no commentary, no reasoning — your messag
                     except Exception:
                         pass
 
-        # Unload model after all attempts
-        wb_engine._unload()
-
+        # CHANGE (chunk A): defer unload until AFTER the solvability check + optional retry,
+        # otherwise we cannot ask the model to fix the gaps. Unload happens in two places
+        # below depending on the path taken.
         if plan is None:
             print("[world_bible] All attempts failed — no valid JSON")
+            wb_engine._unload()
             return None
 
         # NORMALIZE THEME KEY: prefer single canonical key "global_theme" (from UI)
@@ -2165,19 +3231,125 @@ Output ONLY valid JSON. No markdown, no commentary, no reasoning — your messag
         except Exception:
             pass
         
-        # Validate the generated world bible
+        # Validate the generated world bible (shape check)
         is_valid, issues = validate_world_bible(plan)
-        
-        if is_valid:
-            print(f"[world_bible] Successfully generated valid {len(str(plan))} char plan")
-            return plan
-        else:
-            print(f"[world_bible] Generated plan has issues:")
+
+        if not is_valid:
+            print(f"[world_bible] Generated plan has shape issues:")
             for issue in issues:
                 print(f"  - {issue}")
             print(f"[world_bible] Plan rejected - generation failed")
+            wb_engine._unload()
             return None
-            
+
+        # CHANGE (chunk H): deterministic auto-repair BEFORE the LLM solvability retry.
+        # Saves a generation round trip when problems are mechanical (missing
+        # item_locations entry, NPC in invented room, isolated room, etc).
+        repairs = auto_repair_world_bible(plan)
+        if repairs:
+            print(f"[world_bible/H] Auto-repaired {len(repairs)} issue(s):")
+            for r in repairs[:30]:
+                print(f"  - {r}")
+            if len(repairs) > 30:
+                print(f"  - … {len(repairs) - 30} more")
+
+        # CHANGE (chunk M): per-gap LLM micro-repair for the things that benefit from
+        # a thematic choice (monster weaknesses, chain step items, broken exits). Each
+        # call asks ONE narrow question with a constrained answer set — far better suited
+        # to a 30B-class model than a full bible regeneration.
+        try:
+            mrepairs = micro_repair_world_bible(plan, wb_engine, system_msg)
+            if mrepairs:
+                print(f"[world_bible/M] Micro-repaired {len(mrepairs)} item(s):")
+                for r in mrepairs[:20]:
+                    print(f"  - {r}")
+                if len(mrepairs) > 20:
+                    print(f"  - … {len(mrepairs) - 20} more")
+        except Exception as _mr_e:
+            print(f"[world_bible/M] micro-repair skipped ({_mr_e})")
+
+        # CHANGE (chunk A): solvability check. If gaps remain after auto-repair, do ONE
+        # retry feeding the residual gaps back to the LLM. If still broken, accept the
+        # plan but print the report so the user knows exactly which puzzle pieces are missing.
+        ok_solv, gaps, report = validate_world_bible_solvability(plan)
+        print("[world_bible] Solvability report:")
+        for line in report.splitlines():
+            print(line)
+
+        if not ok_solv and wb_engine is not None:
+            top_gaps = "\n".join(f"  - {g}" for g in gaps[:12])
+            fix_prompt = (
+                "Your previous JSON has solvability gaps. Return a CORRECTED single JSON "
+                "object with the same schema (same fields). Fix these specific issues:\n"
+                f"{top_gaps}\n\n"
+                "Hard requirements: every location.exits must be bidirectional via the "
+                "engine, the start room must reach the win-condition room, every "
+                "key_item must appear in item_locations referencing a real room, every "
+                "monster.weakness must mention a key_item by name, and solution_chain "
+                "must walk only along exits in `locations`.\n"
+                "Output ONLY the JSON. Begin with { and end with }."
+            )
+            print("[world_bible] Retrying once with solvability gaps fed back...")
+            retry_resp = wb_engine.generate(system_msg, fix_prompt, json_mode=True)
+            retry_text = retry_resp.replace("```json", "").replace("```", "").strip()
+            retry_text = strip_llm_thinking_blocks(retry_text)
+            retry_plan = None
+            cands = extract_json_from_text(retry_text)
+            if cands:
+                retry_plan = pick_world_bible_from_candidates(cands)
+            if retry_plan is None:
+                rs, re_ = retry_text.find("{"), retry_text.rfind("}") + 1
+                if rs >= 0 and re_ > rs:
+                    try:
+                        retry_plan = json.loads(fix_common_json_errors(retry_text[rs:re_]))
+                    except Exception:
+                        retry_plan = None
+            if retry_plan is not None:
+                # Re-shape-check first so we don't replace a good plan with a broken retry
+                ok2, issues2 = validate_world_bible(retry_plan)
+                if ok2:
+                    try:
+                        retry_plan["global_theme"] = enforced_theme
+                    except Exception:
+                        pass
+                    # CHANGE (chunk H): also auto-repair the retry plan so simple LLM mistakes
+                    # don't sink an otherwise-better attempt.
+                    retry_repairs = auto_repair_world_bible(retry_plan)
+                    if retry_repairs:
+                        print(f"[world_bible/H] Auto-repaired {len(retry_repairs)} issue(s) on retry plan:")
+                        for r in retry_repairs[:15]:
+                            print(f"  - {r}")
+                    ok_solv2, gaps2, report2 = validate_world_bible_solvability(retry_plan)
+                    print("[world_bible] Solvability report (after retry):")
+                    for line in report2.splitlines():
+                        print(line)
+                    if len(gaps2) < len(gaps):
+                        plan = retry_plan
+                        ok_solv, gaps = ok_solv2, gaps2
+                        print(f"[world_bible] Retry improved gap count: {len(gaps2)} (was {len(gaps)})")
+                    else:
+                        print(f"[world_bible] Retry did not improve solvability ({len(gaps2)} gaps); keeping original")
+                else:
+                    print(f"[world_bible] Retry produced an invalid shape; keeping original. Issues: {issues2[:3]}")
+
+        if not ok_solv:
+            print(f"[world_bible] Accepting plan with {len(gaps)} solvability gap(s) — game may be unfair until the LLM fills them in via play")
+
+        # Cache the parsed win condition struct for runtime checks (chunk E).
+        try:
+            _parse_win_condition(plan)
+        except Exception:
+            pass
+
+        # CHANGE (chunk A): finally unload the heavy model now that we are done with it.
+        try:
+            wb_engine._unload()
+        except Exception:
+            pass
+
+        print(f"[world_bible] Successfully generated {len(str(plan))} char plan")
+        return plan
+
     except Exception as e:
         print(f"[world_bible] Generation failed ({e})")
 
@@ -2408,6 +3580,8 @@ def _strip_untagged_planning_preface(text: str) -> str:
         "analyze user", "check constraints", "draft narration", "let's construct",
         "everything looks solid", "output matches", "requirements:", "json format:",
         "game state/context", "crucial constraint", "opening setup (already",
+        "output format:", "game setup:", "sentence 1:", "sentence 2:", "sentence 3:",
+        "sentence 4:", "sentence 5:", "*   output", "*   game", "*   json",
     )
     for line in lines:
         ls = line.strip()
@@ -2464,12 +3638,50 @@ def _is_instruction_echo_line(line: str) -> bool:
     return False
 
 
+def _is_spec_rubric_echo_line(line: str) -> bool:
+    """True when the line echoes grading checklists / backtick keys from the prompt, not in-world prose."""
+    s = line.strip()
+    if not s:
+        return False
+    sl = s.lower()
+    if re.match(r"^sentence\s+\d+:", sl):
+        return True
+    if sl.endswith("? yes.") or sl.endswith("? correct.") or sl.endswith("? yes") or sl.endswith("? correct"):
+        return True
+    if re.match(r"^[\*\-•]+\s+", s) and any(
+        x in sl
+        for x in (
+            "output format:",
+            "json format correct",
+            "state_updates included",
+            "images included",
+            "room_take not used",
+            "connect used for",
+            "game setup:",
+            "objective:",
+            "`move_to`",
+            "`connect`",
+            "`place_items`",
+            "`set_context`",
+            "2-5 sentences?",
+            "json block inside",
+            "json block inside ?",
+        )
+    ):
+        return True
+    return False
+
+
 def _strip_instruction_echo_lines(text: str) -> str:
     """Remove lines that echo system markdown / planning (anywhere in the reply)."""
     if not text:
         return text
     lines = text.splitlines()
-    kept = [ln for ln in lines if not _is_instruction_echo_line(ln)]
+    kept = [
+        ln
+        for ln in lines
+        if not _is_instruction_echo_line(ln) and not _is_spec_rubric_echo_line(ln)
+    ]
     out = "\n".join(kept).strip()
     if len(out) < 30:
         return text
@@ -2847,13 +4059,25 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
     debug_lines: List[str] = []
     json_payloads: List[Dict[str, Any]] = []
 
-    # Strip <think>...</think> blocks (chain-of-thought from reasoning models like Qwen)
-    # These are internal model reasoning and should never appear in narration
-    think_pat = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+    # CHANGE (chunk D): snapshot state BEFORE applying directives so we can emit a one-line
+    # [SUMMARY] of what changed at the end. Cheap shallow copies — no deep clone needed.
+    _pre_state = {
+        "location": state_mgr.state.location,
+        "inventory": list(state_mgr.state.inventory),
+        "flags": list(state_mgr.state.game_flags.keys()),
+        "health": state_mgr.state.health,
+    }
+
+    # Strip reasoning / channel blocks first (local models often prefix narration with this).
+    _pre_think = len(text)
+    text = strip_llm_thinking_blocks(text)
+    if len(text) + 80 < _pre_think:
+        debug_lines.append("[clean] Stripped thinking/channel blocks from LLM output")
+    # Legacy tags not covered by strip_llm_thinking_blocks
+    think_pat = re.compile(r"<think>[\s\S]*?</think>|<redacted_thinking>[\s\S]*?</redacted_thinking>", re.IGNORECASE)
     if think_pat.search(text):
         text = think_pat.sub("", text).strip()
         debug_lines.append("[clean] Stripped <think> reasoning block from output")
-    # Also strip orphan tags (unclosed <think> or stray </think>)
     text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
 
     # ENHANCED JSON EXTRACTION STRATEGY
@@ -2949,22 +4173,31 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
 
             directives = fixed_directives  # Use the fixed version
             updates = directives.get("state_updates", {}) if isinstance(directives, dict) else {}
-            
+
             # IMPORTANT: Process room item actions BEFORE move_to
             # This ensures items can be placed/taken in the current room before moving
-            
+
+            # CHANGE (chunk C): track which rooms got connected this turn so we can detect
+            # `move_to` to a room that has no path from the current location. We do not
+            # auto-fix the move (LLM remains the GM) — we just log a warning the user can act on.
+            _connected_this_turn: Set[str] = set()
+            _loc_at_apply = state_mgr.state.location
+
             # Room connections (can happen anytime)
             if isinstance(updates.get("connect"), list):
                 for pair in updates["connect"]:
                     if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                        state_mgr.connect_rooms(str(pair[0]), str(pair[1]))
-                        debug_lines.append(f"tool.connect_rooms: {pair[0]} <-> {pair[1]}")
-            
+                        a, b = str(pair[0]), str(pair[1])
+                        state_mgr.connect_rooms(a, b)
+                        _connected_this_turn.add(a)
+                        _connected_this_turn.add(b)
+                        debug_lines.append(f"tool.connect_rooms: {a} <-> {b}")
+
             # Room item placement (before take, before move)
             for item in updates.get("place_items", []) or []:
                 state_mgr.place_item_in_room(str(item))
                 debug_lines.append(f"tool.place_item_in_room: {item} @ {state_mgr.state.location}")
-            
+
             # Room take (after place, before move) - so items can be placed and taken in same turn
             for item in updates.get("room_take", []) or []:
                 taken = state_mgr.remove_item_from_room(str(item))
@@ -2972,15 +4205,34 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                     state_mgr.add_item(str(item))
                     debug_lines.append(f"tool.room_take: {item}")
                 else:
-                    debug_lines.append(f"tool.room_take: {item} (FAILED - item not in room)")
+                    # CHANGE (chunk C): explicit [WARN] with what WAS in the room so the
+                    # next turn's prompt context shows the contradiction clearly.
+                    here_items = state_mgr.list_room_items()
+                    debug_lines.append(
+                        f"[WARN] room_take MISS: '{item}' not in room "
+                        f"'{_loc_at_apply}' (room has: {here_items or 'nothing'})"
+                    )
                     # Don't auto-correct - let LLM learn from its mistakes
-            
+
             # Now move the player (after all room actions are complete)
             if isinstance(updates.get("move_to"), str):
-                state_mgr.move_to(updates["move_to"]) 
-                debug_lines.append(f"tool.move_to: {updates['move_to']}")
-                last_room_moved_to = updates["move_to"]  # Track the move
-            
+                target = updates["move_to"]
+                # CHANGE (chunk C): check linkage BEFORE applying the move.
+                exits_now = list(state_mgr.state.known_map.get(_loc_at_apply, {}).get("exits", []))
+                linked = (
+                    target == _loc_at_apply
+                    or target in exits_now
+                    or target in _connected_this_turn
+                )
+                if not linked and _loc_at_apply:
+                    debug_lines.append(
+                        f"[WARN] move_to UNLINKED: '{target}' not connected to '{_loc_at_apply}' "
+                        f"(known exits: {exits_now or 'none'}); LLM should emit a `connect` pair"
+                    )
+                state_mgr.move_to(target)
+                debug_lines.append(f"tool.move_to: {target}")
+                last_room_moved_to = target  # Track the move
+
             # Inventory updates (can happen anytime)
             # FIX: Detect when LLM sends both add_items and remove_items for the
             # same item — this is a common small-model mistake where it means
@@ -2993,13 +4245,27 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
                 for item in overlap:
                     state_mgr.add_item(item)
                     state_mgr.remove_item_from_room(item)
-                    debug_lines.append(f"tool.auto_room_take: {item} (LLM sent add+remove, corrected to room_take)")
+                    # CHANGE (chunk C): tag as [WARN] — auto-fixing a model mistake the user
+                    # should know about so they can tune the prompt or the model choice.
+                    debug_lines.append(
+                        f"[WARN] auto-corrected add+remove → room_take('{item}') "
+                        "(LLM used wrong tool; prefer 'room_take' for picking items up)"
+                    )
                 add_list = [i for i in add_list if i not in overlap]
                 remove_list = [i for i in remove_list if i not in overlap]
             for item in add_list:
+                if item in state_mgr.state.inventory:
+                    debug_lines.append(f"[WARN] add_items DUP: '{item}' already in inventory")
                 state_mgr.add_item(item)
                 debug_lines.append(f"tool.add_item: {item}")
             for item in remove_list:
+                if item not in state_mgr.state.inventory:
+                    # CHANGE (chunk C): explicit miss so the user knows the LLM tried to remove
+                    # something the player never had — common after teleporty narration.
+                    debug_lines.append(
+                        f"[WARN] remove_items MISS: '{item}' not in inventory "
+                        f"({state_mgr.state.inventory or 'empty'})"
+                    )
                 state_mgr.remove_item(item)
                 debug_lines.append(f"tool.remove_item: {item}")
             # Health and notes
@@ -3148,6 +4414,18 @@ def apply_llm_directives(state_mgr: StateManager, text: str, image_gen: Optional
     if len(cleaned_text) > 14000:
         cleaned_text = cleaned_text[:14000].rstrip() + "\n…"
         debug_lines.append("[clean] Truncated extremely long narration/planning spill")
+
+    # CHANGE (chunk D): emit one [SUMMARY] line capturing the turn deltas. Always at the END
+    # so all earlier debug_lines (including [WARN]s appended by guards in chunk C) are counted.
+    _post_state = {
+        "location": state_mgr.state.location,
+        "inventory": list(state_mgr.state.inventory),
+        "flags": list(state_mgr.state.game_flags.keys()),
+        "health": state_mgr.state.health,
+    }
+    _warn_count = sum(1 for ln in debug_lines if ln.startswith("[WARN]") or ln.startswith("[WARNING]"))
+    debug_lines.append(_format_turn_summary(_pre_state, _post_state, _warn_count, len(json_payloads)))
+
     return cleaned_text, image_paths, json_payloads, debug_lines
 
 
@@ -3286,6 +4564,89 @@ def maybe_select_diffuser_interactively() -> Optional[str]:
     return model_id or None
 
 
+# CHANGE (chunk J): classify the player's intent so we can attach the most relevant
+# few-shot example to the prompt (better than dumping all examples every turn).
+def _classify_intent(player_input: str) -> str:
+    text = (player_input or "").strip().lower()
+    if not text:
+        return "other"
+    first = text.split()[0] if text.split() else text
+    move_words = {"go", "move", "enter", "head", "travel", "north", "south", "east",
+                  "west", "up", "down", "n", "s", "e", "w", "u", "d", "climb"}
+    if first in move_words:
+        return "move"
+    take_words = {"take", "get", "grab", "pick"}
+    if first in take_words or text.startswith("pick up"):
+        return "take"
+    use_words = {"use", "open", "unlock", "light", "burn", "place", "insert", "wear", "drink", "eat", "read"}
+    if first in use_words:
+        return "use"
+    talk_words = {"talk", "ask", "say", "greet", "tell", "answer"}
+    if first in talk_words:
+        return "talk"
+    combat_words = {"attack", "fight", "kill", "hit", "swing", "stab", "slash", "shoot", "throw", "wave"}
+    if first in combat_words:
+        return "combat"
+    return "other"
+
+
+def _few_shot_for_intent(intent: str) -> str:
+    """Short, focused example showing the JSON for ONE common turn type. Less is more
+    on small models — a single targeted example outperforms 3 generic ones."""
+    examples = {
+        "move": (
+            "Example for movement (creates the connection if new):\n"
+            "Narration: You step from the cavern into a dim hall lit by a single torch.\n"
+            "```json\n"
+            "{\"state_updates\": {\"move_to\": \"Echoing Hall\", "
+            "\"connect\": [[\"Cavern\", \"Echoing Hall\"]], "
+            "\"set_context\": \"Moved to Echoing Hall.\"}, "
+            "\"images\": [\"echoing hall lit by a torch\"]}\n"
+            "```"
+        ),
+        "take": (
+            "Example for picking up an item (use room_take, NEVER add+remove):\n"
+            "Narration: You crouch and lift the iron key from the dust.\n"
+            "```json\n"
+            "{\"state_updates\": {\"room_take\": [\"Iron Key\"], "
+            "\"set_context\": \"Picked up Iron Key.\"}, "
+            "\"images\": [\"adventurer lifting an iron key from dusty stone\"]}\n"
+            "```"
+        ),
+        "use": (
+            "Example for USING an item (consume with remove_items, set a flag):\n"
+            "Narration: You insert the iron key. The lock clicks open.\n"
+            "```json\n"
+            "{\"state_updates\": {\"remove_items\": [\"Iron Key\"], "
+            "\"set_flag\": {\"name\": \"door_open\", \"value\": true}, "
+            "\"set_context\": \"Iron Key used; door is open.\"}, "
+            "\"images\": [\"ancient door swinging open\"]}\n"
+            "```"
+        ),
+        "talk": (
+            "Example for talking to an NPC (no inventory change unless they give you something):\n"
+            "Narration: The hermit nods and presses a small lantern into your palm.\n"
+            "```json\n"
+            "{\"state_updates\": {\"add_items\": [\"Lantern\"], "
+            "\"set_context\": \"Hermit gave you a lantern.\"}, "
+            "\"images\": [\"old hermit handing a lantern to a traveler\"]}\n"
+            "```"
+        ),
+        "combat": (
+            "Example for combat (change_health for damage; remove the foe via set_flag):\n"
+            "Narration: You wave the torch; the troll flinches and flees.\n"
+            "```json\n"
+            "{\"state_updates\": {\"change_health\": -5, "
+            "\"set_flag\": {\"name\": \"river_troll_defeated\", \"value\": true}, "
+            "\"place_items\": [\"Map\"], "
+            "\"set_context\": \"Drove off the river troll; map dropped.\"}, "
+            "\"images\": [\"troll fleeing into the dark\"]}\n"
+            "```"
+        ),
+    }
+    return examples.get(intent, "")
+
+
 def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
     state = state_mgr.state
     current_items = state.room_items.get(state.location, [])
@@ -3336,19 +4697,27 @@ def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
     elif state.health <= 20:
         context["WARNING"] = "Player health is critically low! Create tension but give a fair chance to survive."
 
+    # CHANGE (chunk N): only build the heavy world-bible cue block on the FIRST turn the
+    # player is in this room. On subsequent turns the description is already in the
+    # LLM's recent_history, so re-injecting it is pure token waste on a 30B-class model.
+    # We always include light cues (NPC / monster / riddle / item-here) because those
+    # are what the model needs to act on this turn.
+    first_visit = (state.last_described_room or "").lower() != (state.location or "").lower()
+
     # World bible context cues (compact, location-relevant excerpts)
     bible_line = ""
     try:
         if wb:
             cues = []
 
-            # Current location description
-            for loc in wb.get("locations", []):
-                if isinstance(loc, dict) and loc.get("name", "").lower() == state.location.lower():
-                    desc = loc.get("description")
-                    if desc:
-                        cues.append(f"Location: {desc}")
-                    break
+            if first_visit:
+                # Current location description (only on first visit to this room)
+                for loc in wb.get("locations", []):
+                    if isinstance(loc, dict) and loc.get("name", "").lower() == state.location.lower():
+                        desc = loc.get("description")
+                        if desc:
+                            cues.append(f"Location: {desc}")
+                        break
 
             # NPCs in current location
             for npc in wb.get("npcs", wb.get("key_characters", [])):
@@ -3403,48 +4772,586 @@ def build_user_prompt(state_mgr: StateManager, player_input: str) -> str:
     except Exception:
         bible_line = ""
 
+    # CHANGE (chunk O): engine notes injection is OFF by default — local 30B models do well
+    # with the system prompt + recent_history alone. Set ADV_INJECT_ENGINE_NOTES=1 to
+    # re-enable. Notes are still ALWAYS captured for [SUMMARY] / debug; this flag only
+    # controls whether they're pushed back into the model's user prompt.
+    notes_block = ""
+    pending_notes = list(getattr(state, "engine_notes_for_next_turn", []) or [])
+    if pending_notes and ADV_INJECT_ENGINE_NOTES:
+        notes_block = (
+            "\nEngine notes from your last turn — the player saw the result, fix this now:\n"
+            + "\n".join(f"  - {n}" for n in pending_notes[:6])
+            + "\n"
+        )
+    # Either way, consume them so they only get a chance to appear once.
+    state.engine_notes_for_next_turn = []
+
+    # CHANGE (chunk N): few-shot is added ONLY when it's likely to help — first few turns
+    # of the session OR when last turn produced a [WARN]. After that, the model has the
+    # JSON contract from the system prompt + its own recent_history; extra examples are
+    # token waste and can crowd creative narration.
+    fewshot_block = ""
+    needs_fewshot = (
+        getattr(state, "session_turns", 0) < 3
+        or bool(pending_notes)
+    )
+    if needs_fewshot:
+        intent = _classify_intent(player_input)
+        fewshot = _few_shot_for_intent(intent)
+        if fewshot:
+            fewshot_block = f"\n{fewshot}\n"
+
     header = (
         "Game State (read-only; update via JSON directives only):\n" +
         json.dumps(context, ensure_ascii=False, indent=2) +
         bible_line +
+        notes_block +
+        fewshot_block +
         "\n---\n"
     )
+
+    # CHANGE (chunk N): mark this room as described so the next turn skips the heavy
+    # description block. Only set AFTER we've decided what to inject this turn.
+    state.last_described_room = state.location or ""
+
     return header + f"Player says: {player_input}"
 
 
+# CHANGE (chunk G): structured win_condition. The canonical shape stored on WORLD_BIBLE is now
+#   "win_condition": {
+#       "required_items":   [str, ...],   # ALL must be in inventory to win
+#       "required_location": Optional[str],  # if set, player must be there
+#       "description":      str,          # human-readable for the narrator + UI
+#   }
+# Old string-form bibles are normalized in place on first read (saves agreed throwaway).
+# `_parse_win_condition` is now a pure normalizer; `check_win_condition` does direct struct
+# checks and no longer does substring matching.
+def _parse_win_condition(world_bible: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize world_bible["win_condition"] into the structured form (in place) and return it."""
+    wc = world_bible.get("win_condition")
+
+    # Already structured: trust required_items / required_location, but coerce types.
+    if isinstance(wc, dict):
+        items = wc.get("required_items") or []
+        if isinstance(items, str):
+            items = [items]
+        items = [str(x).strip() for x in items if str(x).strip()]
+        loc = wc.get("required_location")
+        loc = str(loc).strip() if loc else None
+        desc = str(wc.get("description") or "").strip()
+        if not desc:
+            # Synthesize a description from items + location.
+            bits: List[str] = []
+            if items:
+                bits.append(f"have {', '.join(items)}")
+            if loc:
+                bits.append(f"reach {loc}")
+            desc = "Win when you " + " and ".join(bits) + "." if bits else "Complete the adventure."
+        normalized = {"required_items": items, "required_location": loc, "description": desc}
+        world_bible["win_condition"] = normalized
+        return normalized
+
+    # Free-form string: heuristic conversion to struct (one-time, then stored back).
+    raw = str(wc or "").strip()
+    items: List[str] = []
+    loc: Optional[str] = None
+    if raw:
+        wc_lower = raw.lower()
+        for ki in world_bible.get("key_items", []) or []:
+            if not isinstance(ki, dict):
+                continue
+            name = str(ki.get("name") or "").strip()
+            if name and name.lower() in wc_lower:
+                items.append(name)
+        best_len = 0
+        for entry in world_bible.get("locations", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            nm = str(entry.get("name") or "").strip()
+            if nm and nm.lower() in wc_lower and len(nm) > best_len:
+                loc = nm
+                best_len = len(nm)
+    normalized = {
+        "required_items": items,
+        "required_location": loc,
+        "description": raw or "Complete the adventure.",
+    }
+    world_bible["win_condition"] = normalized
+    return normalized
+
+
+# CHANGE (chunk K): end-of-session post-mortem. The "rich teaching" deliverable: this
+# is what tells the user (a) how the player did, and (b) which world-bible problems
+# explain why. Triggered on win, death, quit, or restart. NEVER prints during normal
+# play — only at end-of-session.
+def format_session_postmortem(state_mgr: StateManager) -> str:
+    state = state_mgr.state
+    wb = _get_world_bible()
+    lines: List[str] = []
+    lines.append("═══════════════ SESSION POST-MORTEM ═══════════════")
+    lines.append(f"Turns played: {getattr(state, 'session_turns', 0)}")
+    lines.append(f"Final HP: {state.health}/100   Final location: {state.location or '?'}")
+
+    if wb:
+        all_rooms = [
+            str((l or {}).get("name", "")).strip()
+            for l in (wb.get("locations") or [])
+            if isinstance(l, dict)
+        ]
+        all_rooms = [r for r in all_rooms if r]
+        explored = sorted(set(state.known_map.keys()) & set(all_rooms))
+        lines.append(f"Rooms explored: {len(explored)} / {len(all_rooms)}")
+        if all_rooms and len(explored) < len(all_rooms):
+            missed = [r for r in all_rooms if r not in set(explored)]
+            lines.append(f"  unvisited: {', '.join(missed[:8])}")
+
+        all_items = [
+            str((i or {}).get("name", "")).strip()
+            for i in (wb.get("key_items") or [])
+            if isinstance(i, dict)
+        ]
+        all_items = [i for i in all_items if i]
+        held = [i for i in all_items if i in state.inventory]
+        lines.append(f"Items in inventory: {len(held)} / {len(all_items)}")
+        if all_items and len(held) < len(all_items):
+            missed_items = [i for i in all_items if i not in held]
+            lines.append(f"  missing: {', '.join(missed_items[:8])}")
+
+        chain = wb.get("solution_chain") or []
+        steps_total = len(chain) if isinstance(chain, list) else 0
+        steps_done = len(getattr(state, "chain_steps_completed", []) or [])
+        lines.append(f"Solution chain: {steps_done} / {steps_total} steps reached")
+        comp = getattr(state, "chain_steps_completed", []) or []
+        if comp and isinstance(chain, list):
+            last_idx = max(comp)
+            if 0 <= last_idx < len(chain) and isinstance(chain[last_idx], dict):
+                step_loc = chain[last_idx].get("location", "?")
+                step_res = chain[last_idx].get("result", "")
+                lines.append(f"  last reached: step {last_idx + 1} at {step_loc} ({step_res})")
+
+    # Warnings histogram — what kept going wrong this session
+    warnings = getattr(state, "warnings_history", []) or []
+    if warnings:
+        bucket: Dict[str, int] = {}
+        for w in warnings:
+            m = re.match(r"^\[(WARN|WARNING)\]\s*(.*)$", w)
+            tail = (m.group(2) if m else w).strip()
+            cat_tokens = tail.split()[:2]
+            cat = " ".join(cat_tokens).rstrip(":") or "unknown"
+            bucket[cat] = bucket.get(cat, 0) + 1
+        lines.append(f"Warnings this session ({len(warnings)} total):")
+        for cat, n in sorted(bucket.items(), key=lambda x: -x[1])[:8]:
+            lines.append(f"  - {cat}: {n}")
+
+    # World-bible solvability gaps that may have explained the warnings
+    if wb:
+        try:
+            _ok, gaps, _report = validate_world_bible_solvability(wb)
+            if gaps:
+                lines.append("World-bible issues to fix (top 5):")
+                for g in gaps[:5]:
+                    lines.append(f"  - {g}")
+        except Exception:
+            pass
+
+    lines.append("═══════════════════════════════════════════════════")
+    return "\n".join(lines)
+
+
 def check_win_condition(state_mgr: StateManager) -> Optional[str]:
-    """Check if the win condition from the world bible is met.
-    Returns a congratulations message, or None if not yet won."""
+    """Check if the win condition from the world bible is met. Returns a congrats message or None."""
     wb = _get_world_bible()
     if not wb:
         return None
-    wc = wb.get("win_condition", "")
-    if not wc:
-        return None
 
     state = state_mgr.state
-    wc_lower = wc.lower()
 
-    # Check if the game-complete flag was set explicitly by the LLM
+    # Explicit LLM-driven completion still wins (lets the narrator end on a story beat).
     if state.game_flags.get("game_complete") or state.game_flags.get("game_won"):
-        return f"**VICTORY!** {wc}\nCongratulations, {state.player_name or 'adventurer'}! You have completed the adventure!"
+        struct = _parse_win_condition(wb)
+        return (
+            f"**VICTORY!** {struct.get('description') or 'You have completed the adventure!'}\n"
+            f"Congratulations, {state.player_name or 'adventurer'}!"
+        )
 
-    # Heuristic: check if key items mentioned in win condition are in inventory
-    # and if any location requirement is met
-    key_items = wb.get("key_items", [])
-    win_items = [
-        ki.get("name", "") for ki in key_items
-        if ki.get("name", "").lower() in wc_lower
-    ]
-    if win_items and all(item in state.inventory for item in win_items):
-        # Check for location requirement (e.g., "return to entrance")
-        for loc in wb.get("locations", []):
-            loc_name = loc.get("name", "")
-            if loc_name.lower() in wc_lower and state.location.lower() == loc_name.lower():
-                return f"**VICTORY!** {wc}\nCongratulations, {state.player_name or 'adventurer'}! You have completed the adventure!"
-        # If no location requirement detected, just having the items is enough
-        if not any(loc.get("name", "").lower() in wc_lower for loc in wb.get("locations", [])):
-            return f"**VICTORY!** {wc}\nCongratulations, {state.player_name or 'adventurer'}! You have completed the adventure!"
+    # CHANGE (chunk G): direct struct check — no substring fallback.
+    struct = _parse_win_condition(wb)
+    items_needed = struct.get("required_items") or []
+    loc_needed = struct.get("required_location")
+    if not items_needed and not loc_needed:
+        return None
+
+    items_ok = all(item in state.inventory for item in items_needed) if items_needed else True
+    loc_ok = (loc_needed is None) or (
+        bool(state.location) and state.location.strip().lower() == loc_needed.strip().lower()
+    )
+    if items_ok and loc_ok:
+        return (
+            f"**VICTORY!** {struct.get('description') or 'You have completed the adventure!'}\n"
+            f"Congratulations, {state.player_name or 'adventurer'}!"
+        )
+    return None
+
+
+# CHANGE (fastpath naming bugfix): normalize item tokens so a player typing "the key"
+# still matches an engine item named "runic_key" (LLM-generated bibles often store
+# names in snake_case while the narrator writes them with spaces and articles).
+_ARTICLE_RE = re.compile(r"^(the|a|an|some|my|that|this)\s+", re.IGNORECASE)
+
+
+def _normalize_item_token(s: str) -> str:
+    """Lowercase, drop leading article ('the', 'a', 'an', 'some', 'my'), unify
+    underscores↔spaces, and strip apostrophes / surrounding punctuation. Used ONLY for
+    matching — the original item name is what we display."""
+    if not s:
+        return ""
+    t = s.strip().strip("\"' .,!?")
+    t = _ARTICLE_RE.sub("", t).strip()
+    # Drop apostrophes so "wizard's staff" ↔ "wizards_staff" match.
+    t = t.replace("'", "").replace("’", "")
+    t = t.replace("_", " ").replace("-", " ")
+    t = re.sub(r"\s+", " ", t).lower()
+    return t
+
+
+def _split_item_list(s: str) -> List[str]:
+    """Split a multi-item command target on commas, ' and ', '&', or ' plus '.
+    'pick up the key, lantern, and flint' → ['the key', 'lantern', 'flint']."""
+    if not s:
+        return []
+    parts = re.split(r"\s*(?:,|\band\b|&|\bplus\b)\s*", s, flags=re.IGNORECASE)
+    out = [p.strip() for p in parts if p and p.strip()]
+    return out or ([s.strip()] if s.strip() else [])
+
+
+def _match_item(target: str, candidates: List[str]) -> Optional[str]:
+    """Best-effort match of `target` against an item name list. Tries exact,
+    normalized exact, normalized substring, then word-token containment."""
+    if not target or not candidates:
+        return None
+    t_norm = _normalize_item_token(target)
+    if not t_norm:
+        return None
+    # Exact (case-insensitive, raw)
+    for c in candidates:
+        if c.lower() == target.lower():
+            return c
+    # Normalized exact
+    for c in candidates:
+        if _normalize_item_token(c) == t_norm:
+            return c
+    # Normalized substring (either direction)
+    for c in candidates:
+        cn = _normalize_item_token(c)
+        if t_norm in cn or cn in t_norm:
+            return c
+    # Word-token containment: every word of target is a word in candidate
+    t_tokens = set(t_norm.split())
+    if t_tokens:
+        for c in candidates:
+            c_tokens = set(_normalize_item_token(c).split())
+            if t_tokens.issubset(c_tokens):
+                return c
+    return None
+
+
+# CHANGE (chunk I): match free-form direction text against the current room's exits.
+def _match_exit(text: str, exits: List[str]) -> Optional[str]:
+    """Return the best-matching exit name from `exits`, or None."""
+    if not exits:
+        return None
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    for ex in exits:
+        if ex.lower() == t:
+            return ex
+    for ex in exits:
+        if t in ex.lower() or ex.lower() in t:
+            return ex
+    # Cardinal letters or short prefixes (e.g. "n" -> any exit starting with N)
+    if len(t) <= 5:
+        for ex in exits:
+            if ex.lower().startswith(t[0]):
+                return ex
+    return None
+
+
+# CHANGE (chunk I): deterministic engine-level commands. Any time we can resolve the
+# player's input WITHOUT the LLM, we should — it is faster, cheaper, and never
+# contradicts state. Returns (narration, debug_lines) when handled, None otherwise.
+# CHANGE (play robustness fix): bookkeeping that MUST run on every player turn,
+# whether the LLM narrated it or the fastpath resolved it. Increments session_turns
+# (used by post-mortem) and advances chain_steps_completed when the player is at a
+# step's location AND holds its required_item. Cheap, idempotent, no LLM call.
+def _post_turn_bookkeeping(state_mgr: StateManager) -> None:
+    try:
+        state_mgr.state.session_turns += 1
+        wb = _get_world_bible()
+        if not wb:
+            return
+        chain = wb.get("solution_chain") or []
+        cur_loc = (state_mgr.state.location or "").lower()
+        inventory_lower = {i.lower() for i in state_mgr.state.inventory}
+        for i, step in enumerate(chain):
+            if not isinstance(step, dict):
+                continue
+            sl = str(step.get("location") or "").strip()
+            req = step.get("requires_item")
+            holds = (
+                not isinstance(req, str)
+                or not req.strip()
+                or req.strip().lower() in inventory_lower
+            )
+            if sl and cur_loc == sl.lower() and holds:
+                if i not in state_mgr.state.chain_steps_completed:
+                    state_mgr.state.chain_steps_completed.append(i)
+    except Exception:
+        pass
+
+
+def try_local_command(state_mgr: StateManager, user_text: str) -> Optional[Tuple[str, List[str]]]:
+    if not user_text:
+        return None
+    raw = user_text.strip()
+    text = raw.lower()
+    if not text:
+        return None
+    debug: List[str] = []
+    state = state_mgr.state
+
+    parts = text.split(maxsplit=1)
+    cmd = parts[0]
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    # ── help ──────────────────────────────────────────────────────────────
+    if cmd in ("help", "?"):
+        debug.append("[fastpath] help")
+        return (
+            "**Engine commands (no LLM call, no token cost):**\n"
+            "- `look` / `l` — describe your surroundings\n"
+            "- `examine X` / `x X` / `look at X` — inspect an item, NPC, or monster you can see\n"
+            "- `inventory` / `inv` / `i` — list what you carry\n"
+            "- `take X` / `get X` / `pick up X` — pick up an item from the room\n"
+            "- `drop X` / `put down X` — set an item down in the room\n"
+            "- `go X` / `enter X` / `move X` — travel to an exit named X\n"
+            "- `n/s/e/w/up/down` — travel to an exit whose name starts with that letter\n"
+            "- `map` / `m` — show the known map\n"
+            "- `wait` — pass time\n"
+            "- anything else (combat, talk, riddle answers, story actions) goes to the storyteller LLM.",
+            debug,
+        )
+
+    # ── inventory ─────────────────────────────────────────────────────────
+    if cmd in ("inventory", "inv", "i"):
+        debug.append("[fastpath] inventory")
+        inv = state.inventory or []
+        return (f"You are carrying: {', '.join(inv)}." if inv else "Your hands are empty."), debug
+
+    # ── map ───────────────────────────────────────────────────────────────
+    if cmd in ("map", "m"):
+        debug.append("[fastpath] map")
+        return state_mgr.describe_map() or "You have not explored anywhere yet.", debug
+
+    # ── wait ──────────────────────────────────────────────────────────────
+    if cmd == "wait":
+        debug.append("[fastpath] wait")
+        return "You pause for a moment, listening to the silence.", debug
+
+    # ── look ──────────────────────────────────────────────────────────────
+    if text in ("look", "l", "look around", "examine room"):
+        debug.append("[fastpath] look")
+        return (handle_look_command(state_mgr) or f"You stand in **{state.location}**."), debug
+
+    # ── examine X ─────────────────────────────────────────────────────────
+    examine_target: Optional[str] = None
+    if cmd in ("examine", "x", "inspect"):
+        examine_target = arg
+    elif text.startswith("look at "):
+        examine_target = text[len("look at "):].strip()
+    if examine_target is not None:
+        if not examine_target:
+            return "Examine what?", debug
+        # CHANGE (fastpath naming bugfix): use _match_item so "the key" / "lantern"
+        # find "runic_key" / "elven_lantern". Articles + snake_case tolerance.
+        target_l = examine_target.lower()
+        wb = _get_world_bible()
+
+        # Inventory
+        inv_match = _match_item(examine_target, list(state.inventory))
+        if inv_match:
+            purpose = ""
+            if wb:
+                for ki in wb.get("key_items", []) or []:
+                    if isinstance(ki, dict) and ki.get("name", "").lower() == inv_match.lower():
+                        purpose = ki.get("purpose", "")
+                        break
+            debug.append(f"[fastpath] examine inv: {inv_match}")
+            return f"**{inv_match}** (carried). " + (purpose or "It feels solid in your hand."), debug
+
+        # Room items
+        room_items = state.room_items.get(state.location, [])
+        room_match = _match_item(examine_target, list(room_items))
+        if room_match:
+            debug.append(f"[fastpath] examine room: {room_match}")
+            return f"**{room_match}** is here. Try `take {room_match}` to pick it up.", debug
+
+        # NPCs / monsters in this room
+        if wb:
+            for npc in wb.get("npcs", []) or []:
+                if not isinstance(npc, dict):
+                    continue
+                if target_l in (npc.get("name", "").lower()) and (
+                    npc.get("location", "").lower() == state.location.lower()
+                ):
+                    debug.append(f"[fastpath] examine npc: {npc.get('name')}")
+                    return (
+                        f"**{npc.get('name')}** — {npc.get('personality','mysterious')}. "
+                        f"Can provide: {npc.get('provides','?')}.",
+                        debug,
+                    )
+            for mon in wb.get("monsters", []) or []:
+                if not isinstance(mon, dict):
+                    continue
+                if target_l in (mon.get("name", "").lower()) and (
+                    mon.get("location", "").lower() == state.location.lower()
+                ):
+                    debug.append(f"[fastpath] examine monster: {mon.get('name')}")
+                    return (
+                        f"**{mon.get('name')}** ({mon.get('difficulty','dangerous')}). "
+                        f"Weakness: {mon.get('weakness','?')}.",
+                        debug,
+                    )
+
+        # Not found locally — let the LLM narrate.
+        return None
+
+    # ── take / get / pick up ─────────────────────────────────────────────
+    # CHANGE (fastpath naming bugfix): supports multi-item lists ("take A, B and C"),
+    # leading articles ("the key"), and snake_case item names ("runic_key" matches "key").
+    take_target: Optional[str] = None
+    if cmd in ("take", "get", "grab"):
+        take_target = arg
+    elif text.startswith("pick up "):
+        take_target = text[len("pick up "):].strip()
+    if take_target is not None:
+        if not take_target:
+            return "Take what?", debug
+        room_items = list(state.room_items.get(state.location, []))
+        pieces = _split_item_list(take_target)
+        taken: List[str] = []
+        misses: List[str] = []
+        for piece in pieces:
+            match = _match_item(piece, room_items)
+            if match and match not in taken:
+                state_mgr.remove_item_from_room(match)
+                state_mgr.add_item(match)
+                taken.append(match)
+                debug.append(f"[fastpath] tool.room_take: {match}")
+                room_items.remove(match)  # avoid double-matching same item to two requests
+            elif not match:
+                misses.append(piece)
+
+        if not taken and misses:
+            still_here = state.room_items.get(state.location, [])
+            debug.append(f"[WARN] [fastpath] take MISS: {misses} not in room={still_here}")
+            target_show = ", ".join(misses)
+            return (
+                f"You don't see '{target_show}' here. "
+                + (f"You see: {', '.join(still_here)}." if still_here else "The room is empty.")
+            ), debug
+
+        bits: List[str] = []
+        if len(taken) == 1:
+            bits.append(f"You pick up the **{taken[0]}**.")
+        elif taken:
+            bits.append(f"You pick up: **{', '.join(taken)}**.")
+        if misses:
+            still_here = state.room_items.get(state.location, [])
+            for m in misses:
+                debug.append(f"[WARN] [fastpath] take MISS (partial): '{m}' not in room={still_here}")
+            bits.append(
+                f"(You don't see '{', '.join(misses)}' here"
+                + (f"; visible: {', '.join(still_here)}." if still_here else ".")
+                + ")"
+            )
+        return " ".join(bits), debug
+
+    # ── drop ──────────────────────────────────────────────────────────────
+    # CHANGE (fastpath naming bugfix): same multi-item / article / snake_case tolerance.
+    drop_target: Optional[str] = None
+    if cmd in ("drop", "leave"):
+        drop_target = arg
+    elif text.startswith("put down "):
+        drop_target = text[len("put down "):].strip()
+    if drop_target is not None:
+        if not drop_target:
+            return "Drop what?", debug
+        inventory = list(state.inventory)
+        pieces = _split_item_list(drop_target)
+        dropped: List[str] = []
+        misses: List[str] = []
+        for piece in pieces:
+            match = _match_item(piece, inventory)
+            if match and match not in dropped:
+                state_mgr.remove_item(match)
+                state_mgr.place_item_in_room(match)
+                dropped.append(match)
+                debug.append(f"[fastpath] tool.drop: {match}")
+                inventory.remove(match)
+            elif not match:
+                misses.append(piece)
+
+        if not dropped and misses:
+            debug.append(f"[WARN] [fastpath] drop MISS: {misses} not in inventory={state.inventory}")
+            return (
+                f"You aren't carrying '{', '.join(misses)}'. "
+                + (f"You have: {', '.join(state.inventory)}." if state.inventory else "Your hands are empty.")
+            ), debug
+
+        bits: List[str] = []
+        if len(dropped) == 1:
+            bits.append(f"You set the **{dropped[0]}** down in **{state.location}**.")
+        elif dropped:
+            bits.append(f"You set down in **{state.location}**: **{', '.join(dropped)}**.")
+        if misses:
+            for m in misses:
+                debug.append(f"[WARN] [fastpath] drop MISS (partial): '{m}' not in inventory")
+            bits.append(f"(You weren't carrying '{', '.join(misses)}'.)")
+        return " ".join(bits), debug
+
+    # ── movement (go/enter/move/cardinal/exit-name) ──────────────────────
+    exits = state.known_map.get(state.location, {}).get("exits", []) or []
+    move_target: Optional[str] = None
+
+    if cmd in ("go", "move", "enter", "head", "travel") and arg:
+        move_target = _match_exit(arg, exits)
+    elif cmd in ("north", "south", "east", "west", "up", "down", "n", "s", "e", "w", "u", "d"):
+        move_target = _match_exit(cmd, exits)
+    elif exits and text in {x.lower() for x in exits}:
+        move_target = next(x for x in exits if x.lower() == text)
+
+    if move_target:
+        state_mgr.move_to(move_target)
+        debug.append(f"[fastpath] tool.move_to: {move_target}")
+        wb = _get_world_bible()
+        room_desc = ""
+        if wb:
+            for loc in wb.get("locations", []) or []:
+                if isinstance(loc, dict) and loc.get("name", "").lower() == move_target.lower():
+                    room_desc = loc.get("description", "")
+                    break
+        room_items = state.room_items.get(move_target, [])
+        new_exits = state.known_map.get(move_target, {}).get("exits", [])
+        bits = [f"You enter **{move_target}**."]
+        if room_desc:
+            bits.append(room_desc)
+        if room_items:
+            bits.append(f"You see: {', '.join(room_items)}.")
+        if new_exits:
+            bits.append(f"Exits: {', '.join(new_exits)}.")
+        return " ".join(bits), debug
 
     return None
 
@@ -3505,26 +5412,19 @@ def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         try:
             user = input("\n> ").strip()
         except (KeyboardInterrupt, EOFError):
+            print("\n" + format_session_postmortem(state_mgr))
             print("\nGoodbye!")
             break
 
         if not user:
             continue
         if user.lower() in {"quit", "exit"}:
+            print("\n" + format_session_postmortem(state_mgr))
             print("Goodbye!")
             break
-        if user.lower() == "help":
-            print("Commands: help, save, map, inv, health, images, quit")
-            continue
         if user.lower() == "save":
             path = state_mgr.save()
             print(f"Saved: {path}")
-            continue
-        if user.lower() == "map":
-            print(state_mgr.describe_map())
-            continue
-        if user.lower() == "inv":
-            print(", ".join(state_mgr.state.inventory) or "(empty)")
             continue
         if user.lower() == "health":
             print(f"Health: {state_mgr.state.health}")
@@ -3535,6 +5435,38 @@ def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             else:
                 for img in state_mgr.state.last_images[-10:]:
                     print(f"- {img['prompt']} -> {img['path']}")
+            continue
+
+        # CHANGE (chunk I): unified deterministic fast-path — handles look/take/drop/move/
+        # examine/inventory/map/help/wait without an LLM call.
+        local = try_local_command(state_mgr, user)
+        if local is not None:
+            local_text, _local_debug = local
+            # CHANGE (play robustness fix): tick timers, count the turn, advance chain
+            # progress, and check win condition so the CLI doesn't silently miss victories
+            # / deaths from fast-path actions.
+            timer_events_local = state_mgr.process_timers_and_chains()
+            if timer_events_local:
+                local_text += "\n\n" + " ".join(timer_events_local)
+
+            _post_turn_bookkeeping(state_mgr)
+
+            win_msg_local = check_win_condition(state_mgr)
+            if win_msg_local:
+                local_text += f"\n\n{win_msg_local}"
+                try:
+                    local_text += "\n\n" + format_session_postmortem(state_mgr)
+                except Exception:
+                    pass
+
+            if state_mgr.state.health <= 0:
+                local_text += "\n\n**You have fallen.**"
+                try:
+                    local_text += "\n\n" + format_session_postmortem(state_mgr)
+                except Exception:
+                    pass
+
+            print("\n" + local_text)
             continue
 
         system_prompt = get_system_instructions()
@@ -3549,13 +5481,13 @@ def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         if new_images:
             print(f"\n[New images generated: {len(new_images)} image(s)]")
             
-        # Debug output only if DEBUG environment variable is set
-        if os.environ.get("DEBUG", "").lower() in {"1", "true", "yes"}:
-            if payloads:
-                print("[debug:json] " + json.dumps(payloads, ensure_ascii=False, indent=2))
-            if tool_logs:
-                for line in tool_logs:
-                    print("[debug:tool] " + line)
+        # CHANGE (chunk D): even without DEBUG, surface the [SUMMARY] + [WARN] lines so the
+        # user always sees the per-turn signal. Full per-tool dump still gated by DEBUG env.
+        _cli_debug_full = os.environ.get("DEBUG", "").lower() in {"1", "true", "yes"}
+        if _cli_debug_full and payloads:
+            print("[debug:json] " + json.dumps(payloads, ensure_ascii=False, indent=2))
+        for line in _filter_tool_logs_for_display(tool_logs, _cli_debug_full or ADV_VERBOSE_DEBUG):
+            print("[debug:tool] " + line)
 
 
 def do_generate_world_bible(wb_model: str, theme: Optional[str] = None, max_tokens: int = 4000) -> str:
@@ -3636,25 +5568,57 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 state_mgr.state.location,
             )
 
-        # Handle "look" command locally — saves an LLM call
+        # CHANGE (chunk I): try the deterministic engine fast-path FIRST. Movement,
+        # take/drop, look, examine, inventory, map, help, wait — all handled here without
+        # touching the LLM. Saves tokens, never desyncs state, never produces garbage.
         lower_text = user_text.strip().lower()
-        if lower_text in ("look", "look around", "l", "examine room"):
-            look_text = handle_look_command(state_mgr)
-            if look_text:
-                ui_data["narration"] += f"\n> {user_text}\n\n{look_text}\n"
-                ui_data["debug"].append("[look] Handled locally, no LLM call")
-                latest_image = get_current_room_image(state_mgr)
-                return (
-                    ui_data["narration"],
-                    ui_data["images"],
-                    get_debug_view(),
-                    str(state_mgr.state.health),
-                    ", ".join(state_mgr.state.inventory) or "(empty)",
-                    state_mgr.describe_map(),
-                    latest_image,
-                    get_llm_context_view(),
-                    state_mgr.state.location,
-                )
+        local = try_local_command(state_mgr, user_text)
+        if local is not None:
+            local_text, local_debug = local
+
+            # CHANGE (play robustness fix): a fast-path action is a real turn — tick
+            # active timers/chains, run post-turn bookkeeping (turn counter + chain
+            # progress), and check the win condition. Otherwise picking up the final
+            # treasure or walking to the win room would silently fail to end the game.
+            timer_events_local = state_mgr.process_timers_and_chains()
+            if timer_events_local:
+                local_text += "\n\n" + " ".join(timer_events_local)
+                ui_data["debug"].extend([f"[timer] {e}" for e in timer_events_local])
+
+            _post_turn_bookkeeping(state_mgr)
+
+            win_msg_local = check_win_condition(state_mgr)
+            if win_msg_local:
+                local_text += f"\n\n{win_msg_local}"
+                try:
+                    local_text += "\n\n" + format_session_postmortem(state_mgr)
+                except Exception as _pm_e:
+                    ui_data["debug"].append(f"[postmortem] failed ({_pm_e})")
+                ui_data["debug"].append("[game] Win condition met (via fast-path)!")
+
+            if state_mgr.state.health <= 0:
+                local_text += "\n\n**You have fallen. Your adventure ends here.**\nType 'restart' to begin a new adventure, or 'load' to restore a saved game."
+                try:
+                    local_text += "\n\n" + format_session_postmortem(state_mgr)
+                except Exception as _pm_e:
+                    ui_data["debug"].append(f"[postmortem] failed ({_pm_e})")
+                ui_data["debug"].append("[game] Player died (via fast-path)")
+
+            ui_data["narration"] += f"\n> {user_text}\n\n{local_text}\n"
+            for ln in local_debug:
+                ui_data["debug"].append(ln)
+            latest_image = get_current_room_image(state_mgr)
+            return (
+                ui_data["narration"],
+                ui_data["images"],
+                get_debug_view(),
+                str(state_mgr.state.health),
+                ", ".join(state_mgr.state.inventory) or "(empty)",
+                state_mgr.describe_map(),
+                latest_image,
+                get_llm_context_view(),
+                state_mgr.state.location,
+            )
 
         # Block actions if player is dead
         if state_mgr.state.health <= 0 and lower_text not in ("restart", "load", "help"):
@@ -3705,7 +5669,23 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         _prev_image_count = len(state_mgr.state.last_images)
 
         final_text, new_images, payloads, tool_logs = apply_llm_directives(state_mgr, llm_text, image_gen)
-        
+
+        # CHANGE (chunk J): capture warnings emitted this turn so build_user_prompt can
+        # surface them to the LLM next turn. Also capture for the chunk K post-mortem tally.
+        _turn_warns = [
+            ln for ln in tool_logs
+            if ln.startswith("[WARN]") or ln.startswith("[WARNING]")
+        ]
+        if _turn_warns:
+            state_mgr.state.engine_notes_for_next_turn = _turn_warns[:6]
+            try:
+                state_mgr.state.warnings_history.extend(_turn_warns)
+            except Exception:
+                pass
+        # CHANGE (chunk K + play robustness fix): track turns + chain steps via shared helper
+        # so fast-path turns count too.
+        _post_turn_bookkeeping(state_mgr)
+
         # BACKUP: If no images were generated and current room has no image, generate one
         # This ensures new games/rooms always get an image even if LLM doesn't request one
         # Uses the narrative context so the image matches what was just described
@@ -3723,12 +5703,22 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         # Death check
         if state_mgr.state.health <= 0:
             final_text += "\n\n**You have fallen. Your adventure ends here.**\nType 'restart' to begin a new adventure, or 'load' to restore a saved game."
+            # CHANGE (chunk K): emit post-mortem on death
+            try:
+                final_text += "\n\n" + format_session_postmortem(state_mgr)
+            except Exception as _pm_e:
+                ui_data["debug"].append(f"[postmortem] failed ({_pm_e})")
             ui_data["debug"].append("[game] Player died (health <= 0)")
 
         # Win condition check
         win_msg = check_win_condition(state_mgr)
         if win_msg:
             final_text += f"\n\n{win_msg}"
+            # CHANGE (chunk K): emit post-mortem on victory
+            try:
+                final_text += "\n\n" + format_session_postmortem(state_mgr)
+            except Exception as _pm_e:
+                ui_data["debug"].append(f"[postmortem] failed ({_pm_e})")
             ui_data["debug"].append("[game] Win condition met!")
 
         # Save conversation history (keep last 5 turns for context)
@@ -3757,17 +5747,12 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         except Exception:
             pass
         
-        # Add JSON and tool logs to debug console only
-        # Payloads already contain parsed JSON
-        if payloads:
-            # Just log that we have JSON, not the full content (it's in tool logs)
-            ui_data["debug"].append(f"[json] processed {len(payloads)} directive(s)")
-        else:
-            ui_data["debug"].append("[json] none")
-            
-        if tool_logs:
-            for line in tool_logs:
-                ui_data["debug"].append(f"[tool] {line}")
+        # CHANGE (chunk D): default to minimum-but-rich debug — show only the [SUMMARY] line
+        # plus any [WARN]/[WARNING]. Set ADV_VERBOSE_DEBUG=1 to see every per-tool entry.
+        if not payloads:
+            ui_data["debug"].append("[WARN] [json] none — LLM produced no parseable directives")
+        for line in _filter_tool_logs_for_display(tool_logs, ADV_VERBOSE_DEBUG):
+            ui_data["debug"].append(f"[tool] {line}")
         if new_images:
             # Show image filenames for gallery
             try:
@@ -4462,6 +6447,15 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             and replays the opening scene. It's equivalent to replaying from the start.
             """
             try:
+                # CHANGE (chunk K): emit post-mortem for the session being abandoned.
+                try:
+                    pm = format_session_postmortem(state_mgr)
+                    if (state_mgr.state.session_turns or 0) > 0:
+                        ui_data["narration"] += "\n\n" + pm + "\n"
+                        ui_data["debug"].append("[postmortem] Emitted before restart")
+                except Exception as _pm_e:
+                    ui_data["debug"].append(f"[postmortem] failed before restart ({_pm_e})")
+
                 # Autosave current run before resetting dynamic state
                 _autosave_if_active()
 

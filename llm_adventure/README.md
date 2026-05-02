@@ -61,6 +61,50 @@ python LMM_adventure_April_30.py --player "Gandalf"             # Set player nam
 
 ---
 
+## Recent improvements (April–May 2026)
+
+The engine got significantly more reliable on local 27B–35B class models without changing the LLM's role. Every change is **model-agnostic** — there are no model-name gates in code logic, only labels in comments. As models improve, the same pipeline gets better automatically.
+
+### Generation pipeline (world bible)
+
+| Improvement | Why it matters |
+|---|---|
+| **Two-pass generation** (skeleton → expansion) | A 30B model can reliably emit a small, narrowly-scoped JSON; it struggles with a 12-field cross-referenced one. Pass 1 = locations + key_items + structured win_condition. Pass 2 = npcs/monsters/riddles/item_locations/mechanics/main_arc/solution_chain, with skeleton names pinned in the prompt. Each pass validates standalone and gets ONE retry on its own gaps. |
+| **Deterministic auto-repair** (`auto_repair_world_bible`) | Most generation problems are mechanical: missing item_locations entry, NPC parked in invented room, isolated room. Code patches them with no LLM call. Saves a generation round-trip. |
+| **Per-gap micro-repair** (`micro_repair_world_bible`) | After auto-repair, residual *thematic* gaps (monster weakness pointing at a placeholder item, broken exit, chain step missing item) are fixed via narrow multiple-choice LLM questions: "Pick ONE from this list." 30B-class models are excellent at this and unreliable at "regenerate the whole bible." |
+| **Solvability validator** (`validate_world_bible_solvability`) | Builds the room graph from `locations[].exits`, runs BFS reachability, and checks that every key_item has a placement, every blocker references a real item, every solution_chain step is reachable from the previous, and the win-condition location is reachable from start. Prints a one-screen report. |
+| **Structured `win_condition`** | Schema is now `{required_items: [...], required_location: "...", description: "..."}`. Win check is direct equality, not substring matching. |
+| **`solution_chain` requirement** | Every world bible includes an ordered list of steps proving the puzzle is winnable: `{step, location, requires_item, blocker, result}`. Drives validation and post-mortem. |
+| **Ollama JSON mode + lower temperature** | World-bible LLM calls pass `format="json"` to Ollama (strict decode-time JSON) and run at `temperature=0.3` for cleaner names. Single biggest reliability win for Ollama-hosted local models. |
+
+### Runtime pipeline (per turn)
+
+| Improvement | Why it matters |
+|---|---|
+| **Local fast-path commands** (`try_local_command`) | `look`, `examine X`, `inventory`, `take X`, `drop X`, `go X`, `n/s/e/w/up/down`, `map`, `wait`, `help` — resolved by the engine without an LLM call. ~60% of typical inputs handled here. Faster, cheaper, never desyncs state. |
+| **Lean per-turn prompt** | Heavy world-bible cues (room description, etc.) injected ONLY on the first turn the player is in a room (`last_described_room` cache). Few-shot example only on the first 3 turns of a session OR when the previous turn produced a `[WARN]`. Big token savings on a 30B local model. |
+| **State guards as warnings** | Contradictions (room_take MISS, move_to UNLINKED, remove_items MISS, add_items DUP) are logged as `[WARN]` but never block the LLM. The model remains the GM; the engine just keeps the player informed. |
+| **Per-turn `[SUMMARY]` line** | One compact line per turn captures location/inventory/flags/health deltas + warning count + payload count. Replaces the noisy tool-by-tool dump (still available via `ADV_VERBOSE_DEBUG=1`). |
+| **End-of-session post-mortem** | On win/death/quit/restart: rooms explored / total, items collected / total, solution_chain steps reached, warning histogram by category, top world-bible solvability gaps. The "what to fix" report. |
+| **Engine-note feedback loop** (off by default) | `[WARN]`s from this turn can be injected into next turn's prompt to help the model self-correct. Off by default to trust the model; enable with `ADV_INJECT_ENGINE_NOTES=1` when actively diagnosing a model that keeps repeating mistakes. |
+| **Dynamic single-shot few-shot** | When few-shot is added, it's the ONE example most relevant to the player's intent (move/take/use/talk/combat). Less is more on smaller models. |
+
+### Environment flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `DEBUG=1` | off | CLI: dump full payload JSON each turn |
+| `ADV_VERBOSE_DEBUG=1` | off | Show every per-tool debug line in UI |
+| `ADV_INJECT_ENGINE_NOTES=1` | off | Inject `[WARN]`s into next user prompt |
+
+### What did NOT change
+- The LLM is still the GM. Every guard is a warning, never a block. The model can still introduce new rooms (`connect`), new items (`place_items`), new NPCs in narration. Schema flexibility is intact.
+
+### For browser / 4B-class adaptation
+A separate playbook lives at [`../browser_adventure/MAKING_ADVENTURES_GREAT_WITH_SMALL_MODELS.md`](../browser_adventure/MAKING_ADVENTURES_GREAT_WITH_SMALL_MODELS.md) describing how these patterns sharpen for the in-browser Gemma 4B build.
+
+---
+
 ## Architecture: GameState + World Bible
 
 ### What the Turn-LLM sees each turn
