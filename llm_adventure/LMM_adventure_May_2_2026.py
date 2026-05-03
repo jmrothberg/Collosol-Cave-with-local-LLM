@@ -5525,8 +5525,163 @@ def do_generate_world_bible(wb_model: str, theme: Optional[str] = None, max_toke
 # GRADIO UI
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# CHANGE (default-cave shared with browser, May 2026): the in-browser game ships
+# `browser_adventure/default_cave.json` — 6 rooms, full puzzle chain, walkthrough,
+# carefully designed. The Python engine had a sparser inline default that the
+# user could not actually choose. Load the SAME JSON the browser uses so the
+# "🕯️ Default Cave Adventure" pick card is wired to a real bible.
+def _normalize_browser_chain(wb: Dict[str, Any]) -> None:
+    """Convert browser-style chain steps {step, action, gives, unlocks} into the
+    engine schema {step, location, requires_item, blocker, result}. Fills in
+    missing `location` and `requires_item` by scanning the action text for known
+    room / NPC / monster / item names. Idempotent — already-normalized steps are
+    left alone."""
+    chain = wb.get("solution_chain") or []
+    if not chain or not isinstance(chain, list):
+        return
+    if isinstance(chain[0], dict) and "location" in chain[0]:
+        return  # already engine schema
+
+    loc_names = [
+        str(l.get("name") or "").strip()
+        for l in (wb.get("locations") or [])
+        if isinstance(l, dict)
+    ]
+    loc_names = [n for n in loc_names if n]
+
+    item_names = [
+        str(i.get("name") or "").strip()
+        for i in (wb.get("key_items") or [])
+        if isinstance(i, dict)
+    ]
+    item_names = [n for n in item_names if n]
+
+    # Where do entities live?
+    entity_loc: Dict[str, str] = {}
+    for e in (wb.get("npcs") or []) + (wb.get("monsters") or []):
+        if isinstance(e, dict):
+            nm = str(e.get("name") or "").strip()
+            lc = str(e.get("location") or "").strip()
+            if nm and lc:
+                entity_loc[nm.lower()] = lc
+
+    # Where can an item be obtained? Pull a real room name out of item_locations.
+    item_loc: Dict[str, str] = {}
+    for item, desc in (wb.get("item_locations") or {}).items():
+        s = str(desc)
+        for ln in loc_names:
+            if ln and ln in s:
+                item_loc[item.lower()] = ln
+                break
+
+    new_chain: List[Dict[str, Any]] = []
+    for i, step in enumerate(chain):
+        if not isinstance(step, dict):
+            continue
+        action = str(step.get("action") or step.get("result") or "")
+        gives = step.get("gives")
+        unlocks = step.get("unlocks")
+        action_l = action.lower()
+
+        # Derive location: room name in action, NPC/monster in action, item-source room, fallback to start.
+        loc: Optional[str] = None
+        for ln in loc_names:
+            if ln and ln.lower() in action_l:
+                loc = ln
+                break
+        if not loc:
+            for nm, ll in entity_loc.items():
+                if nm and nm in action_l:
+                    loc = ll
+                    break
+        if not loc and isinstance(gives, str) and gives.lower() in item_loc:
+            loc = item_loc[gives.lower()]
+        if not loc and loc_names:
+            loc = loc_names[0]
+
+        # Derive requires_item: any key_item name in the action OTHER than `gives`.
+        gives_l = gives.lower() if isinstance(gives, str) else ""
+        req: Optional[str] = None
+        for it in item_names:
+            if it and it.lower() != gives_l and it.lower() in action_l:
+                req = it
+                break
+
+        new_chain.append({
+            "step": step.get("step", i + 1),
+            "location": loc,
+            "requires_item": req,
+            "blocker": str(unlocks or ""),
+            "result": (str(gives) if gives else action),
+        })
+
+    wb["solution_chain"] = new_chain
+
+
+def load_default_world_bible_if_needed() -> bool:
+    """If WORLD_BIBLE is unset, load browser_adventure/default_cave.json and
+    normalize it to the engine's schema. Returns True if a default was loaded.
+    """
+    global WORLD_BIBLE
+    if isinstance(WORLD_BIBLE, dict) and WORLD_BIBLE:
+        return False
+    candidates = [
+        os.path.join(_SCRIPT_DIR, "..", "browser_adventure", "default_cave.json"),
+        os.path.join(os.path.dirname(_SCRIPT_DIR), "browser_adventure", "default_cave.json"),
+    ]
+    for raw in candidates:
+        path = os.path.normpath(raw)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                wb = json.load(f)
+        except Exception as e:
+            print(f"[default_cave] failed to load {path}: {e}")
+            continue
+        # Browser → engine schema:
+        #   puzzle_chain → solution_chain (key rename)
+        #   chain steps {step, action, gives, unlocks} → {step, location, requires_item, blocker, result}
+        if "puzzle_chain" in wb and "solution_chain" not in wb:
+            wb["solution_chain"] = wb.pop("puzzle_chain")
+        _normalize_browser_chain(wb)
+        # win_condition string → struct (chunk G).
+        try:
+            _parse_win_condition(wb)
+        except Exception:
+            pass
+        # Run mechanical auto-repair so the loaded bible passes our validators.
+        try:
+            repairs = auto_repair_world_bible(wb)
+            if repairs:
+                print(f"[default_cave] auto-repair applied {len(repairs)} fix(es):")
+                for r in repairs[:6]:
+                    print(f"  - {r}")
+        except Exception:
+            pass
+        WORLD_BIBLE = wb
+        rooms = len(wb.get("locations", []) or [])
+        items = len(wb.get("key_items", []) or [])
+        chain_steps = len(wb.get("solution_chain", []) or [])
+        print(
+            f"[default_cave] Loaded {path} ({rooms} rooms, {items} key items, {chain_steps} chain steps)"
+        )
+        return True
+    print(
+        "[default_cave] No browser_adventure/default_cave.json found; engine will "
+        "use its inline default_plan only when generation is requested without a model."
+    )
+    return False
+
+
 def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optional[MfluxImageGenerator]) -> None:
     """Simple Gradio UI that shows images, inventory, health, map, and a debug console."""
+
+    # CHANGE (default-cave shared with browser): if no world bible is set yet
+    # (fresh launch, no save loaded), pull in browser_adventure/default_cave.json
+    # so the "Default Cave Adventure" pick card is immediately playable. Saved
+    # games and freshly-generated bibles still take precedence.
+    load_default_world_bible_if_needed()
 
     # Simple closure-based UI state (avoid Gradio State issues)
     ui_data: Dict[str, Any] = {
@@ -6197,12 +6352,26 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 gr.Markdown("### Choose Your Adventure")
 
                 # ── Pick card 1: Default cave ──
+                #   CHANGE: the runtime now loads browser_adventure/default_cave.json
+                #   on startup so this card is wired to the same canonical 6-room
+                #   adventure the in-browser edition ships (Cave Mouth → Mushroom
+                #   Grotto → Underground River → Ancient Forge → Dragon's Vault).
                 with gr.Group(elem_classes=["pick-card"]):
+                    _wb_now = _get_world_bible()
+                    _default_loaded = bool(_wb_now and _wb_now.get("locations"))
+                    _default_room_count = len((_wb_now or {}).get("locations", []) or [])
                     gr.Markdown(
                         "#### 🕯️ Default Cave Adventure  \n"
-                        "Classic cave exploration with hermit, troll, temple, and treasure. "
-                        "Ready to play once your LLM is loaded — no world-bible generation needed."
+                        "**Starfire Gem quest** — the same canonical adventure the in-browser "
+                        "edition ships in `browser_adventure/default_cave.json`. "
+                        f"Currently loaded: **{'yes' if _default_loaded else 'no'}** "
+                        f"({_default_room_count} rooms). "
+                        "Hermit at Cave Mouth, river troll, ancient forge, stone dragon, "
+                        "Starfire Gem in Dragon's Vault — return it to Cave Mouth to win. "
+                        "Load your LLM, then click **▶ Start Adventure** below."
                     )
+                    reload_default_btn = gr.Button("Reload Default Cave", variant="secondary", size="sm")
+                    default_status = gr.Markdown()
 
                 # ── Pick card 2: Generate new ──
                 with gr.Group(elem_classes=["pick-card"]):
@@ -6682,6 +6851,36 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             fn=do_apply_theme,
             inputs=[theme_input],
             outputs=[theme_status, theme_input],
+        )
+
+        # CHANGE (default-cave shared with browser): reload default_cave.json on demand
+        # — useful if the user wants to discard a generated/loaded bible and play the
+        # canonical Starfire Gem quest the browser ships.
+        def do_reload_default_cave():
+            global WORLD_BIBLE
+            try:
+                # Force-reset so loader actually reloads even if a bible is set.
+                WORLD_BIBLE = None
+                loaded = load_default_world_bible_if_needed()
+                if not loaded:
+                    return ("❌ Could not find browser_adventure/default_cave.json",
+                            get_world_bible_view())
+                # Reset dynamic state so seed/start_story re-seeds from the new bible.
+                player_name = state_mgr.state.player_name
+                state_mgr.state = GameState(player_name=player_name)
+                wb = _get_world_bible() or {}
+                rooms = len(wb.get("locations", []) or [])
+                items = len(wb.get("key_items", []) or [])
+                msg = f"✅ Loaded default cave ({rooms} rooms, {items} key items). Click ▶ Start Adventure."
+                ui_data["debug"].append(f"[default_cave] reloaded ({rooms} rooms, {items} items)")
+                return msg, get_world_bible_view()
+            except Exception as e:
+                return f"❌ Reload failed: {e}", get_world_bible_view()
+
+        reload_default_btn.click(
+            fn=do_reload_default_cave,
+            inputs=[],
+            outputs=[default_status, world_bible_view],
         )
 
         def do_toggle_advanced(val: bool):
