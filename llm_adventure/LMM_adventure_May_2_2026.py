@@ -6084,195 +6084,270 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 gr.update()
             )
  
-    # Note: css parameter may need to be passed differently in newer Gradio versions
-    custom_css = "#narration-box textarea { font-size: 150%; }"
-    try:
-        # Try newer Gradio API first
-        app = gr.Blocks(title="JMR's LLM Adventure (MLX + MFLUX)")
-        app.css = custom_css
-    except Exception:
-        pass
-    with gr.Blocks(title="JMR's LLM Adventure (MLX + MFLUX)") as app:
-        gr.Markdown("## JMR's LLM Adventure (MLX + MFLUX)")
- 
-        with gr.Row():
-            with gr.Column(scale=3):
-                # Instructions for new players in collapsible accordion (starts open)
-                with gr.Accordion("📖 How to Play", open=True):
-                    gr.Markdown("""
-                    ### Quick Start Guide
-                    
-                    **Starting a New Game:**
-                    1. **Select an LLM** from the dropdown (MLX folders or **ollama:**… tags from `ollama list`)
-                    2. **Click Load/Reload LLM** (orange button) to load the model
-                    3. **Optional:** Set the Theme (world/art style)
-                    4. **Optional:** Pick and LLM and click "Generate World Bible" for a new adventure (or use the default)
-                    5. **Optional:** Load an MFLUX model for visual art (select and click Load/Reload)
-                    6. **Start playing!** Type commands in the action box below
-                    
-                    **Loading a Saved Game:**
-                    1. Select from "Saved Games" dropdown
-                    2. Click "Load Game" button
-                    3. Continue your adventure!
-                    
-                    **Playing Tips:**
-                    - Natural language commands: "look around", "go north", "take sword", "talk to wizard"
-                    - The Turn-by-Turn LLM embelishes the story dynamically!
-                    - Save your progress anytime with "Save Game"
-                    - Images are generated automatically for new locations (or pre-generate)
-                    - Pregenerate images to speed up gameplay
-                    
-                    **Want to know more?**
-                    - Check the Debug Console for operational details
-                    - View LLM Context to see what the AI is being told
-                    - View the World Bible to see the static game design
-                    - View the GameState to see the dynamic game data
-                   
-                    """)
-                
-                # CHANGE (TRIVIAL): Initialize Latest Image so opening image shows immediately on new game
-                latest_image = gr.Image(label="Latest Image", height=None, value=(get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr) or (ui_data["images"][-1] if ui_data["images"] else None)))
-                # CHANGE: Removed secondary latest-turn gallery per request; one latest image panel only
-                # CHANGE: Wrap main Image Gallery in a collapsible accordion for easy hiding
-                with gr.Accordion("Image Gallery", open=False):
-                    # CHANGE (TRIVIAL): Initialize Gallery with any opening images so they display immediately
-                    gallery = gr.Gallery(label="Image Gallery", height=200, columns=3, value=ui_data["images"])
-                    # Toggle button to show/hide image names
-                    show_names_btn = gr.Button("Show Image Names", size="sm")
-                    gallery_filenames = gr.Textbox(label="Gallery Image Filenames", interactive=False, lines=3, visible=False)
-                user_box = gr.Textbox(label="Your action", placeholder="look around, go north, pick up key ...", lines=1)  # Enter submits
-                send_btn = gr.Button("Send")
+    # CHANGE (UI redesign, May 2026): match the browser_adventure dark theme and split
+    # the cluttered single page into two tabs — a Setup tab for picking models / theme /
+    # world bible / saved games, and a Play tab with just the narration, scene image,
+    # status, and action input. Debug accordions stay collapsed by default.
+    custom_css = """
+    :root {
+      --bg: #0a0a12; --panel: #14141f; --panel-alt: #1a1a28; --border: #252535;
+      --text: #d8d0c4; --text-muted: #8a8898;
+      --accent: #c9a550; --accent-dim: #8a7535;
+      --info: #6eb5ff; --ok: #7dffb2; --warn: #ffc46e; --err: #ff8a8a;
+    }
+    body, .gradio-container, .app, .main {
+      background: var(--bg) !important; color: var(--text) !important;
+      font-family: system-ui, "Segoe UI", Roboto, sans-serif !important;
+    }
+    .gradio-container { max-width: 1200px !important; margin: 0 auto !important; }
+    .gr-box, .gr-form, .gr-panel, .gr-block, .block, .form, .panel, .gr-group, .gr-accordion {
+      background: var(--panel) !important;
+      border-color: var(--border) !important;
+      color: var(--text) !important;
+    }
+    h1, h2, h3, h4 { color: var(--accent) !important; }
+    .prose, .gr-markdown, .gr-markdown p, .gr-markdown li { color: var(--text) !important; }
+    .gr-markdown strong { color: var(--accent) !important; }
+    label, .label-wrap label, .gr-form label, span.svelte-1gfkn6j, .label, .gr-input-label {
+      color: var(--text-muted) !important;
+    }
+    input, textarea, select,
+    .gr-input, .gr-textarea, .gr-text-input, .gr-dropdown, .gr-textbox textarea,
+    .gr-textbox input, .gr-number input, .gr-dropdown ul, .gr-dropdown li {
+      background: var(--panel) !important;
+      color: var(--text) !important;
+      border-color: var(--border) !important;
+    }
+    input:focus, textarea:focus, select:focus { border-color: var(--accent-dim) !important; outline: none !important; }
+    button, .gr-button {
+      background: var(--border) !important; color: var(--text) !important;
+      border: 1px solid var(--border) !important; transition: border-color .15s, color .15s !important;
+    }
+    button:hover:not(:disabled), .gr-button:hover:not(:disabled) {
+      border-color: var(--accent) !important; color: var(--accent) !important;
+    }
+    button.primary, .gr-button-primary, button[class*="primary"] {
+      background: #2a3520 !important; border-color: var(--accent-dim) !important; color: var(--accent) !important; font-weight: 600 !important;
+    }
+    button.primary:hover:not(:disabled), .gr-button-primary:hover:not(:disabled) {
+      background: #3a4a2a !important; border-color: var(--accent) !important;
+    }
+    /* Tabs */
+    .tab-nav, .tabs, .tab-buttons { background: var(--panel) !important; border-color: var(--border) !important; }
+    .tab-nav button, .tabitem button { background: var(--panel) !important; color: var(--text-muted) !important; border-bottom-color: transparent !important; }
+    .tab-nav button.selected, .tabitem button.selected {
+      background: var(--bg) !important; color: var(--accent) !important; border-bottom-color: var(--accent) !important;
+    }
+    /* Narration: serif, larger, parchment feel */
+    #narration-box textarea {
+      font-family: Georgia, "Times New Roman", serif !important;
+      font-size: 16px !important; line-height: 1.65 !important;
+      background: var(--panel) !important; color: var(--text) !important;
+      border-color: var(--border) !important;
+    }
+    /* Action input: monospace */
+    #player-input textarea, #player-input input {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
+      font-size: 14px !important;
+    }
+    /* Pick cards on the setup tab */
+    .pick-card {
+      background: var(--panel) !important;
+      border: 2px solid var(--border) !important;
+      border-radius: 8px !important;
+      padding: 14px 16px !important;
+      margin-bottom: 8px !important;
+    }
+    .pick-card:hover { border-color: var(--accent-dim) !important; }
+    .pick-card .gr-markdown h4 { color: var(--text) !important; margin-bottom: 4px !important; }
+    .pick-card .gr-markdown p { color: var(--text-muted) !important; font-size: 13px !important; }
+    /* Status panel layout */
+    .status-row .gr-textbox { border: 1px solid var(--border) !important; border-radius: 6px !important; }
+    /* Header */
+    .app-header { padding: 12px 4px 14px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+    .app-header h1 { font-size: 1.2rem !important; color: var(--accent) !important; margin: 0 !important; }
+    .app-header .subtitle { color: var(--text-muted) !important; font-size: 0.85rem !important; }
+    .gr-accordion .label-wrap { color: var(--accent) !important; }
+    /* Image scene */
+    .scene-image img { object-fit: contain !important; aspect-ratio: 1 / 1 !important; max-width: 100% !important; height: auto !important; }
+    /* Hide "Show API" footer link clutter — still accessible from the Gradio menu */
+    footer { color: var(--text-muted) !important; }
+    """
+
+    with gr.Blocks(title="JMR's LLM Adventure (MLX + MFLUX)", css=custom_css, theme=gr.themes.Base()) as app:
+        # ── Header (always visible) ─────────────────────────────────────────
+        gr.HTML(
+            "<div class='app-header'>"
+            "<h1>JMR's LLM Adventure</h1>"
+            "<div class='subtitle'>Local LLM as game master · MLX or Ollama · MFLUX scene art</div>"
+            "</div>"
+        )
+
+        # Helper for the saved-games dropdown (used by both tabs)
+        def _list_saved_games_local():
+            try:
+                files = [f for f in os.listdir(SAVE_DIR) if f.startswith("Adv_") and (f.endswith('.pkl') or f.endswith('.tkl'))]
+            except Exception:
+                files = []
+            return sorted(files, reverse=True)
+
+        with gr.Tabs() as tabs:
+            # ═══════════════════ TAB 1: SETUP ═══════════════════
+            with gr.TabItem("🎲 Setup", id="setup"):
+                gr.Markdown("### Choose Your Adventure")
+
+                # ── Pick card 1: Default cave ──
+                with gr.Group(elem_classes=["pick-card"]):
+                    gr.Markdown(
+                        "#### 🕯️ Default Cave Adventure  \n"
+                        "Classic cave exploration with hermit, troll, temple, and treasure. "
+                        "Ready to play once your LLM is loaded — no world-bible generation needed."
+                    )
+
+                # ── Pick card 2: Generate new ──
+                with gr.Group(elem_classes=["pick-card"]):
+                    gr.Markdown(
+                        "#### ✨ Generate New Adventure  \n"
+                        "Use your loaded LLM to create a brand-new world bible from a theme. "
+                        "Two-pass generation; deterministic auto-repair handles common gaps."
+                    )
+                    theme_dropdown = gr.Dropdown(
+                        choices=list(PRESET_THEMES.keys()),
+                        label="Theme preset",
+                        value="Tolkien Cave Adventure",
+                    )
+                    theme_input = gr.Textbox(
+                        label="Theme details (edit or type your own)",
+                        value=PRESET_THEMES.get("Tolkien Cave Adventure", ""),
+                        lines=3,
+                        placeholder="Describe the adventure theme, characters, art style …",
+                    )
+                    with gr.Row():
+                        apply_theme_btn = gr.Button("Apply Theme", variant="secondary")
+                        gen_bible_btn = gr.Button("Generate World Bible", variant="primary")
+                    with gr.Row():
+                        theme_status = gr.Markdown()
+                        wb_status = gr.Markdown()
+
+                # ── Pick card 3: Load saved ──
+                with gr.Group(elem_classes=["pick-card"]):
+                    gr.Markdown(
+                        "#### 💾 Load Saved Adventure  \n"
+                        "Resume a saved game from `Adventure_Game_Saved/` (auto-saved or named)."
+                    )
+                    saved_choices = _list_saved_games_local() or ["(none)"]
+                    load_dropdown = gr.Dropdown(
+                        saved_choices,
+                        label="Saved games",
+                        value=(saved_choices[0] if saved_choices else "(none)"),
+                    )
+                    load_btn = gr.Button("Load Game", variant="secondary")
+                    load_status = gr.Markdown()
+
+                gr.Markdown("---")
+                gr.Markdown("### Models")
+
                 with gr.Row():
                     with gr.Column():
                         mlx_models = list_mlx_models() if check_mlx_available() else []
                         ollama_models = list_ollama_model_choices()
                         choices = ollama_models + mlx_models if (ollama_models or mlx_models) else ["(select later)"]
-                        # CHANGE: prefer first Ollama entry (includes qwen3.6:27b-coding-mxfp8 when listed).
                         default_choice = choices[0]
-                        llm_drop = gr.Dropdown(choices, label="LLM (MLX or Ollama)", value=default_choice)
-                        reload_llm_btn = gr.Button("Load/Reload Turn-LLM", variant="primary")
+                        llm_drop = gr.Dropdown(choices, label="LLM — MLX folder or ollama:<tag>", value=default_choice)
+                        reload_llm_btn = gr.Button("Load / Reload LLM", variant="primary")
                         llm_status = gr.Markdown()
-                        # Save/Load/New Game buttons - grouped below LLM controls
-                        with gr.Row():
-                            restart_btn = gr.Button("New Game", variant="secondary", size="sm")
-                            save_btn = gr.Button("Save", variant="primary", size="sm")
-                        with gr.Row():
-                            game_name_input = gr.Textbox(label="Save as Name", placeholder="My_Adventure", scale=2)
-                        # Saved games dropdown and load
-                        def _list_saved_games_local():
-                            try:
-                                files = [f for f in os.listdir(SAVE_DIR) if f.startswith("Adv_") and (f.endswith('.pkl') or f.endswith('.tkl'))]
-                            except Exception:
-                                files = []
-                            return sorted(files, reverse=True)
-                        saved_choices = _list_saved_games_local() or ["(none)"]
-                        load_dropdown = gr.Dropdown(saved_choices, label="Saved Games", value=(saved_choices[0] if saved_choices else "(none)"))
-                        load_btn = gr.Button("Load Game", variant="secondary", size="sm")
-                        save_status = gr.Markdown()
-                        load_status = gr.Markdown()
-                        restart_status = gr.Markdown()
+                        max_tokens_slider = gr.Slider(
+                            minimum=250, maximum=2500, value=2500, step=50,
+                            label="LLM max tokens (response length)",
+                        )
+                        advanced_directives_cb = gr.Checkbox(
+                            value=ADVANCED_DIRECTIVES,
+                            label="Advanced directives (timers, conditionals — for larger models)",
+                        )
                     with gr.Column():
                         diffuser_choices = combined_diffuser_choices(include_skip=True)
-                        # If no diffuser is currently loaded, default to the first available choice (like LLM dropdown)
                         current_diffuser = image_gen.model_id if image_gen else (diffuser_choices[0] if diffuser_choices else "")
                         if current_diffuser and current_diffuser not in diffuser_choices:
                             diffuser_choices = [current_diffuser] + diffuser_choices
-                        diff_drop = gr.Dropdown(diffuser_choices, label="MFLUX Model", value=current_diffuser)
-                        reload_diff_btn = gr.Button("Load/Reload MFLUX Model", variant="primary")  # Start orange
+                        diff_drop = gr.Dropdown(diffuser_choices, label="Image model (MFLUX)", value=current_diffuser)
+                        reload_diff_btn = gr.Button("Load / Reload Image Model", variant="primary")
                         diff_status = gr.Markdown()
-            with gr.Column(scale=2):
-                # Scrollable narration window with box border - plain text display
-                narration_box = gr.Textbox(value=ui_data["narration"], label="Narration", lines=10, max_lines=10, interactive=False, elem_id="narration-box")
 
-                # Max tokens slider for LLM response length control
-                max_tokens_slider = gr.Slider(minimum=250, maximum=2500, value=2500, step=50, label="LLM Max Tokens (response length)")
-                advanced_directives_cb = gr.Checkbox(
-                    value=ADVANCED_DIRECTIVES,
-                    label="Advanced Directives (timers, conditionals — for larger models)",
+                gr.Markdown("---")
+                with gr.Row():
+                    start_adventure_btn = gr.Button("▶ Start / Continue Adventure", variant="primary", size="lg", scale=3)
+
+            # ═══════════════════ TAB 2: PLAY ═══════════════════
+            with gr.TabItem("🎮 Play", id="play"):
+                # ── Action bar (top of play tab) ──
+                with gr.Row():
+                    back_to_setup_btn = gr.Button("← Setup", size="sm", scale=1)
+                    save_btn = gr.Button("💾 Save", variant="primary", size="sm", scale=1)
+                    restart_btn = gr.Button("🆕 New Game (same world)", size="sm", scale=2)
+                with gr.Row():
+                    game_name_input = gr.Textbox(label="", placeholder="Save as: My_Adventure", scale=3, show_label=False)
+                save_status = gr.Markdown()
+                restart_status = gr.Markdown()
+
+                # ── Narration (the centerpiece) ──
+                narration_box = gr.Textbox(
+                    value=ui_data["narration"],
+                    label="Story",
+                    lines=14, max_lines=24,
+                    interactive=False,
+                    elem_id="narration-box",
                 )
 
+                # ── Mid row: scene image + status ──
                 with gr.Row():
-                    location = gr.Textbox(label="Location", value=str(state_mgr.state.location), interactive=False)
-                    health = gr.Textbox(label="Health", value=str(state_mgr.state.health), interactive=False)
-                inventory = gr.Textbox(label="Inventory", value=", ".join(state_mgr.state.inventory), interactive=False)
-                # CHANGE: Make Known Map scroll similarly to Narration by matching visible lines
-                map_box = gr.Textbox(label="Known Map", value=state_mgr.describe_map(), lines=12, interactive=False)
-                
-                try:
-                    _wb = _get_world_bible()
-                    _wb_theme = _wb.get("global_theme") if _wb else None
-                except Exception:
-                    _wb_theme = None
-                # Theme selection - dropdown with presets + custom text option
-                theme_dropdown = gr.Dropdown(
-                    choices=list(PRESET_THEMES.keys()),
-                    label="Theme Preset",
-                    value="Tolkien Cave Adventure"
-                )
-                theme_input = gr.Textbox(
-                    label="Theme Details (edit or type custom)",
-                    value=PRESET_THEMES.get("Tolkien Cave Adventure", ""),
-                    lines=3,
-                    placeholder="Describe your adventure theme, characters, and art style..."
-                )
+                    with gr.Column(scale=1):
+                        latest_image = gr.Image(
+                            label="Scene",
+                            height=320,
+                            value=(get_current_room_image(state_mgr) or get_inventory_item_image(state_mgr) or (ui_data["images"][-1] if ui_data["images"] else None)),
+                            elem_classes=["scene-image"],
+                        )
+                    with gr.Column(scale=1):
+                        with gr.Row(elem_classes=["status-row"]):
+                            location = gr.Textbox(label="Location", value=str(state_mgr.state.location), interactive=False)
+                            health = gr.Textbox(label="Health", value=str(state_mgr.state.health), interactive=False)
+                        inventory = gr.Textbox(label="Inventory", value=", ".join(state_mgr.state.inventory) or "(empty)", interactive=False)
+                        map_box = gr.Textbox(label="Known map", value=state_mgr.describe_map(), lines=8, interactive=False)
+
+                # ── Action input ──
                 with gr.Row():
-                    apply_theme_btn = gr.Button("Apply Theme", variant="secondary")
-                    gen_bible_btn = gr.Button("Generate World Bible (uses LLM dropdown)", variant="stop")
-                with gr.Row():
-                    theme_status = gr.Markdown()
-                    wb_status = gr.Markdown()
-                
-                # CHANGE: Show what the LLM actually sees - the exact prompt we send
-                def get_llm_context_view():
-                    """Show only what the LLM actually receives (no debug extras)."""
-                    try:
-                        # Build the same prompt the LLM would see
-                        sample_input = "[Next player input will go here]"
-                        full_prompt = build_user_prompt(state_mgr, sample_input)
-                        
-                        # Split into sections for clarity
-                        sections = full_prompt.split("\n---\n")
-                        game_state_json = sections[0].replace("Game State (read-only; update via JSON directives only):\n", "") if sections else ""
-                        
-                        # Parse the JSON and world context separately for better display
-                        import json
-                        try:
-                            # Extract JSON part
-                            json_end = game_state_json.find("\nWorld context:")
-                            if json_end > 0:
-                                json_part = game_state_json[:json_end]
-                                context_part = game_state_json[json_end:]
-                            else:
-                                json_part = game_state_json
-                                context_part = ""
-                            
-                            parsed_state = json.loads(json_part)
-                        except:
-                            parsed_state = {"parse_error": "Could not parse game state"}
-                            context_part = game_state_json
-                        
-                        # CHANGE (TRIVIAL): Show ONLY what is sent to the LLM, with no wrapper key
-                        return {
-                            "game_state": parsed_state,  # CHANGE: this is exactly the JSON block sent
-                            "world_bible_context": context_part.strip() if context_part else "(No world bible context)"  # CHANGE: this is appended verbatim
-                        }
-                    except Exception as e:
-                        return {"error": f"Context view error: {e}"}
-                
-                # CHANGE: Show LLM Context instead of redundant dashboard
-                with gr.Accordion("LLM Context (What the AI Sees)", open=False):
-                    world_bible_display = gr.JSON(label="🤖 Exact Context Sent to LLM", value=get_llm_context_view())
-                
-                # CHANGE: Add separate World Bible view for debugging game structure
-                with gr.Accordion("World Bible (Static Game Design)", open=False):
+                    user_box = gr.Textbox(
+                        label="What do you do?",
+                        placeholder="look around · go north · take key · talk to wizard …",
+                        lines=1, scale=4,
+                        elem_id="player-input",
+                    )
+                    send_btn = gr.Button("Send", variant="primary", scale=1)
+
+                # ── Optional / advanced (collapsed by default) ──
+                with gr.Accordion("🖼 Image gallery & generation", open=False):
+                    gallery = gr.Gallery(label="Image gallery", height=200, columns=3, value=ui_data["images"])
+                    with gr.Row():
+                        show_names_btn = gr.Button("Show image names", size="sm")
+                        pregenerate_level = gr.Radio(["some", "most", "all"], value="some", label="Coverage")
+                        generate_images_btn = gr.Button(
+                            ("Regenerate" if (ui_data.get("images") or state_mgr.state.last_images) else "Generate Images"),
+                            variant="secondary", size="sm",
+                        )
+                    gallery_filenames = gr.Textbox(label="Gallery image filenames", interactive=False, lines=3, visible=False)
+                    generate_images_status = gr.Markdown()
+
+                with gr.Accordion("🔍 Debug console", open=False):
+                    def get_debug_view():
+                        return {"debug_logs": ui_data.get("debug", [])}
+                    debug_md = gr.JSON(label="Debug logs", value=get_debug_view())
+
+                with gr.Accordion("📚 World bible (static design)", open=False):
                     def get_world_bible_view():
-                        """Display the current world bible for debugging"""
                         try:
                             wb = _get_world_bible()
                             if not wb:
-                                return {"status": "No World Bible generated yet. Click 'Generate World Bible' to create one."}
-                            
-                            # Organize for readability
+                                return {"status": "No World Bible generated yet. Use Setup → Generate New Adventure."}
                             return {
                                 "theme": wb.get("global_theme", wb.get("theme", "Not set")),
                                 "objectives": wb.get("objectives", []),
@@ -6281,20 +6356,44 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                                 "key_items": wb.get("key_items", []),
                                 "locations": wb.get("locations", []),
                                 "riddles": wb.get("riddles", wb.get("riddles_and_tasks", [])),
-                                # CHANGE (TRIVIAL): Show mechanics defined in the world bible
                                 "mechanics": wb.get("mechanics", []),
                                 "progression_hints": wb.get("progression_hints", []),
-                                "note": "This is STATIC - generated once. The turn LLM uses this for consistency but doesn't modify it."
+                                "win_condition": wb.get("win_condition"),
+                                "solution_chain": wb.get("solution_chain", []),
                             }
                         except Exception as e:
                             return {"error": f"World Bible view error: {e}"}
-                    
-                    world_bible_view = gr.JSON(label="📚 World Bible (Game Design Document)", value=get_world_bible_view())
-                
-                # CHANGE: Add GameState view to see all dynamic game data
-                with gr.Accordion("GameState (Dynamic Game Memory)", open=False):
+                    world_bible_view = gr.JSON(label="World Bible", value=get_world_bible_view())
+
+                with gr.Accordion("🤖 LLM context (what the AI sees)", open=False):
+                    def get_llm_context_view():
+                        try:
+                            sample_input = "[Next player input will go here]"
+                            full_prompt = build_user_prompt(state_mgr, sample_input)
+                            sections = full_prompt.split("\n---\n")
+                            game_state_json = sections[0].replace("Game State (read-only; update via JSON directives only):\n", "") if sections else ""
+                            try:
+                                json_end = game_state_json.find("\nWorld context:")
+                                if json_end > 0:
+                                    json_part = game_state_json[:json_end]
+                                    context_part = game_state_json[json_end:]
+                                else:
+                                    json_part = game_state_json
+                                    context_part = ""
+                                parsed_state = json.loads(json_part)
+                            except Exception:
+                                parsed_state = {"parse_error": "Could not parse game state"}
+                                context_part = game_state_json
+                            return {
+                                "game_state": parsed_state,
+                                "world_bible_context": context_part.strip() if context_part else "(No world bible context)",
+                            }
+                        except Exception as e:
+                            return {"error": f"Context view error: {e}"}
+                    world_bible_display = gr.JSON(label="Exact context sent to LLM", value=get_llm_context_view())
+
+                with gr.Accordion("🎮 GameState (dynamic memory)", open=False):
                     def get_game_state_view():
-                        """Display the complete dynamic game state"""
                         try:
                             state = state_mgr.state
                             return {
@@ -6302,51 +6401,45 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                                     "name": state.player_name,
                                     "location": state.location,
                                     "health": state.health,
-                                    "inventory": state.inventory
+                                    "inventory": state.inventory,
                                 },
                                 "world": {
                                     "known_map": state.known_map,
                                     "room_items": state.room_items,
-                                    "notes": state.notes
+                                    "notes": state.notes,
                                 },
                                 "conversation": {
                                     "recent_history": state.recent_history,
-                                    "story_context": state.story_context
+                                    "story_context": state.story_context,
                                 },
-                                # CHANGE (TRIVIAL): Expose LLM-defined flags/mechanics for debugging
+                                "session": {
+                                    "session_turns": state.session_turns,
+                                    "chain_steps_completed": state.chain_steps_completed,
+                                    "warnings_history_count": len(state.warnings_history),
+                                },
                                 "game_flags": state.game_flags,
                                 "images": {
                                     "rooms_with_images": state.rooms_with_images,
                                     "items_with_images": state.items_with_images,
                                     "total_generated": state.images_generated,
                                     "total_reused": state.images_reused,
-                                    "last_images_count": len(state.last_images)
+                                    "last_images_count": len(state.last_images),
                                 },
-                                "note": "This is DYNAMIC - changes every turn as you play"
                             }
                         except Exception as e:
                             return {"error": f"GameState view error: {e}"}
-                    
-                    game_state_view = gr.JSON(label="🎮 GameState (Current Playthrough)", value=get_game_state_view())
-                
-                # Save/Load buttons moved to first column below LLM controls
-        
-        # Image generation controls - radio buttons with small generate/regenerate button
-        with gr.Row():
-            pregenerate_level = gr.Radio(["some", "most", "all"], value="some", label="Image Coverage")
-            # Set initial button text based on whether images already exist
-            initial_button_text = "Regenerate" if (ui_data.get("images") or state_mgr.state.last_images) else "Generate Images"
-            generate_images_btn = gr.Button(initial_button_text, variant="secondary", size="sm")
-            generate_images_status = gr.Markdown()
- 
-        with gr.Accordion("Debug Console", open=False):
-            # CHANGE: Use JSON like other windows for consistency and copy functionality
-            def get_debug_view():
-                """Format debug logs as structured data"""
-                return {"debug_logs": ui_data.get("debug", [])}
-            
-            debug_md = gr.JSON(label="Debug Logs", value=get_debug_view())
- 
+                    game_state_view = gr.JSON(label="Game state", value=get_game_state_view())
+
+        # ── Tab switching ───────────────────────────────────────────────────
+        def go_to_play():
+            return gr.Tabs(selected="play")
+
+        def go_to_setup():
+            return gr.Tabs(selected="setup")
+
+        start_adventure_btn.click(fn=go_to_play, outputs=[tabs])
+        back_to_setup_btn.click(fn=go_to_setup, outputs=[tabs])
+
         # SIMPLE: Show deduped gallery names, using subject names when available
         # Track toggle state for image names
         _image_names_visible = {"value": False}
