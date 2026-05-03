@@ -770,6 +770,13 @@ class GameState:
     # there. After that the LLM has the description in its recent_history. Reset to
     # "" on death/restart so the new run gets a full opening.
     last_described_room: str = ""
+
+    # === VISITED MAP (UI fix, May 2026) ===
+    # known_map contains EVERY world-bible room (seeded at world-bible load time so
+    # the engine can validate connectivity, place items, etc.). But the player-facing
+    # "Known map" should only show rooms the player has actually been to. Track the
+    # visited set here; move_to() appends. Order preserved for display.
+    visited_rooms: List[str] = field(default_factory=list)
     
     # === IMAGE CACHING SYSTEM (belongs in game state - prevents regeneration) ===
     # CRITICAL FOR EFFICIENCY: Tracks which locations/items already have images
@@ -901,6 +908,11 @@ class StateManager:
         if new_location not in self.state.known_map:
             self.state.known_map[new_location] = {"exits": [], "notes": ""}
         self.state.location = new_location
+        # CHANGE (visited-map UI fix): record visit so describe_map() can hide rooms
+        # the player has not yet been to. World-bible rooms are seeded into known_map
+        # for engine logic but should not show up in the player-facing "Known" map.
+        if new_location not in self.state.visited_rooms:
+            self.state.visited_rooms.append(new_location)
 
     def connect_rooms(self, room_a: str, room_b: str) -> None:
         for room_x, room_y in ((room_a, room_b), (room_b, room_a)):
@@ -1205,16 +1217,60 @@ class StateManager:
         return triggered_events
 
     def describe_map(self) -> str:
+        """Player-facing map: ONLY rooms the player has actually visited.
+        World-bible rooms that haven't been entered yet are hidden. Use
+        describe_full_map() for the designer / debug view."""
+        # CHANGE (visited-map UI fix): "Known" should mean "I've been there",
+        # not "the world bible mentions it". Filter known_map by visited_rooms.
+        visited = list(self.state.visited_rooms or [])
+        # Legacy / bootstrap case: visited_rooms not populated yet (e.g. older save,
+        # or current location set but never via move_to). Fall back to current room.
+        if not visited and self.state.location:
+            visited = [self.state.location]
+        if not visited:
+            return "(map is empty — explore to discover rooms)"
+        visited_set = set(visited)
+        lines: List[str] = []
+        # Iterate visited_rooms in visit order (most-recent feel) but skip duplicates.
+        for room in visited:
+            info = self.state.known_map.get(room) or {}
+            # Only show exits to OTHER VISITED rooms in player-facing map; unseen
+            # rooms beyond known exits stay as "(unexplored)".
+            all_exits = info.get("exits", []) or []
+            seen_exits = [e for e in all_exits if e in visited_set]
+            unseen_count = sum(1 for e in all_exits if e not in visited_set)
+            exits_parts: List[str] = []
+            if seen_exits:
+                exits_parts.append(", ".join(seen_exits))
+            if unseen_count:
+                exits_parts.append(f"{unseen_count} unexplored")
+            exits_str = " · ".join(exits_parts) or "none"
+            notes = info.get("notes", "") or ""
+            note_str = f" | {notes[:80]}{'…' if len(notes) > 80 else ''}" if notes else ""
+            here = " ◀ here" if room == self.state.location else ""
+            lines.append(f"• {room}{here} → {exits_str}{note_str}")
+        return "\n".join(lines)
+
+    def describe_full_map(self) -> str:
+        """Designer / debug view: ALL rooms in known_map (which includes the
+        world-bible seed), with ✓ on visited, ? on unseen. Used by the
+        'Show full map' toggle in the Play tab."""
+        if not self.state.known_map:
+            return "(no rooms known)"
+        visited_set = set(self.state.visited_rooms or [])
         lines: List[str] = []
         for room, info in self.state.known_map.items():
-            exits_str = ", ".join(info.get("exits", [])) or "None"
-            notes = info.get("notes", "")
-            note_str = f" | notes: {notes}" if notes else ""
-            # Items are not displayed in the map view
-            items_part = ""
-            here = " (current)" if room == self.state.location else ""
-            lines.append(f"- {room}{here} -> exits: {exits_str}{note_str}{items_part}")
-        return "\n".join(lines) if lines else "(map is empty)"
+            exits_str = ", ".join(info.get("exits", []) or []) or "None"
+            notes = info.get("notes", "") or ""
+            note_str = f" | {notes[:80]}{'…' if len(notes) > 80 else ''}" if notes else ""
+            if room == self.state.location:
+                marker = " ◀ here"
+            elif room in visited_set:
+                marker = " ✓"
+            else:
+                marker = " ?"
+            lines.append(f"• {room}{marker} → {exits_str}{note_str}")
+        return "\n".join(lines)
 
     # -------------------- Persistence --------------------
     def save(self, label: Optional[str] = None) -> str:
@@ -6581,7 +6637,23 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                             location = gr.Textbox(label="Location", value=str(state_mgr.state.location), interactive=False)
                             health = gr.Textbox(label="Health", value=str(state_mgr.state.health), interactive=False)
                         inventory = gr.Textbox(label="Inventory", value=", ".join(state_mgr.state.inventory) or "(empty)", interactive=False)
-                        map_box = gr.Textbox(label="Known map", value=state_mgr.describe_map(), lines=8, interactive=False)
+                        # CHANGE (visited-map UI fix, May 2026):
+                        # - Map now defaults to *visited only* (the user pointed out
+                        #   "Known" should mean rooms the player has actually been to).
+                        # - 4 lines tall by default → action input box no longer pushed
+                        #   down by a long world-bible map.
+                        # - Toggle button cycles between visited / full views; user
+                        #   can peek at the full world bible map without polluting the
+                        #   default play view.
+                        map_box = gr.Textbox(
+                            label="Known map (visited only)",
+                            value=state_mgr.describe_map(),
+                            lines=4, max_lines=12,
+                            interactive=False,
+                        )
+                        with gr.Row():
+                            map_mode_state = gr.State("visited")  # "visited" | "full"
+                            map_toggle_btn = gr.Button("🗺  Show full map", size="sm")
 
                 # ── Action input ──
                 with gr.Row():
@@ -6755,6 +6827,36 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             outputs=[tabs, narration_box, gallery, latest_image, location, health, inventory, map_box],
         )
         back_to_setup_btn.click(fn=go_to_setup, outputs=[tabs])
+
+        # CHANGE (visited-map UI fix, May 2026): toggle the map between visited-only
+        # and full views without leaving the Play tab. Updates the textbox label so
+        # it's obvious which mode you're in.
+        def _toggle_map(current_mode: str):
+            if current_mode == "visited":
+                return (
+                    "full",
+                    gr.update(
+                        value=state_mgr.describe_full_map(),
+                        label="Known map (full — ✓ visited, ? unseen)",
+                        lines=8,
+                    ),
+                    gr.update(value="📍  Visited only"),
+                )
+            return (
+                "visited",
+                gr.update(
+                    value=state_mgr.describe_map(),
+                    label="Known map (visited only)",
+                    lines=4,
+                ),
+                gr.update(value="🗺  Show full map"),
+            )
+
+        map_toggle_btn.click(
+            fn=_toggle_map,
+            inputs=[map_mode_state],
+            outputs=[map_mode_state, map_box, map_toggle_btn],
+        )
 
         # SIMPLE: Show deduped gallery names, using subject names when available
         # Track toggle state for image names
