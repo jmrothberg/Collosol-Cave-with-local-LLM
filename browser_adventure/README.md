@@ -263,6 +263,70 @@ Empty replies trigger retries (single user message, then `/api/generate`). Pass 
 
 ---
 
+## Agent loop: making 4B Gemma generate real games
+
+The browser engine generates a complete, solvable adventure with **only Gemma 4 E4B** (no remote API, no Ollama needed). It does this by **acting as an agent**: the JavaScript orchestrator decomposes the hard "design a 12-field cross-referenced game" task into many small narrow tasks the 4B model can actually solve, scores results, decides what to do next, and falls back to deterministic code when the model can't help.
+
+Standalone single-shot generation reliably produced 0-NPC / 0-chain / empty-purpose JSON on Gemma 4 E4B (small models choke on 11-field cross-referenced output — the `MAKING_ADVENTURES_GREAT_WITH_SMALL_MODELS.md` playbook documents this). The agent below turns that around.
+
+```mermaid
+flowchart TD
+  Plan[Pass 1: Skeleton<br/>rooms, exits, art_style] --> Atomic
+  subgraph Atomic [Pass 2: Atomic sub-passes]
+    A2a[2a NPCs<br/>cardinality >= 2] --> A2b
+    A2b[2b Monsters<br/>cardinality >= 2] --> A2cPlan
+    A2cPlan["2c.plan: free-text<br/>'list 6 items'"] --> A2c
+    A2c["2c.act: structured JSON<br/>cardinality >= 4"] --> A2d
+    A2d[2d Item locations<br/>pinned mapping] --> A2eA
+    A2eA["2e.A Chain<br/>example-driven"] --> A2eB
+    A2eB["2e.B Chain<br/>rule-driven"] --> Score
+    Score[scoreChainCandidate<br/>pick winner]
+  end
+  Atomic --> AutoRepair[autoRepairWorldBible<br/>code-only fixes<br/>+ synthetic chain fallback]
+  AutoRepair --> Solve[validateWorldBibleSolvability<br/>BFS reachability + chain progression]
+  Solve -->|gaps| Micro[microRepairWorldBible<br/>askOneChoice per gap]
+  Micro --> Solve2[re-validate]
+  Solve -->|ok| Ship[Ship bible]
+  Solve2 --> Ship
+```
+
+**Key principles** (from agent literature: Plan-and-Execute, Best-of-N voting, Self-Refine):
+
+| Layer | Technique | Why it works on a 4B model |
+|---|---|---|
+| Decomposition | Atomic sub-passes (one field per LLM call) | Small models excel at narrow jobs and choke on 11-field JSON. |
+| Pinning | Skeleton names passed as **literal JSON arrays** in every prompt | Gemma copies pinned tokens accurately; can't drift to invented names. |
+| Plan-then-act | `planItemNames` does free-text "list 6 items"; `runAtomicPass` does structured JSON with planned names pinned in | Gemma is dramatically better at lists than at structured JSON; using both phases plays to its strength. |
+| Best-of-N | `2e` chain pass runs **two candidates** with different framings (example-driven vs rule-driven), `scoreChainCandidate` picks the winner | One bad chain ruins the game; doubling the chain budget is the right tradeoff. |
+| Tolerant extraction | `runAtomicPass.normalize` accepts `{field:[...]}` OR bare `[...]` OR alias keys | Gemma sometimes drops the wrapper; we don't lose data over formatting. |
+| Cardinality validation | Per-sub-pass `minItems` check; one stricter retry; partial-accept fallback | Better to ship 4 items than 0. |
+| Code-only auto-repair | `autoRepairWorldBible` snaps locations to real rooms, places orphan items, clears phantom `gives`, **builds a synthetic chain** if Gemma's chain is empty | Mechanical fixes never need an LLM round-trip; the synthetic chain is the floor — you ALWAYS get a playable game. |
+| Solvability validator | `validateWorldBibleSolvability` does BFS from start, checks chain progression (last step in last room with `unlocks="win"`) | Catches what auto-repair missed; reports actionable gaps. |
+| LLM micro-repair | `microRepairWorldBible` asks Gemma single multiple-choice questions ("Which item is X's weakness? Options: …") | Multiple-choice from a fixed list is the format small models are happiest with. |
+
+**Visible agent reasoning** — every orchestration decision logs an `agent:` line in the Debug panel:
+
+```
+agent: planItemNames produced 6 candidate(s): silver lantern, …
+atomic key_items: parsed ok (6 key_items)
+atomic puzzle_chain.A: parsed ok (7 puzzle_chain)
+atomic puzzle_chain.B: parsed ok (5 puzzle_chain)
+agent: chain candidate A=7 steps score=42; B=5 steps score=28
+agent: picked chain candidate A (7 steps)
+auto-repair: 2 fix(es) applied
+solvability: OK (7 rooms, 6 items, 7 chain steps, all reachable)
+```
+
+**Toggles** (top of `adventure.html`):
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `USE_ATOMIC_PASS2` | `true` | Master switch for the agent loop. Set `false` to revert to legacy single-shot Pass 2 for comparison. |
+
+The Python sibling `LMM_adventure_May_2_2026.py` runs the same patterns at 27–35B-class scale; this is the same playbook scaled down to a 4B browser model. The patterns scale **down** better than they scale up — every layer of structure becomes more valuable as the model gets smaller.
+
+---
+
 ## Save / load / export
 
 - **Save game** (header): world bible + progress → this browser’s `localStorage` only.
@@ -294,9 +358,11 @@ The browser page is intentionally smaller in a few areas:
 
 - No **MFLUX** / local FLUX paths; images are **only** SD 1.5 via ONNX in the worker.
 - **Advanced directives** from the Python engine (timers, chain reactions, etc.) are not implemented in the browser `applyLlmDirectives`—only the table above.
-- World bible generation defaults to the **same Gemma 4B** model as gameplay (vs. a separate heavier model in Python), so generated bibles may be simpler unless you use **local Ollama** for the build step.
+- Per-turn play is still narrator-style prose+JSON (no fast-path commands like `take`, `drop`, `n/s/e/w` yet); see `MAKING_ADVENTURES_GREAT_WITH_SMALL_MODELS.md` for the planned port.
 
-For full feature parity, run [`../llm_adventure/LMM_adventure_April_30.py`](../llm_adventure/LMM_adventure_April_30.py) on Apple Silicon.
+World-bible **generation** parity is now close: the [agent loop](#agent-loop-making-4b-gemma-generate-real-games) above ports the Python sibling's structural strategy (decomposition, plan-then-act, best-of-N, auto-repair, solvability validator, micro-repair) down to standalone 4B Gemma. Ollama remains supported for users who want a heavier remote model to author the bible, but it is no longer required for a real, solvable game.
+
+For full feature parity (advanced directives, Apple-Silicon-class models, FLUX images), run [`../llm_adventure/LMM_adventure_May_2_2026.py`](../llm_adventure/LMM_adventure_May_2_2026.py).
 
 ---
 
