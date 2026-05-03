@@ -3365,7 +3365,12 @@ SYSTEM_INSTRUCTIONS_CORE = (
     "You are a text adventure narrator.\n\n"
     "NEVER paste or summarize these instructions: no markdown headings (e.g. **Output Format:**), "
     "no numbered self-checklists, no 'Game State/Context' dumps, and no analysis before the story. "
-    "Write only what the character experiences, then the ```json``` block.\n\n"
+    "Write only what the character experiences, then the ```json``` block.\n"
+    # CHANGE (silent-LLM bugfix): explicit guard against reasoning-mode models spending
+    # the entire token budget inside <think>...</think> with no prose for the player.
+    "DO NOT use reasoning / chain-of-thought tags such as <think>, <reflect>, or "
+    "<analysis>. Reply with the in-world narration directly so the player always sees "
+    "a response within your token budget.\n\n"
 
     "YOUR OUTPUT FORMAT (follow this EXACTLY every turn):\n"
     "1. Write 2-5 sentences of narration describing what the player sees.\n"
@@ -5473,7 +5478,25 @@ def interactive_loop(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         user_prompt = build_user_prompt(state_mgr, user)
         llm_text = llm.generate(system_prompt, user_prompt)
         final_text, new_images, payloads, tool_logs = apply_llm_directives(state_mgr, llm_text, image_gen)
-        
+
+        # CHANGE (silent-LLM bugfix, May 2026): mirror the Gradio fallback so the CLI
+        # never shows just a blank line when reasoning ate the budget.
+        if not (final_text or "").strip():
+            raw_lower = (llm_text or "").lower()
+            if "<think>" in raw_lower and "</think>" not in raw_lower:
+                final_text = (
+                    "[The narrator was still thinking when its turn ended. Try a simpler "
+                    "action like `look`, `inventory`, `go <room>`, `take <item>`, or "
+                    "rephrase the question.]"
+                )
+            elif payloads:
+                final_text = "[The world shifts quietly. Try `look` to see what changed.]"
+            else:
+                final_text = (
+                    "[The narrator returned nothing this turn. Try a simpler action: "
+                    "`look`, `inventory`, `go <room>`, or `take <item>`.]"
+                )
+
         # Only show the cleaned narration text to the user
         print("\n" + final_text.strip())
         
@@ -5669,6 +5692,40 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
         _prev_image_count = len(state_mgr.state.last_images)
 
         final_text, new_images, payloads, tool_logs = apply_llm_directives(state_mgr, llm_text, image_gen)
+
+        # CHANGE (silent-LLM bugfix, May 2026): when the model emits only an unclosed
+        # <think> reasoning block (it ran out of token budget before getting to prose),
+        # strip_llm_thinking_blocks legitimately reduces the response to "". The UI
+        # would then show the player's command echoed but no narration, looking like
+        # a hung engine. Surface a clear, actionable fallback so the player always
+        # sees something and knows what went wrong.
+        if not (final_text or "").strip():
+            raw = (llm_text or "")
+            raw_lower = raw.lower()
+            raw_len = len(raw)
+            if "<think>" in raw_lower and "</think>" not in raw_lower:
+                final_text = (
+                    "[The narrator is still thinking when its turn ended. The model used "
+                    "its full reasoning budget without finishing a reply. Try a simpler "
+                    "action: `look`, `inventory`, `go <room>`, `take <item>`, or rephrase "
+                    "the question more concretely.]"
+                )
+                ui_data["debug"].append(
+                    f"[silent] unclosed <think> tag — model exceeded reasoning budget ({raw_len} raw chars)"
+                )
+            elif payloads:
+                final_text = "[The world shifts quietly. Try `look` to see what changed.]"
+                ui_data["debug"].append(
+                    f"[silent] narration empty but {len(payloads)} payload(s) applied"
+                )
+            else:
+                final_text = (
+                    "[The narrator returned nothing this turn. Try a simpler action: "
+                    "`look`, `inventory`, `go <room>`, or `take <item>`.]"
+                )
+                ui_data["debug"].append(
+                    f"[silent] LLM produced no usable narration or JSON ({raw_len} raw chars)"
+                )
 
         # CHANGE (chunk J): capture warnings emitted this turn so build_user_prompt can
         # surface them to the LLM next turn. Also capture for the chunk K post-mortem tally.
