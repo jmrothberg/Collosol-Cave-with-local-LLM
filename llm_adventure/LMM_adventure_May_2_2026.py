@@ -5721,15 +5721,26 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             ui_data["debug"].append(f"[autosave] Skipped (error: {e})")
             return None
     
-    # Generate opening scene only if an LLM is selected; otherwise show instructions
+    # Generate opening scene only if an LLM is selected; otherwise show instructions.
+    # CHANGE (UI v2): the welcome message now points the user back to the Setup tab
+    # since there's no LLM dropdown on the Play tab anymore.
     if getattr(llm, "model_id", "").strip():
         opening_text, opening_images = start_story(state_mgr, llm, image_gen)
-        ui_data["narration"] = (opening_text + "\n\nType an action and press Send. Use the controls below to reload the LLM or MFLUX model.\n")
+        ui_data["narration"] = (
+            opening_text
+            + "\n\nType an action below and press **Send**. "
+              "Try `look around`, `inventory`, `go cave mouth`, `take torch`, or talk to the hermit.\n"
+        )
         ui_data["images"].extend(opening_images)
     else:
         ui_data["narration"] = (
-            "Welcome! Select an MLX model in the dropdown and click 'Load/Reload LLM' to begin.\n"
-            "You can also load an MFLUX model for images (optional)."
+            "Welcome to JMR's LLM Adventure!\n\n"
+            "To begin:\n"
+            "  1. Click the **🎲 Setup** tab above.\n"
+            "  2. In Step 1, pick your LLM and click **Load / Reload LLM**.\n"
+            "  3. In Step 2, choose 🕯️ Default Cave (or generate a new world / load a save).\n"
+            "  4. In Step 3, click **▶ Start Adventure** — that switches you back here.\n\n"
+            "Once an LLM is loaded the opening scene will appear automatically."
         )
 
     def do_send(user_text: str):
@@ -6239,10 +6250,14 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 gr.update()
             )
  
-    # CHANGE (UI redesign, May 2026): match the browser_adventure dark theme and split
-    # the cluttered single page into two tabs — a Setup tab for picking models / theme /
-    # world bible / saved games, and a Play tab with just the narration, scene image,
-    # status, and action input. Debug accordions stay collapsed by default.
+    # CHANGE (UI redesign v2, May 2026): the v1 redesign had three usability problems
+    # the user called out from screenshots:
+    #   1. White side panels — body/html background wasn't being themed.
+    #   2. Pick-card descriptions rendered in --text-muted, basically unreadable.
+    #   3. Three pick cards always expanded → cluttered; START button below the fold.
+    # v2 fixes by (a) painting html+body dark, (b) using --text not --text-muted for
+    # body copy, (c) replacing pick cards with a single gr.Radio + conditional panels,
+    # and (d) reorganizing into numbered steps with a HUGE start button right after.
     custom_css = """
     :root {
       --bg: #0a0a12; --panel: #14141f; --panel-alt: #1a1a28; --border: #252535;
@@ -6250,19 +6265,28 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
       --accent: #c9a550; --accent-dim: #8a7535;
       --info: #6eb5ff; --ok: #7dffb2; --warn: #ffc46e; --err: #ff8a8a;
     }
-    body, .gradio-container, .app, .main {
-      background: var(--bg) !important; color: var(--text) !important;
+    /* Paint the WHOLE viewport — fixes the white side panels in v1 */
+    html, body {
+      background: var(--bg) !important; color: var(--text) !important; min-height: 100vh !important;
       font-family: system-ui, "Segoe UI", Roboto, sans-serif !important;
     }
-    .gradio-container { max-width: 1200px !important; margin: 0 auto !important; }
+    .gradio-container, .app, .main, gradio-app {
+      background: var(--bg) !important; color: var(--text) !important;
+      max-width: 1200px !important; margin: 0 auto !important;
+    }
     .gr-box, .gr-form, .gr-panel, .gr-block, .block, .form, .panel, .gr-group, .gr-accordion {
       background: var(--panel) !important;
       border-color: var(--border) !important;
       color: var(--text) !important;
     }
     h1, h2, h3, h4 { color: var(--accent) !important; }
-    .prose, .gr-markdown, .gr-markdown p, .gr-markdown li { color: var(--text) !important; }
+    /* Body copy is full --text, NOT --text-muted (the v1 mistake) */
+    .prose, .gr-markdown, .gr-markdown p, .gr-markdown li, .markdown {
+      color: var(--text) !important; line-height: 1.55 !important;
+    }
     .gr-markdown strong { color: var(--accent) !important; }
+    .gr-markdown code { background: var(--panel-alt) !important; color: var(--accent) !important; padding: 1px 5px; border-radius: 3px; }
+    /* Form labels stay muted — they're metadata, not content */
     label, .label-wrap label, .gr-form label, span.svelte-1gfkn6j, .label, .gr-input-label {
       color: var(--text-muted) !important;
     }
@@ -6276,7 +6300,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
     input:focus, textarea:focus, select:focus { border-color: var(--accent-dim) !important; outline: none !important; }
     button, .gr-button {
       background: var(--border) !important; color: var(--text) !important;
-      border: 1px solid var(--border) !important; transition: border-color .15s, color .15s !important;
+      border: 1px solid var(--border) !important; transition: border-color .15s, color .15s, background .15s !important;
     }
     button:hover:not(:disabled), .gr-button:hover:not(:disabled) {
       border-color: var(--accent) !important; color: var(--accent) !important;
@@ -6287,13 +6311,48 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
     button.primary:hover:not(:disabled), .gr-button-primary:hover:not(:disabled) {
       background: #3a4a2a !important; border-color: var(--accent) !important;
     }
-    /* Tabs */
-    .tab-nav, .tabs, .tab-buttons { background: var(--panel) !important; border-color: var(--border) !important; }
+    /* Tabs — clear active state */
+    .tab-nav, .tabs, .tab-buttons {
+      background: var(--panel) !important; border-color: var(--border) !important;
+      border-bottom: 1px solid var(--border) !important;
+    }
     .tab-nav button, .tabitem button { background: var(--panel) !important; color: var(--text-muted) !important; border-bottom-color: transparent !important; }
     .tab-nav button.selected, .tabitem button.selected {
       background: var(--bg) !important; color: var(--accent) !important; border-bottom-color: var(--accent) !important;
     }
-    /* Narration: serif, larger, parchment feel */
+    /* ── Setup wizard ── */
+    .setup-step {
+      background: var(--panel) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: 8px !important;
+      padding: 16px 18px !important;
+      margin-bottom: 14px !important;
+    }
+    .setup-step h3, .setup-step h4 { margin-top: 0 !important; }
+    /* Adventure-choice radio: stack vertically with bigger hit targets */
+    .adventure-radio { padding: 4px 0 !important; }
+    .adventure-radio fieldset { gap: 8px !important; }
+    .adventure-radio label {
+      background: var(--panel-alt) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: 6px !important;
+      padding: 10px 14px !important;
+      color: var(--text) !important;
+      font-size: 14px !important;
+      cursor: pointer !important;
+      transition: border-color .15s !important;
+    }
+    .adventure-radio label:hover { border-color: var(--accent-dim) !important; }
+    .adventure-radio input:checked + span,
+    .adventure-radio label:has(input:checked) { border-color: var(--accent) !important; color: var(--accent) !important; }
+    .start-button button {
+      font-size: 18px !important; padding: 18px 30px !important;
+      background: #2a3520 !important; border: 2px solid var(--accent) !important; color: var(--accent) !important;
+      font-weight: 700 !important;
+      letter-spacing: 0.04em !important;
+    }
+    .start-button button:hover { background: #3a4a2a !important; }
+    /* ── Narration: serif parchment feel ── */
     #narration-box textarea {
       font-family: Georgia, "Times New Roman", serif !important;
       font-size: 16px !important; line-height: 1.65 !important;
@@ -6305,18 +6364,6 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
       font-size: 14px !important;
     }
-    /* Pick cards on the setup tab */
-    .pick-card {
-      background: var(--panel) !important;
-      border: 2px solid var(--border) !important;
-      border-radius: 8px !important;
-      padding: 14px 16px !important;
-      margin-bottom: 8px !important;
-    }
-    .pick-card:hover { border-color: var(--accent-dim) !important; }
-    .pick-card .gr-markdown h4 { color: var(--text) !important; margin-bottom: 4px !important; }
-    .pick-card .gr-markdown p { color: var(--text-muted) !important; font-size: 13px !important; }
-    /* Status panel layout */
     .status-row .gr-textbox { border: 1px solid var(--border) !important; border-radius: 6px !important; }
     /* Header */
     .app-header { padding: 12px 4px 14px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
@@ -6325,7 +6372,6 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
     .gr-accordion .label-wrap { color: var(--accent) !important; }
     /* Image scene */
     .scene-image img { object-fit: contain !important; aspect-ratio: 1 / 1 !important; max-width: 100% !important; height: auto !important; }
-    /* Hide "Show API" footer link clutter — still accessible from the Gradio menu */
     footer { color: var(--text-muted) !important; }
     """
 
@@ -6346,105 +6392,159 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 files = []
             return sorted(files, reverse=True)
 
+        # Constants for the adventure-choice radio (must match keys exactly so the
+        # show/hide handler can route correctly).
+        _ADV_DEFAULT = "🕯️  Default Cave Adventure  —  Starfire Gem quest, ready to play"
+        _ADV_GENERATE = "✨  Generate New Adventure  —  LLM creates a brand-new world from a theme"
+        _ADV_LOAD = "💾  Load Saved Adventure  —  resume a previous game"
+
         with gr.Tabs() as tabs:
             # ═══════════════════ TAB 1: SETUP ═══════════════════
             with gr.TabItem("🎲 Setup", id="setup"):
-                gr.Markdown("### Choose Your Adventure")
+                # ── Step 1: Load your LLM ──────────────────────────────────
+                with gr.Group(elem_classes=["setup-step"]):
+                    gr.Markdown("### Step 1 — Load your LLM")
+                    gr.Markdown(
+                        "Choose an MLX folder name (from `~/MLX_Models/`) or an `ollama:<tag>`. "
+                        "This model narrates every turn and emits the JSON tool calls. "
+                        "Click **Load / Reload LLM** to bring it up; the status line below confirms."
+                    )
+                    mlx_models = list_mlx_models() if check_mlx_available() else []
+                    ollama_models = list_ollama_model_choices()
+                    choices = ollama_models + mlx_models if (ollama_models or mlx_models) else ["(select later)"]
+                    default_choice = choices[0]
+                    with gr.Row():
+                        llm_drop = gr.Dropdown(
+                            choices, label="LLM — MLX folder or ollama:<tag>",
+                            value=default_choice, scale=4,
+                        )
+                        reload_llm_btn = gr.Button("Load / Reload LLM", variant="primary", scale=1)
+                    llm_status = gr.Markdown()
 
-                # ── Pick card 1: Default cave ──
-                #   CHANGE: the runtime now loads browser_adventure/default_cave.json
-                #   on startup so this card is wired to the same canonical 6-room
-                #   adventure the in-browser edition ships (Cave Mouth → Mushroom
-                #   Grotto → Underground River → Ancient Forge → Dragon's Vault).
-                with gr.Group(elem_classes=["pick-card"]):
+                # ── Step 2: Choose your adventure ──────────────────────────
+                with gr.Group(elem_classes=["setup-step"]):
+                    gr.Markdown("### Step 2 — Choose your adventure")
+                    adventure_choice = gr.Radio(
+                        choices=[_ADV_DEFAULT, _ADV_GENERATE, _ADV_LOAD],
+                        value=_ADV_DEFAULT,
+                        label="",
+                        elem_classes=["adventure-radio"],
+                        show_label=False,
+                    )
+
+                    # Sub-panel: default (visible by default)
                     _wb_now = _get_world_bible()
                     _default_loaded = bool(_wb_now and _wb_now.get("locations"))
                     _default_room_count = len((_wb_now or {}).get("locations", []) or [])
-                    gr.Markdown(
-                        "#### 🕯️ Default Cave Adventure  \n"
-                        "**Starfire Gem quest** — the same canonical adventure the in-browser "
-                        "edition ships in `browser_adventure/default_cave.json`. "
-                        f"Currently loaded: **{'yes' if _default_loaded else 'no'}** "
-                        f"({_default_room_count} rooms). "
-                        "Hermit at Cave Mouth, river troll, ancient forge, stone dragon, "
-                        "Starfire Gem in Dragon's Vault — return it to Cave Mouth to win. "
-                        "Load your LLM, then click **▶ Start Adventure** below."
-                    )
-                    reload_default_btn = gr.Button("Reload Default Cave", variant="secondary", size="sm")
-                    default_status = gr.Markdown()
+                    with gr.Group(visible=True) as default_panel:
+                        gr.Markdown(
+                            "**Starfire Gem quest** — the same canonical 6-room adventure the in-browser "
+                            "edition ships in `browser_adventure/default_cave.json`. "
+                            f"Currently loaded: **{'yes' if _default_loaded else 'no'}** "
+                            f"({_default_room_count} rooms). "
+                            "Hermit at Cave Mouth, river troll on the underground river, ancient forge, "
+                            "stone dragon in the vault — bring the Starfire Gem back to Cave Mouth to win. "
+                            "No generation needed; click **Start Adventure** in step 3."
+                        )
+                        reload_default_btn = gr.Button("Reload Default Cave", variant="secondary", size="sm")
+                        default_status = gr.Markdown()
 
-                # ── Pick card 2: Generate new ──
-                with gr.Group(elem_classes=["pick-card"]):
-                    gr.Markdown(
-                        "#### ✨ Generate New Adventure  \n"
-                        "Use your loaded LLM to create a brand-new world bible from a theme. "
-                        "Two-pass generation; deterministic auto-repair handles common gaps."
-                    )
-                    theme_dropdown = gr.Dropdown(
-                        choices=list(PRESET_THEMES.keys()),
-                        label="Theme preset",
-                        value="Tolkien Cave Adventure",
-                    )
-                    theme_input = gr.Textbox(
-                        label="Theme details (edit or type your own)",
-                        value=PRESET_THEMES.get("Tolkien Cave Adventure", ""),
-                        lines=3,
-                        placeholder="Describe the adventure theme, characters, art style …",
-                    )
-                    with gr.Row():
-                        apply_theme_btn = gr.Button("Apply Theme", variant="secondary")
-                        gen_bible_btn = gr.Button("Generate World Bible", variant="primary")
-                    with gr.Row():
+                    # Sub-panel: generate (hidden until selected)
+                    with gr.Group(visible=False) as generate_panel:
+                        gr.Markdown(
+                            "Pick a preset theme or write your own below. The LLM will spend "
+                            "~30–90s generating a 5-room world with NPCs, items, puzzles, and a "
+                            "solution chain. The validator + auto-repair cleans up any gaps. "
+                            "Click **Generate World Bible** when ready, then **Start Adventure** in step 3."
+                        )
+                        theme_dropdown = gr.Dropdown(
+                            choices=list(PRESET_THEMES.keys()),
+                            label="Theme preset",
+                            value="Tolkien Cave Adventure",
+                        )
+                        theme_input = gr.Textbox(
+                            label="Theme details (edit or type your own)",
+                            value=PRESET_THEMES.get("Tolkien Cave Adventure", ""),
+                            lines=3,
+                            placeholder="Describe the adventure theme, characters, art style …",
+                        )
+                        with gr.Row():
+                            apply_theme_btn = gr.Button("Apply Theme", variant="secondary", scale=1)
+                            gen_bible_btn = gr.Button("Generate World Bible", variant="primary", scale=2)
                         theme_status = gr.Markdown()
                         wb_status = gr.Markdown()
 
-                # ── Pick card 3: Load saved ──
-                with gr.Group(elem_classes=["pick-card"]):
+                    # Sub-panel: load (hidden until selected)
+                    with gr.Group(visible=False) as load_panel:
+                        gr.Markdown(
+                            "Resume a previous game (auto-saves and named saves both appear). "
+                            "After loading, click **Start Adventure** in step 3."
+                        )
+                        saved_choices = _list_saved_games_local() or ["(none)"]
+                        load_dropdown = gr.Dropdown(
+                            saved_choices,
+                            label="Saved games",
+                            value=(saved_choices[0] if saved_choices else "(none)"),
+                        )
+                        load_btn = gr.Button("Load Saved Game", variant="primary")
+                        load_status = gr.Markdown()
+
+                # ── Step 3: Begin (the prominent button) ───────────────────
+                with gr.Group(elem_classes=["setup-step"]):
+                    gr.Markdown("### Step 3 — Begin")
                     gr.Markdown(
-                        "#### 💾 Load Saved Adventure  \n"
-                        "Resume a saved game from `Adventure_Game_Saved/` (auto-saved or named)."
+                        "Once your LLM is loaded (step 1) and your adventure is chosen (step 2), "
+                        "press the button below. You will switch to the **Play** tab where "
+                        "narration, scene images, and your action input live."
                     )
-                    saved_choices = _list_saved_games_local() or ["(none)"]
-                    load_dropdown = gr.Dropdown(
-                        saved_choices,
-                        label="Saved games",
-                        value=(saved_choices[0] if saved_choices else "(none)"),
+                    start_adventure_btn = gr.Button(
+                        "▶  START ADVENTURE",
+                        variant="primary",
+                        size="lg",
+                        elem_classes=["start-button"],
                     )
-                    load_btn = gr.Button("Load Game", variant="secondary")
-                    load_status = gr.Markdown()
 
-                gr.Markdown("---")
-                gr.Markdown("### Models")
+                # ── Optional: image model + advanced settings ──────────────
+                with gr.Accordion("⚙️  Optional — image model & advanced settings", open=False):
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown(
+                                "**Scene art (MFLUX)** — generates a picture for each room or "
+                                "key item. Optional; the game plays fine without it."
+                            )
+                            diffuser_choices = combined_diffuser_choices(include_skip=True)
+                            current_diffuser = image_gen.model_id if image_gen else (diffuser_choices[0] if diffuser_choices else "")
+                            if current_diffuser and current_diffuser not in diffuser_choices:
+                                diffuser_choices = [current_diffuser] + diffuser_choices
+                            diff_drop = gr.Dropdown(diffuser_choices, label="Image model (MFLUX)", value=current_diffuser)
+                            reload_diff_btn = gr.Button("Load / Reload Image Model", variant="secondary", size="sm")
+                            diff_status = gr.Markdown()
+                        with gr.Column():
+                            gr.Markdown(
+                                "**Tuning** — `max tokens` caps the LLM response length per turn; "
+                                "advanced directives unlock timer events and chain reactions for larger models."
+                            )
+                            max_tokens_slider = gr.Slider(
+                                minimum=250, maximum=2500, value=2500, step=50,
+                                label="LLM max tokens (response length)",
+                            )
+                            advanced_directives_cb = gr.Checkbox(
+                                value=ADVANCED_DIRECTIVES,
+                                label="Advanced directives (timers, conditionals — for larger models)",
+                            )
 
-                with gr.Row():
-                    with gr.Column():
-                        mlx_models = list_mlx_models() if check_mlx_available() else []
-                        ollama_models = list_ollama_model_choices()
-                        choices = ollama_models + mlx_models if (ollama_models or mlx_models) else ["(select later)"]
-                        default_choice = choices[0]
-                        llm_drop = gr.Dropdown(choices, label="LLM — MLX folder or ollama:<tag>", value=default_choice)
-                        reload_llm_btn = gr.Button("Load / Reload LLM", variant="primary")
-                        llm_status = gr.Markdown()
-                        max_tokens_slider = gr.Slider(
-                            minimum=250, maximum=2500, value=2500, step=50,
-                            label="LLM max tokens (response length)",
-                        )
-                        advanced_directives_cb = gr.Checkbox(
-                            value=ADVANCED_DIRECTIVES,
-                            label="Advanced directives (timers, conditionals — for larger models)",
-                        )
-                    with gr.Column():
-                        diffuser_choices = combined_diffuser_choices(include_skip=True)
-                        current_diffuser = image_gen.model_id if image_gen else (diffuser_choices[0] if diffuser_choices else "")
-                        if current_diffuser and current_diffuser not in diffuser_choices:
-                            diffuser_choices = [current_diffuser] + diffuser_choices
-                        diff_drop = gr.Dropdown(diffuser_choices, label="Image model (MFLUX)", value=current_diffuser)
-                        reload_diff_btn = gr.Button("Load / Reload Image Model", variant="primary")
-                        diff_status = gr.Markdown()
-
-                gr.Markdown("---")
-                with gr.Row():
-                    start_adventure_btn = gr.Button("▶ Start / Continue Adventure", variant="primary", size="lg", scale=3)
+                # Adventure-choice radio: show the matching sub-panel, hide the others.
+                def _on_adventure_choice(choice: str):
+                    return (
+                        gr.update(visible=(choice == _ADV_DEFAULT)),
+                        gr.update(visible=(choice == _ADV_GENERATE)),
+                        gr.update(visible=(choice == _ADV_LOAD)),
+                    )
+                adventure_choice.change(
+                    fn=_on_adventure_choice,
+                    inputs=[adventure_choice],
+                    outputs=[default_panel, generate_panel, load_panel],
+                )
 
             # ═══════════════════ TAB 2: PLAY ═══════════════════
             with gr.TabItem("🎮 Play", id="play"):
@@ -6599,14 +6699,61 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                             return {"error": f"GameState view error: {e}"}
                     game_state_view = gr.JSON(label="Game state", value=get_game_state_view())
 
-        # ── Tab switching ───────────────────────────────────────────────────
-        def go_to_play():
-            return gr.Tabs(selected="play")
-
+        # ── Tab switching + Start handler (UI v2) ────────────────────────────
         def go_to_setup():
             return gr.Tabs(selected="setup")
 
-        start_adventure_btn.click(fn=go_to_play, outputs=[tabs])
+        def do_start_adventure():
+            """When the user clicks ▶ Start Adventure on the Setup tab:
+            1. If the LLM is loaded but no narration exists yet → call start_story
+               so the opening scene renders. This handles the case where the user
+               launched the app with no LLM, then loaded one mid-session.
+            2. Switch to the Play tab regardless.
+            Returns: tabs update, narration, gallery, latest_image, location, health, inventory, map.
+            """
+            # 1) Generate opening if needed.
+            try:
+                narration_now = (ui_data.get("narration") or "").strip()
+                # Treat the welcome message as "no narration" so a fresh user lands
+                # in the actual opening, not the help text.
+                is_welcome_only = "Welcome to JMR's LLM Adventure" in narration_now
+                if (
+                    getattr(llm, "model_id", "").strip()
+                    and (not narration_now or is_welcome_only)
+                ):
+                    opening_text, opening_images = start_story(state_mgr, llm, image_gen)
+                    ui_data["narration"] = (
+                        opening_text
+                        + "\n\nType an action below and press **Send**. "
+                          "Try `look around`, `inventory`, `go cave mouth`, `take torch`, or talk to the NPCs.\n"
+                    )
+                    ui_data["images"].extend(opening_images)
+                    ui_data["debug"].append("[start] Opening scene generated on Start Adventure click")
+            except Exception as e:
+                ui_data["debug"].append(f"[start] Failed to generate opening: {e}")
+
+            # 2) Build outputs for the Play tab.
+            latest_img = (
+                get_current_room_image(state_mgr)
+                or get_inventory_item_image(state_mgr)
+                or (ui_data["images"][-1] if ui_data["images"] else None)
+            )
+            return (
+                gr.Tabs(selected="play"),
+                ui_data["narration"],
+                ui_data["images"],
+                latest_img,
+                str(state_mgr.state.location or ""),
+                str(state_mgr.state.health),
+                ", ".join(state_mgr.state.inventory) or "(empty)",
+                state_mgr.describe_map(),
+            )
+
+        start_adventure_btn.click(
+            fn=do_start_adventure,
+            inputs=[],
+            outputs=[tabs, narration_box, gallery, latest_image, location, health, inventory, map_box],
+        )
         back_to_setup_btn.click(fn=go_to_setup, outputs=[tabs])
 
         # SIMPLE: Show deduped gallery names, using subject names when available
