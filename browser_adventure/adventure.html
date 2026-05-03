@@ -1144,6 +1144,12 @@
         if (genDebugArr) genDebugArr.push(line);
         if (onStatus) onStatus(line);
       };
+      // Per-token streaming progress: updates the live load-overlay (which replaces in place)
+      // but does NOT push to the debug array. Prevents one debug line per streamed chunk
+      // (was producing hundreds of "...N chars" lines per generation pass).
+      const sstream = (msg) => {
+        if (onStatus) onStatus(statusTag + msg);
+      };
 
       const runGen = async (systemMsg, userMsg, maxTokens, temperature, onChunk) => {
         if (useOllama) {
@@ -1199,7 +1205,7 @@
         `Output ONLY the JSON object.`;
 
       let pass1Text = await runGen(sysMsg, pass1Prompt, p1Tok, useOllama ? ollamaTemp : 0.5,
-        (t) => { slog(`Pass 1/2: map layout... ${t.length} chars`); });
+        (t) => { sstream(`Pass 1/2: map layout... ${t.length} chars`); });
 
       let skeleton = extractMapSkeleton(pass1Text, genDebugArr);
       slog(`pass1 raw preview: ${pass1Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass1Text.length > 200 ? "…" : ""}`);
@@ -1210,7 +1216,7 @@
         slog("Pass 1 retry: simpler map prompt...");
         const retry1 = `Create exactly 5 rooms for: ${theme}\n${forbidStockNames}\nReturn compact JSON only (Ollama JSON mode). Schema: {"rooms":[{"name":"","desc":"","exits":[]}],"start":"","art_style":""}. Short descs. No bullets, no markdown.`;
         pass1Text = await runGen(sysMsg, retry1, p1RetryTok, useOllama ? ollamaRetryTemp : 0.4,
-          (t) => { slog(`Pass 1 retry... ${t.length} chars`); });
+          (t) => { sstream(`Pass 1 retry... ${t.length} chars`); });
         skeleton = extractMapSkeleton(pass1Text, genDebugArr);
         slog(`pass1 (retry) raw preview: ${pass1Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass1Text.length > 200 ? "…" : ""}`);
         if (skeleton && Array.isArray(skeleton.rooms)) slog(`pass1 (retry) parsed rooms count: ${skeleton.rooms.length}`);
@@ -1221,7 +1227,7 @@
         slog("Pass 1 retry 2: minimal JSON map (5 rooms, terse)...");
         const retry2 = `Theme: ${theme.slice(0, 200)}. JSON object only: {"rooms":[5 rooms with name,desc max 80 chars,exits array],"start":"first room name","art_style":"short"}. Interconnected graph.`;
         pass1Text = await runGen(sysMsg, retry2, p1RetryTok, useOllama ? ollamaRetryTemp : 0.35,
-          (t) => { slog(`Pass 1 retry 2... ${t.length} chars`); });
+          (t) => { sstream(`Pass 1 retry 2... ${t.length} chars`); });
         skeleton = extractMapSkeleton(pass1Text, genDebugArr);
         slog(`pass1 (retry2) parsed rooms count: ${skeleton && skeleton.rooms ? skeleton.rooms.length : 0}`);
       }
@@ -1276,7 +1282,7 @@
           `Place NPCs in early/mid rooms and monsters in mid/late rooms. Every item must be useful.\n` +
           `Output ONLY the JSON object, nothing else.`;
         let p2aText = await runGen(sysMsg, p2aPrompt, p2Tok, ollamaTemp,
-          (t) => { slog(`Pass 2a: inhabitants... ${t.length} chars`); });
+          (t) => { sstream(`Pass 2a: inhabitants... ${t.length} chars`); });
         let inhabitants = extractFirstJson(p2aText);
         slog(`pass2a raw preview: ${p2aText.replace(/\s+/g, " ").trim().slice(0, 300)}${p2aText.length > 300 ? "…" : ""}`);
         if (!inhabitants || !Array.isArray(inhabitants.key_items) || inhabitants.key_items.length < 2) {
@@ -1284,7 +1290,7 @@
           p2aText = await runGen(sysMsg,
             `Theme: ${theme.slice(0, 200)}\nRooms: ${roomList}\nJSON only. Fields: npcs (2 objects), monsters (2 objects), key_items (6 objects with name+purpose), item_locations (object).`,
             p2RetryTok, ollamaRetryTemp,
-            (t) => { slog(`Pass 2a retry... ${t.length} chars`); });
+            (t) => { sstream(`Pass 2a retry... ${t.length} chars`); });
           inhabitants = extractFirstJson(p2aText);
           slog(`pass2a (retry) preview: ${p2aText.replace(/\s+/g, " ").trim().slice(0, 200)}${p2aText.length > 200 ? "…" : ""}`);
         }
@@ -1328,7 +1334,7 @@
           `"author_walkthrough":"1. Talk to sage, get lens.\\n2. Use lens on chasm..."}\n\n` +
           `Output ONLY the JSON object.`;
         let p2bText = await runGen(sysMsg, p2bPrompt, p2Tok, ollamaTemp,
-          (t) => { slog(`Pass 2b: chain & arc... ${t.length} chars`); });
+          (t) => { sstream(`Pass 2b: chain & arc... ${t.length} chars`); });
         let chain = extractFirstJson(p2bText);
         slog(`pass2b raw preview: ${p2bText.replace(/\s+/g, " ").trim().slice(0, 300)}${p2bText.length > 300 ? "…" : ""}`);
         if (!chain || !Array.isArray(chain.puzzle_chain) || chain.puzzle_chain.length < 2) {
@@ -1337,7 +1343,7 @@
             `Rooms: ${skeleton.rooms.map(r => r.name).join(", ")}. Items: ${itemNames.join(", ")}. NPCs: ${npcNames.join(", ")}. Monsters: ${monNames.join(", ")}.\n` +
             `JSON only. Fields: objectives (4 strings), puzzle_chain (6-8 steps with step/action/gives/unlocks), mechanics (2-3), riddles (1-2), main_arc (string), win_condition (string), author_walkthrough (numbered string).`,
             p2RetryTok, ollamaRetryTemp,
-            (t) => { slog(`Pass 2b retry... ${t.length} chars`); });
+            (t) => { sstream(`Pass 2b retry... ${t.length} chars`); });
           chain = extractFirstJson(p2bText);
           slog(`pass2b (retry) preview: ${p2bText.replace(/\s+/g, " ").trim().slice(0, 200)}${p2bText.length > 200 ? "…" : ""}`);
         }
@@ -1376,7 +1382,7 @@
           `Output ONLY valid JSON.`;
 
         let pass2Text = await runGen(sysMsg, pass2Prompt, p2Tok, 0.5,
-          (t) => { slog(`Pass 2/2: gameplay content... ${t.length} chars`); });
+          (t) => { sstream(`Pass 2/2: gameplay content... ${t.length} chars`); });
         content = extractFirstJson(pass2Text);
         slog(`pass2 raw preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
 
@@ -1384,7 +1390,7 @@
           slog("Pass 2 retry...");
           const retry2 = `Theme: ${theme.slice(0, 300)}\n${forbidStockNames}\nAdd npcs, monsters, key_items, item_locations, puzzle_chain, objectives, win_condition, author_walkthrough to rooms: ${roomList}\nValid JSON only.`;
           pass2Text = await runGen(sysMsg, retry2, p2RetryTok, 0.4,
-            (t) => { slog(`Pass 2 retry... ${t.length} chars`); });
+            (t) => { sstream(`Pass 2 retry... ${t.length} chars`); });
           content = extractFirstJson(pass2Text);
           slog(`pass2 (retry) preview: ${pass2Text.replace(/\s+/g, " ").trim().slice(0, 200)}${pass2Text.length > 200 ? "…" : ""}`);
         }
