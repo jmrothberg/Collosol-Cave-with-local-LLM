@@ -1374,6 +1374,62 @@
      * with whatever sub-passes succeeded (failures degrade gracefully — auto-repair below
      * fills the gaps that the LLM left empty).
      */
+
+    // ── Agent helper: plan-then-act for items. ──────────────────────────────────
+    // Gemma 4 E4B is dramatically better at "list 6 items thematic to X" (free-text
+    // generation) than at "produce {key_items:[{name,purpose}, ...]}" (structured JSON
+    // with 6 entries). So we call Gemma TWICE: first as a planner (free-text list),
+    // then as an executor (structured JSON, with the planned names already pinned in).
+    // This is the Plan-and-Execute pattern from agent literature, applied at sub-pass scale.
+    async function planItemNames(theme, runGen, slog) {
+      const sysMsg = "You are a brainstormer. Output a short numbered list. No JSON, no commentary.";
+      const userMsg =
+        `Adventure theme: ${theme.slice(0, 220)}\n\n` +
+        `Name 6 specific objects the hero needs to find or use to complete this adventure. ` +
+        `Mix of: light source, weapon/tool, key/unlocker, defensive item, magical artifact, final treasure.\n\n` +
+        `Output ONLY a numbered list, one item per line, exactly like this:\n` +
+        `1. silver lantern\n2. iron key\n3. ...\n\n` +
+        `Make YOUR list specific to the theme above. No extra prose.`;
+      const raw = await runGen(sysMsg, userMsg, 200, 0.6, null);
+      if (!raw) { slog("agent: planItemNames returned empty (continuing without hint)"); return []; }
+      // Pull each "1. name" / "2. name" line out, tolerant of extra punctuation.
+      const names = [];
+      for (const line of String(raw).split("\n")) {
+        const m = line.match(/^\s*\d+[.)]\s*([^\n]+?)\s*$/);
+        if (!m) continue;
+        // Strip leading articles, trailing punctuation, surrounding quotes.
+        const cleaned = m[1].replace(/^["'`]|["'`,.]+$/g, "").replace(/^(the|a|an)\s+/i, "").trim();
+        if (cleaned && cleaned.length <= 60) names.push(cleaned);
+      }
+      slog(`agent: planItemNames produced ${names.length} candidate(s)${names.length ? ": " + names.join(", ") : ""}`);
+      return names;
+    }
+
+    // ── Agent helper: score a chain candidate so best-of-N can pick the winner. ──
+    // A higher score means a more playable chain. Used by the chain best-of-2 logic.
+    function scoreChainCandidate(chainObj, rooms, items, firstRoom, lastRoom) {
+      if (!chainObj || !Array.isArray(chainObj.puzzle_chain)) return -Infinity;
+      const chain = chainObj.puzzle_chain;
+      if (!chain.length) return -Infinity;
+      const roomSet = new Set(rooms);
+      const itemSetLower = new Set(items.map(i => String(i).toLowerCase()));
+      let score = 0;
+      // Base: more steps = more game (capped so we don't reward absurd lengths).
+      score += Math.min(chain.length, 8);
+      // Bonus per step with valid location.
+      score += chain.filter(s => s && s.location && roomSet.has(s.location)).length;
+      // Bonus per step with valid `gives` (real item name from pinned list, OR null which is fine).
+      score += chain.filter(s => s && (!s.gives || itemSetLower.has(String(s.gives).toLowerCase()))).length;
+      // Big bonus: first step in firstRoom.
+      if (chain[0] && chain[0].location === firstRoom) score += 5;
+      // Big bonus: last step in lastRoom AND unlocks="win" AND has a `gives`.
+      const last = chain[chain.length - 1];
+      if (last && last.location === lastRoom) score += 5;
+      if (last && last.unlocks === "win") score += 5;
+      if (last && last.gives && itemSetLower.has(String(last.gives).toLowerCase())) score += 3;
+      return score;
+    }
+
     async function generateBrowserAtomic(skeleton, theme, runGen, sysMsg, slog, sstream) {
       const roomNames = (skeleton.rooms || []).map(r => r.name).filter(Boolean);
       const firstRoom = roomNames[0];
@@ -1404,15 +1460,22 @@
       if (monObj && Array.isArray(monObj.monsters)) content.monsters = monObj.monsters;
 
       // 2c — Key items (THIS is where the previous Pass 2 was failing — empty purposes)
+      // AGENT: Plan-then-act. First a free-text "name 6 items" call (Gemma is much better
+      // at lists than at structured JSON), then the structured pass with those names pinned.
       // Cardinality-validated: must return ≥ 4 (we ask for 6 but accept down to 4 since
       // the empty-purpose filter below may drop a couple).
       // Concrete few-shot example: small models imitate examples slavishly. Lower temp
       // (0.3) since this is structured generation, not creative prose.
-      slog("Sub-pass 2c/5: Key items (atomic)");
+      slog("Sub-pass 2c/5: Key items (atomic, plan-then-act)");
+      const plannedItemNames = await planItemNames(theme, runGen, slog);
+      const plannedHint = plannedItemNames.length
+        ? `\n\nPLANNED ITEM NAMES (use these, OR invent better ones — but make sure each has a real purpose):\n${pinList(plannedItemNames)}`
+        : "";
       const itemsObj = await runAtomicPass("key_items", runGen, sysMsg,
         `Theme: ${themeShort}\n\n` +
         `EXAMPLE OUTPUT (do NOT copy these exact items — invent new ones for the theme):\n` +
-        `{"key_items":[{"name":"silver lantern","purpose":"lights the dark passages so you can see"},{"name":"old key","purpose":"unlocks the rusted gate to the inner chamber"}]}\n\n` +
+        `{"key_items":[{"name":"silver lantern","purpose":"lights the dark passages so you can see"},{"name":"old key","purpose":"unlocks the rusted gate to the inner chamber"}]}\n` +
+        plannedHint + `\n\n` +
         `Now produce YOUR output. Same shape, EXACTLY 6 items, theme-appropriate.\n` +
         `Every "purpose" MUST be a complete short sentence describing what the item DOES for the player.\n` +
         `Bad: "purpose":"" or "purpose":"a useful item". Good: "purpose":"scares the troll away when shown".`,
@@ -1457,14 +1520,19 @@
       }
 
       // 2e — Puzzle chain (the spine of the game; pin everything)
+      // AGENT: Best-of-2. Generate two candidates with different framings, score each
+      // against the pinned rooms/items, pick the better one. The chain is the spine of
+      // the game; one bad chain ruins everything, so it's worth the extra latency.
       // Cardinality-validated: must return ≥ 4 chain steps for any meaningful game.
       // Concrete example shows the exact shape AND the start→end progression. Lower temp
       // (0.3) for structural fidelity over creativity.
-      slog("Sub-pass 2e/5: Puzzle chain (atomic)");
+      slog("Sub-pass 2e/5: Puzzle chain (atomic, best-of-2)");
       const npcsPinned = pinList((content.npcs || []).map(n => n.name));
       const monsPinned = pinList((content.monsters || []).map(m => m.name));
       const itemsPinned = pinList(itemNames);
-      const chainObj = await runAtomicPass("puzzle_chain", runGen, sysMsg,
+
+      // Candidate A: example-driven (literal worked-example showing start→end progression).
+      const promptA =
         `Theme: ${themeShort}\n` +
         `Rooms (in order, use ONLY these): ${roomsPinned}\n` +
         `NPCs (use ONLY these names): ${npcsPinned}\n` +
@@ -1484,9 +1552,45 @@
         `- Each "gives" must be EXACTLY one of these item names (or null): ${itemsPinned}\n` +
         `- Each "location" must be EXACTLY one of these room names: ${roomsPinned}\n` +
         `- Each "unlocks" must be a room name from above, "win", or null.\n` +
-        `- The chain should progress through the rooms in order (early steps in early rooms).`,
+        `- The chain should progress through the rooms in order (early steps in early rooms).`;
+
+      // Candidate B: rule-driven (skips the worked-example, restates rules tersely).
+      // Same pinned context but reframed; small models sometimes lock onto example text
+      // and copy it. This one frees them slightly while keeping the constraints tight.
+      const promptB =
+        `Build a puzzle_chain JSON for this adventure.\n` +
+        `Rooms (visit in this order, start to finish): ${roomsPinned}\n` +
+        `Items (each "gives" must be one of these): ${itemsPinned}\n` +
+        `NPCs available: ${npcsPinned}\n` +
+        `Monsters available: ${monsPinned}\n\n` +
+        `Output ONLY this JSON object (no prose, no markdown):\n` +
+        `{"puzzle_chain":[{"step":1,"action":"...","gives":"<item or null>","unlocks":"<room or null or \\"win\\">","location":"<room>"}, ...]}\n\n` +
+        `Constraints:\n` +
+        `- 6-8 steps total\n` +
+        `- step 1 happens in: ${firstRoom}\n` +
+        `- last step happens in: ${lastRoom}, with gives = the most powerful item, unlocks = "win"\n` +
+        `- progression: each step in the same room as the previous OR in a room reachable from it\n` +
+        `- every step's "gives" must be a name from the items list (or null)\n` +
+        `- every step's "location" must be a name from the rooms list`;
+
+      const candidateA = await runAtomicPass("puzzle_chain.A", runGen, sysMsg, promptA,
         slog, sstream, { tokens: 1100, temp: 0.3, field: "puzzle_chain", minItems: 4 });
-      if (chainObj && Array.isArray(chainObj.puzzle_chain)) content.puzzle_chain = chainObj.puzzle_chain;
+      const candidateB = await runAtomicPass("puzzle_chain.B", runGen, sysMsg, promptB,
+        slog, sstream, { tokens: 1000, temp: 0.4, field: "puzzle_chain", minItems: 4 });
+
+      const scoreA = scoreChainCandidate(candidateA, roomNames, itemNames, firstRoom, lastRoom);
+      const scoreB = scoreChainCandidate(candidateB, roomNames, itemNames, firstRoom, lastRoom);
+      const lenA = (candidateA && candidateA.puzzle_chain) ? candidateA.puzzle_chain.length : 0;
+      const lenB = (candidateB && candidateB.puzzle_chain) ? candidateB.puzzle_chain.length : 0;
+      slog(`agent: chain candidate A=${lenA} steps score=${scoreA}; B=${lenB} steps score=${scoreB}`);
+      const pickedChain = (scoreB > scoreA) ? candidateB : candidateA;
+      const pickedLabel = (scoreB > scoreA) ? "B" : "A";
+      if (pickedChain && Array.isArray(pickedChain.puzzle_chain)) {
+        content.puzzle_chain = pickedChain.puzzle_chain;
+        slog(`agent: picked chain candidate ${pickedLabel} (${pickedChain.puzzle_chain.length} steps)`);
+      } else {
+        slog(`agent: both chain candidates failed parse — leaving chain empty (synthetic fallback in auto-repair will build one)`);
+      }
 
       // Code-side derive: objectives, mechanics, main_arc, win_condition (structured),
       // author_walkthrough. These are mechanical and never fail.
