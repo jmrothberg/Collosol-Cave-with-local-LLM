@@ -404,6 +404,14 @@
     // DISABLED 2026-05-02: user reported game not playing after enabling this; reverting to
     // the v4.0.1-equivalent full-prompt path while we diagnose. Set back to true to re-enable.
     const USE_KV_CACHE = false;
+
+    // STRUCTURAL: break browser Pass 2 into ATOMIC sub-passes (one field per LLM call) so
+    // Gemma 4 E4B can actually succeed. Single-shot 11-field Pass 2 reliably produced 0-NPC,
+    // 0-chain, empty-purpose junk on a 4B model. With atomic sub-passes each call has ONE job
+    // and pinned context (literal JSON arrays of allowed names), which is exactly what small
+    // models are good at. Auto-repair + solvability validator finish the job code-side.
+    // Set to false to fall back to the legacy single-shot Pass 2.
+    const USE_ATOMIC_PASS2 = true;
     const IMG_STEPS = 20;
     const IMG_GUIDANCE = 7.5;
     const IMAGE_THEME = "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere";
@@ -1130,6 +1138,618 @@
       return sk;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ATOMIC SUB-PASS HELPERS — give Gemma 4 E4B exactly ONE narrow job per LLM call.
+    // The MAKING_ADVENTURES doc spells out why: small models love structure and choke on
+    // freedom. Single-shot "give me 11 cross-referenced fields" reliably produces 0-NPC,
+    // 0-chain garbage on a 4B model. One field at a time + literally pinned context = wins.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /** Format a JS array as a literal compact JSON list for prompt-pinning. */
+    function pinList(arr) {
+      return JSON.stringify((arr || []).filter(x => x != null && x !== ""));
+    }
+
+    /**
+     * Run ONE atomic sub-pass with strict shape:
+     *   - System: short, JSON-only.
+     *   - User: schema example + pinned context.
+     *   - Low temp (default 0.4), modest token cap (default 600).
+     *   - Tolerant extraction: accepts {field:[...]} OR a bare [...] array (Gemma sometimes
+     *     forgets the wrapper).
+     *   - Cardinality check: if opts.minItems is set, retry on shape underflow.
+     *   - One retry with reinforced "ONLY JSON, start with { and end with }".
+     * Returns the parsed top-level object normalized to {field:[...]} when opts.field is
+     * provided, else the raw parsed object. Null on full failure.
+     */
+    async function runAtomicPass(label, runGen, sysMsg, userMsg, slog, sstream, opts) {
+      const o = opts || {};
+      const tokens = o.tokens || 600;
+      const temp = o.temp != null ? o.temp : 0.4;
+      const retryTokens = o.retryTokens || tokens;
+      const retryTemp = o.retryTemp != null ? o.retryTemp : Math.max(0.2, temp - 0.1);
+      const field = o.field || null;
+      const minItems = o.minItems || 0;
+
+      // Normalize parser output to the desired shape and check cardinality.
+      // Returns {ok:true, obj} or {ok:false, why:string}.
+      const normalize = (parsed) => {
+        if (!parsed) return { ok: false, why: "no JSON" };
+        if (field) {
+          // Accept {field:[...]} or bare [...] (Gemma often drops the wrapper).
+          let arr = null;
+          if (Array.isArray(parsed)) arr = parsed;
+          else if (parsed[field] && Array.isArray(parsed[field])) arr = parsed[field];
+          else {
+            // Sometimes Gemma uses a singular key (e.g. "npc" instead of "npcs") or another
+            // common alias. Look for any array value as a last resort.
+            for (const v of Object.values(parsed)) {
+              if (Array.isArray(v)) { arr = v; break; }
+            }
+          }
+          if (!Array.isArray(arr)) return { ok: false, why: `field '${field}' missing/not array` };
+          if (minItems && arr.length < minItems) return { ok: false, why: `cardinality ${arr.length} < minItems ${minItems}` };
+          return { ok: true, obj: { [field]: arr } };
+        }
+        // No field requested — accept any object.
+        if (typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, why: "expected object" };
+        return { ok: true, obj: parsed };
+      };
+
+      // Same as normalize() but ignores cardinality — used as a "take partial" fallback
+      // when both strict attempts fail. Better to ship 3 NPCs than 0.
+      const normalizeLoose = (parsed) => {
+        if (!parsed) return null;
+        if (field) {
+          let arr = null;
+          if (Array.isArray(parsed)) arr = parsed;
+          else if (parsed[field] && Array.isArray(parsed[field])) arr = parsed[field];
+          else for (const v of Object.values(parsed)) { if (Array.isArray(v)) { arr = v; break; } }
+          return Array.isArray(arr) && arr.length > 0 ? { [field]: arr } : null;
+        }
+        return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : null;
+      };
+
+      slog(`atomic ${label}: requesting (${tokens} tok @ ${temp})`);
+      let raw = await runGen(sysMsg, userMsg, tokens, temp,
+        (t) => sstream(`atomic ${label}... ${t.length} chars`));
+      let parsed = extractFirstJson(raw);
+      let res = normalize(parsed);
+      if (res.ok) {
+        slog(`atomic ${label}: parsed ok (${field ? `${res.obj[field].length} ${field}` : Object.keys(res.obj).join(",")})`);
+        return res.obj;
+      }
+      const firstParsed = parsed; // remember for partial-accept fallback
+      slog(`atomic ${label}: first attempt failed (${res.why}), retry with stricter prompt`);
+      const cardinalityHint = (field && minItems)
+        ? ` Make EXACTLY ${minItems} entr${minItems === 1 ? "y" : "ies"} (the previous attempt returned too few).`
+        : "";
+      const stricter = userMsg
+        + `\n\nReply with ONLY the JSON object, beginning with \`{\` and ending with \`}\`. No prose, no commentary, no markdown.${cardinalityHint}`;
+      raw = await runGen(sysMsg, stricter, retryTokens, retryTemp,
+        (t) => sstream(`atomic ${label} retry... ${t.length} chars`));
+      parsed = extractFirstJson(raw);
+      res = normalize(parsed);
+      if (res.ok) {
+        slog(`atomic ${label}: retry parsed (${field ? `${res.obj[field].length} ${field}` : Object.keys(res.obj).join(",")})`);
+        return res.obj;
+      }
+      // Both strict attempts failed cardinality. Take whichever attempt has more entries
+      // (better than null — auto-repair / micro-repair will fill remaining gaps).
+      const partial1 = normalizeLoose(firstParsed);
+      const partial2 = normalizeLoose(parsed);
+      const len = (p) => (p && field && Array.isArray(p[field])) ? p[field].length : 0;
+      const best = (len(partial2) >= len(partial1)) ? partial2 : partial1;
+      if (best && field && Array.isArray(best[field]) && best[field].length > 0) {
+        slog(`atomic ${label}: accepting PARTIAL result (${best[field].length} < minItems ${minItems}; both strict attempts failed)`);
+        return best;
+      }
+      slog(`atomic ${label}: BOTH attempts FAILED (${res.why}) — sub-pass returns null`);
+      return null;
+    }
+
+    /**
+     * Ask Gemma ONE multiple-choice question with a constrained list of valid choices.
+     * Returns the chosen string from `choices` (or null on failure). Tolerant matching:
+     * exact, then case-insensitive, then substring. Patterned after _ask_one_choice in
+     * the Python sibling. Small models nail this — it's their happiest case.
+     */
+    async function askOneChoice(question, choices, runGen) {
+      if (!Array.isArray(choices) || choices.length === 0) return null;
+      const sysMsg = "You answer with exactly ONE option from a fixed list. No commentary, no prose.";
+      const userMsg = `${question}\n\n` +
+        `Pick exactly ONE option from the list below. Reply with ONLY the chosen text on a single line, exactly as written.\n` +
+        `Options:\n` +
+        choices.map(c => `  - ${c}`).join("\n");
+      const raw = await runGen(sysMsg, userMsg, 64, 0.2, null);
+      if (!raw) return null;
+      const first = String(raw).trim().split("\n")[0].trim().replace(/^[-*•\s]+/, "").replace(/^["'`]|["'`]$/g, "");
+      // 1. exact
+      const exact = choices.find(c => c === first);
+      if (exact) return exact;
+      // 2. case-insensitive
+      const ci = choices.find(c => c.toLowerCase() === first.toLowerCase());
+      if (ci) return ci;
+      // 3. choice contains response (or vice versa)
+      const sub = choices.find(c => first.toLowerCase().includes(c.toLowerCase()) || c.toLowerCase().includes(first.toLowerCase()));
+      if (sub) return sub;
+      return null;
+    }
+
+    /**
+     * LLM micro-repair: for residual thematic gaps the code-only auto-repair can't fix
+     * (monster weakness pointing at nothing, chain step missing item, win item not given
+     * by any step), ask Gemma a single multiple-choice question and patch the bible.
+     * Returns the list of repairs applied. Patterned after micro_repair_world_bible.
+     */
+    async function microRepairWorldBible(wb, runGen, slog) {
+      const fixes = [];
+      if (!wb) return fixes;
+      const itemNames = (wb.key_items || []).map(k => k && k.name).filter(Boolean);
+      const roomNames = (wb.locations || []).map(l => l && l.name).filter(Boolean);
+
+      // 1. Monster weaknesses that don't reference any real key_item.
+      if (itemNames.length) {
+        for (const mon of (wb.monsters || [])) {
+          if (!mon || typeof mon !== "object") continue;
+          const w = String(mon.weakness || "").toLowerCase();
+          const refsItem = itemNames.some(n => w.includes(n.toLowerCase()));
+          if (refsItem) continue;
+          slog(`micro-repair: monster '${mon.name}' weakness doesn't reference any key_item — asking Gemma`);
+          const pick = await askOneChoice(
+            `Which item is the weakness of "${mon.name}"? (Current weakness text: "${mon.weakness || ""}".)`,
+            itemNames, runGen);
+          if (pick) {
+            mon.weakness = `${mon.weakness ? mon.weakness + " — " : ""}use the ${pick}`;
+            fixes.push(`monster '${mon.name}' weakness now references key_item '${pick}'`);
+          } else {
+            slog(`micro-repair: no choice for monster '${mon.name}'`);
+          }
+        }
+      }
+
+      // 2. Chain steps where `gives` was cleared (phantom item) but the step still exists.
+      //    Pick a real key_item for that step, OR set to null (NONE) if none fits.
+      if (itemNames.length) {
+        for (const step of (wb.puzzle_chain || [])) {
+          if (!step || step.gives) continue;
+          // Skip the last step's gives if it would conflict with already-given items
+          const alreadyGiven = new Set((wb.puzzle_chain || []).map(s => s && s.gives ? String(s.gives).toLowerCase() : "").filter(Boolean));
+          const remaining = itemNames.filter(n => !alreadyGiven.has(n.toLowerCase()));
+          if (!remaining.length) continue;
+          slog(`micro-repair: chain step ${step.step} has no 'gives' — asking Gemma to pick`);
+          const pick = await askOneChoice(
+            `Step ${step.step}: "${step.action}" — which item should the player obtain after this step? (Or pick NONE.)`,
+            [...remaining, "NONE"], runGen);
+          if (pick && pick !== "NONE") {
+            step.gives = pick;
+            fixes.push(`chain step ${step.step} 'gives' set to '${pick}'`);
+          }
+        }
+      }
+
+      // 3. Win-required items that are never given by any chain step. Either swap the
+      //    win item to one that IS given, or append a final chain step that gives it.
+      const chainGivesLower = new Set((wb.puzzle_chain || []).map(s => s && s.gives ? String(s.gives).toLowerCase() : "").filter(Boolean));
+      const winItems = (wb.win_condition && wb.win_condition.required_items) || [];
+      for (let i = 0; i < winItems.length; i++) {
+        const it = winItems[i];
+        if (!it || chainGivesLower.has(String(it).toLowerCase())) continue;
+        const candidates = itemNames.filter(n => chainGivesLower.has(n.toLowerCase()));
+        if (!candidates.length) continue;
+        slog(`micro-repair: win item '${it}' not given by any chain step — asking Gemma to pick replacement`);
+        const pick = await askOneChoice(
+          `The win condition currently requires "${it}", but no puzzle step gives that item. Which of these items (each given by a chain step) should be the goal instead?`,
+          candidates, runGen);
+        if (pick) {
+          winItems[i] = pick;
+          if (wb.win_condition && wb.win_condition.description) {
+            wb.win_condition.description = wb.win_condition.description.replace(it, pick);
+          }
+          fixes.push(`win_condition.required_items: '${it}' → '${pick}' (now obtainable from chain)`);
+        }
+      }
+
+      // 4. Chain steps whose `unlocks` is a non-existent room (other than null/"win").
+      if (roomNames.length) {
+        for (const step of (wb.puzzle_chain || [])) {
+          if (!step || !step.unlocks || step.unlocks === "win") continue;
+          const u = step.unlocks;
+          if (roomNames.includes(u)) continue;
+          slog(`micro-repair: chain step ${step.step} unlocks invalid room '${u}' — asking Gemma to pick`);
+          const pick = await askOneChoice(
+            `Step ${step.step}: "${step.action}" — which room should this step unlock? (Or pick NONE.)`,
+            [...roomNames, "NONE", "win"], runGen);
+          if (pick === "NONE") { step.unlocks = null; fixes.push(`chain step ${step.step} unlocks → null`); }
+          else if (pick) { step.unlocks = pick; fixes.push(`chain step ${step.step} unlocks → '${pick}'`); }
+        }
+      }
+
+      return fixes;
+    }
+
+    /**
+     * Run all browser-side Gemma sub-passes (NPCs, monsters, items, item_locations, chain)
+     * with skeleton names pinned literally as JSON arrays. Returns a partial content object
+     * with whatever sub-passes succeeded (failures degrade gracefully — auto-repair below
+     * fills the gaps that the LLM left empty).
+     */
+    async function generateBrowserAtomic(skeleton, theme, runGen, sysMsg, slog, sstream) {
+      const roomNames = (skeleton.rooms || []).map(r => r.name).filter(Boolean);
+      const firstRoom = roomNames[0];
+      const lastRoom = roomNames[roomNames.length - 1];
+      const roomsPinned = pinList(roomNames);
+      const themeShort = theme.slice(0, 220);
+
+      const content = {};
+
+      // 2a — NPCs (cardinality-validated: must return ≥ 2)
+      slog("Sub-pass 2a/5: NPCs (atomic)");
+      const npcsObj = await runAtomicPass("npcs", runGen, sysMsg,
+        `Theme: ${themeShort}\nRooms (use ONLY these names for "location"): ${roomsPinned}\n\n` +
+        `Output a JSON object with exactly this shape:\n` +
+        `{"npcs":[{"name":"...","location":"<one of the rooms above>","personality":"...","provides":"what they give or teach"}]}\n` +
+        `Make EXACTLY 2 NPCs. Each "location" MUST appear in the rooms list above. No other fields.`,
+        slog, sstream, { tokens: 500, temp: 0.5, field: "npcs", minItems: 2 });
+      if (npcsObj && Array.isArray(npcsObj.npcs)) content.npcs = npcsObj.npcs;
+
+      // 2b — Monsters (cardinality-validated: must return ≥ 2)
+      slog("Sub-pass 2b/5: Monsters (atomic)");
+      const monObj = await runAtomicPass("monsters", runGen, sysMsg,
+        `Theme: ${themeShort}\nRooms (use ONLY these for "location"): ${roomsPinned}\n\n` +
+        `Output a JSON object with exactly this shape:\n` +
+        `{"monsters":[{"name":"...","location":"<one of the rooms above>","weakness":"how the player overcomes it","blocks":"what it prevents"}]}\n` +
+        `Make EXACTLY 2 monsters. Place them in MID or LATE rooms (later in the list). Each "location" MUST appear above.`,
+        slog, sstream, { tokens: 500, temp: 0.5, field: "monsters", minItems: 2 });
+      if (monObj && Array.isArray(monObj.monsters)) content.monsters = monObj.monsters;
+
+      // 2c — Key items (THIS is where the previous Pass 2 was failing — empty purposes)
+      // Cardinality-validated: must return ≥ 4 (we ask for 6 but accept down to 4 since
+      // the empty-purpose filter below may drop a couple).
+      // Concrete few-shot example: small models imitate examples slavishly. Lower temp
+      // (0.3) since this is structured generation, not creative prose.
+      slog("Sub-pass 2c/5: Key items (atomic)");
+      const itemsObj = await runAtomicPass("key_items", runGen, sysMsg,
+        `Theme: ${themeShort}\n\n` +
+        `EXAMPLE OUTPUT (do NOT copy these exact items — invent new ones for the theme):\n` +
+        `{"key_items":[{"name":"silver lantern","purpose":"lights the dark passages so you can see"},{"name":"old key","purpose":"unlocks the rusted gate to the inner chamber"}]}\n\n` +
+        `Now produce YOUR output. Same shape, EXACTLY 6 items, theme-appropriate.\n` +
+        `Every "purpose" MUST be a complete short sentence describing what the item DOES for the player.\n` +
+        `Bad: "purpose":"" or "purpose":"a useful item". Good: "purpose":"scares the troll away when shown".`,
+        slog, sstream, { tokens: 700, temp: 0.3, field: "key_items", minItems: 4 });
+      if (itemsObj && Array.isArray(itemsObj.key_items)) {
+        // Filter out items with empty purpose — auto-repair will not invent purposes silently
+        content.key_items = itemsObj.key_items.filter(k =>
+          k && typeof k.name === "string" && k.name.trim() &&
+          typeof k.purpose === "string" && k.purpose.trim().length >= 5
+        );
+        const dropped = itemsObj.key_items.length - content.key_items.length;
+        if (dropped) slog(`atomic key_items: dropped ${dropped} item(s) with missing/empty purpose`);
+      }
+
+      // 2d — Item locations (mapping pinned items to pinned rooms)
+      // No field/minItems here — item_locations is an OBJECT, not an array. The default
+      // tolerant extractor still tries top-level + bare-object recovery.
+      const itemNames = (content.key_items || []).map(k => k.name);
+      if (itemNames.length) {
+        slog("Sub-pass 2d/5: Item locations (atomic)");
+        const itemsPinned = pinList(itemNames);
+        const locObj = await runAtomicPass("item_locations", runGen, sysMsg,
+          `Items (use these exact names): ${itemsPinned}\n` +
+          `Rooms (use ONLY these): ${roomsPinned}\n\n` +
+          `Output a JSON object with exactly this shape:\n` +
+          `{"item_locations":{"<item name>":"<room name>"}}\n` +
+          `Map EVERY item above to ONE room above. Spread items across rooms ` +
+          `(early game items in early rooms, treasure in last room).`,
+          slog, sstream, { tokens: 500, temp: 0.3 });
+        if (locObj && locObj.item_locations && typeof locObj.item_locations === "object") {
+          content.item_locations = locObj.item_locations;
+        } else if (locObj && typeof locObj === "object") {
+          // Tolerant: maybe Gemma returned the bare mapping {item: room, ...}
+          // Detect by checking values are room names from our pinned list.
+          const roomSet = new Set(roomNames);
+          const bareLooks = Object.values(locObj).every(v => typeof v === "string" && roomSet.has(v));
+          if (bareLooks) {
+            content.item_locations = locObj;
+            slog("atomic item_locations: accepted bare mapping (no wrapper)");
+          }
+        }
+      }
+
+      // 2e — Puzzle chain (the spine of the game; pin everything)
+      // Cardinality-validated: must return ≥ 4 chain steps for any meaningful game.
+      // Concrete example shows the exact shape AND the start→end progression. Lower temp
+      // (0.3) for structural fidelity over creativity.
+      slog("Sub-pass 2e/5: Puzzle chain (atomic)");
+      const npcsPinned = pinList((content.npcs || []).map(n => n.name));
+      const monsPinned = pinList((content.monsters || []).map(m => m.name));
+      const itemsPinned = pinList(itemNames);
+      const chainObj = await runAtomicPass("puzzle_chain", runGen, sysMsg,
+        `Theme: ${themeShort}\n` +
+        `Rooms (in order, use ONLY these): ${roomsPinned}\n` +
+        `NPCs (use ONLY these names): ${npcsPinned}\n` +
+        `Monsters (use ONLY these names): ${monsPinned}\n` +
+        `Items (use ONLY these names for "gives"): ${itemsPinned}\n\n` +
+        `EXAMPLE (do NOT copy — substitute YOUR rooms/items above):\n` +
+        `{"puzzle_chain":[` +
+        `{"step":1,"action":"talk to the sage in the entrance hall","gives":"silver lantern","unlocks":null,"location":"Entrance Hall"},` +
+        `{"step":2,"action":"use the silver lantern to enter the dark tunnel","gives":null,"unlocks":"Dark Tunnel","location":"Entrance Hall"},` +
+        `{"step":3,"action":"pick up the old key in the dark tunnel","gives":"old key","unlocks":null,"location":"Dark Tunnel"},` +
+        `{"step":4,"action":"unlock the inner chamber with the old key","gives":null,"unlocks":"Inner Chamber","location":"Dark Tunnel"},` +
+        `{"step":5,"action":"defeat the guardian and take the prize","gives":"the prize","unlocks":"win","location":"Inner Chamber"}]}\n\n` +
+        `Now produce YOUR puzzle_chain for the theme above. Build 6-8 ordered steps.\n` +
+        `RULES (must follow):\n` +
+        `- Step 1 location MUST be "${firstRoom}".\n` +
+        `- The LAST step location MUST be "${lastRoom}", its gives MUST be the final treasure (the most powerful/valuable item from the items list), and its unlocks MUST be "win".\n` +
+        `- Each "gives" must be EXACTLY one of these item names (or null): ${itemsPinned}\n` +
+        `- Each "location" must be EXACTLY one of these room names: ${roomsPinned}\n` +
+        `- Each "unlocks" must be a room name from above, "win", or null.\n` +
+        `- The chain should progress through the rooms in order (early steps in early rooms).`,
+        slog, sstream, { tokens: 1100, temp: 0.3, field: "puzzle_chain", minItems: 4 });
+      if (chainObj && Array.isArray(chainObj.puzzle_chain)) content.puzzle_chain = chainObj.puzzle_chain;
+
+      // Code-side derive: objectives, mechanics, main_arc, win_condition (structured),
+      // author_walkthrough. These are mechanical and never fail.
+      const chain = content.puzzle_chain || [];
+      const finalStep = chain.length ? chain[chain.length - 1] : null;
+      const finalItem = (finalStep && finalStep.gives) || (itemNames[itemNames.length - 1] || "the prize");
+
+      content.objectives = chain.slice(0, 4).map(s => s && s.action ? String(s.action) : "").filter(Boolean);
+      if (!content.objectives.length) content.objectives = [`Find ${finalItem}`, `Return to ${firstRoom}`];
+
+      content.mechanics = chain.map(s => s && s.action && s.location ? ({
+        action: String(s.action),
+        effect: s.unlocks ? `unlocks ${s.unlocks}` : (s.gives ? `gives ${s.gives}` : "advances quest"),
+        location: String(s.location),
+      }) : null).filter(Boolean);
+
+      content.main_arc = `An adventurer descends into ${firstRoom} seeking ${finalItem}; only by completing each step in turn can they reach ${lastRoom} and return.`;
+
+      content.win_condition = {
+        required_items: finalItem ? [finalItem] : [],
+        required_location: firstRoom,
+        description: `Obtain ${finalItem} and return to ${firstRoom}`,
+      };
+
+      // author_walkthrough is filled later by synthesizeAuthorWalkthrough in the merge step
+      // if the model didn't provide one. We don't ask Gemma to author it (that prose was the
+      // most failure-prone field in the legacy single-shot pass).
+
+      return content;
+    }
+
+    /**
+     * Deterministic auto-repair — code-only fixes after generation. No LLM round-trip.
+     * Patterned after auto_repair_world_bible in LMM_adventure_May_2_2026.py. Fills gaps
+     * mechanically; never invents new content. Returns a list of repairs applied.
+     */
+    function autoRepairWorldBible(wb) {
+      const fixes = [];
+      if (!wb || typeof wb !== "object") return fixes;
+      const rooms = (wb.locations || []).map(l => l && l.name).filter(Boolean);
+      if (!rooms.length) return fixes;
+      const firstRoom = rooms[0];
+      const lastRoom = rooms[rooms.length - 1];
+      const roomSet = new Set(rooms);
+      const lowerRoomMap = new Map(rooms.map(r => [r.toLowerCase(), r]));
+
+      // 1. NPCs / monsters whose location isn't a real room → snap to firstRoom (NPCs) or lastRoom (monsters).
+      for (const npc of (wb.npcs || [])) {
+        if (!npc || typeof npc !== "object") continue;
+        if (!npc.location || !roomSet.has(npc.location)) {
+          const guess = npc.location ? lowerRoomMap.get(String(npc.location).toLowerCase()) : null;
+          npc.location = guess || firstRoom;
+          fixes.push(`npc '${npc.name || "?"}' relocated → ${npc.location}`);
+        }
+      }
+      for (const mon of (wb.monsters || [])) {
+        if (!mon || typeof mon !== "object") continue;
+        if (!mon.location || !roomSet.has(mon.location)) {
+          const guess = mon.location ? lowerRoomMap.get(String(mon.location).toLowerCase()) : null;
+          mon.location = guess || lastRoom;
+          fixes.push(`monster '${mon.name || "?"}' relocated → ${mon.location}`);
+        }
+      }
+
+      // 2. key_items missing from item_locations → place at chain step's location, else firstRoom.
+      const itemLocs = wb.item_locations = (wb.item_locations && typeof wb.item_locations === "object") ? wb.item_locations : {};
+      const itemLocsLower = new Map(Object.keys(itemLocs).map(k => [k.toLowerCase(), k]));
+      for (const k of (wb.key_items || [])) {
+        if (!k || typeof k.name !== "string" || !k.name) continue;
+        const nameLower = k.name.toLowerCase();
+        if (itemLocsLower.has(nameLower)) continue;
+        // Find a chain step that gives this item; use its location, else lastRoom for the final treasure.
+        let placedAt = null;
+        for (const step of (wb.puzzle_chain || [])) {
+          if (step && step.gives && String(step.gives).toLowerCase() === nameLower && step.location && roomSet.has(step.location)) {
+            placedAt = step.location;
+            break;
+          }
+        }
+        if (!placedAt) placedAt = (k.name === (wb.win_condition && wb.win_condition.required_items && wb.win_condition.required_items[0])) ? lastRoom : firstRoom;
+        itemLocs[k.name] = placedAt;
+        fixes.push(`item '${k.name}' placed → ${placedAt}`);
+      }
+
+      // 3. Drop puzzle_chain steps whose location isn't a real room (otherwise the chain
+      //    references nowhere and the player can never satisfy them).
+      if (Array.isArray(wb.puzzle_chain)) {
+        const before = wb.puzzle_chain.length;
+        wb.puzzle_chain = wb.puzzle_chain.filter(s => s && (!s.location || roomSet.has(s.location)));
+        const after = wb.puzzle_chain.length;
+        if (before !== after) fixes.push(`puzzle_chain: dropped ${before - after} step(s) with invalid location`);
+      }
+
+      // 3b. Synthetic chain fallback — if Gemma's chain is empty/too short, build one
+      //     mechanically from available items + rooms. This guarantees a playable game
+      //     (collect items in order through the rooms, end at lastRoom with the treasure)
+      //     even if Pass 2e completely failed. Only triggers when chain.length < 3.
+      if (!Array.isArray(wb.puzzle_chain) || wb.puzzle_chain.length < 3) {
+        const items = (wb.key_items || []).map(k => k && k.name).filter(Boolean);
+        if (items.length >= 2 && rooms.length >= 2) {
+          const synth = [];
+          // Distribute items across rooms (early items in early rooms; final item in lastRoom).
+          const itemsForRooms = items.slice(); // copy
+          const finalItem = itemsForRooms.pop(); // last item is the treasure
+          // Spread the remaining items across rooms[0..n-2]
+          const intermediateRooms = rooms.slice(0, Math.max(1, rooms.length - 1));
+          let stepNum = 1;
+          for (let i = 0; i < itemsForRooms.length; i++) {
+            const room = intermediateRooms[Math.min(i, intermediateRooms.length - 1)];
+            synth.push({
+              step: stepNum++,
+              action: `find and take the ${itemsForRooms[i]} in ${room}`,
+              gives: itemsForRooms[i],
+              unlocks: null,
+              location: room,
+            });
+          }
+          // Connecting movement step (if path is more than two rooms)
+          if (rooms.length > 2) {
+            synth.push({
+              step: stepNum++,
+              action: `travel deeper through the cavern toward ${lastRoom}`,
+              gives: null,
+              unlocks: lastRoom,
+              location: rooms[rooms.length - 2],
+            });
+          }
+          // Final step: claim the treasure and win.
+          synth.push({
+            step: stepNum++,
+            action: `claim the ${finalItem} in ${lastRoom}`,
+            gives: finalItem,
+            unlocks: "win",
+            location: lastRoom,
+          });
+          // Also pin item_locations to match the synthetic chain (guarantees solvability).
+          itemLocs[finalItem] = lastRoom;
+          for (let i = 0; i < itemsForRooms.length; i++) {
+            const room = intermediateRooms[Math.min(i, intermediateRooms.length - 1)];
+            itemLocs[itemsForRooms[i]] = room;
+          }
+          wb.puzzle_chain = synth;
+          fixes.push(`puzzle_chain: synthetic ${synth.length}-step chain built from ${items.length} items × ${rooms.length} rooms (Gemma's chain was empty/short)`);
+        }
+      }
+
+      // 4. Drop chain steps whose `gives` references a non-existent key_item.
+      const itemNamesLower = new Set((wb.key_items || []).map(k => k && k.name ? k.name.toLowerCase() : "").filter(Boolean));
+      if (Array.isArray(wb.puzzle_chain)) {
+        for (const step of wb.puzzle_chain) {
+          if (!step) continue;
+          if (step.gives && !itemNamesLower.has(String(step.gives).toLowerCase())) {
+            fixes.push(`chain step ${step.step}: cleared phantom gives='${step.gives}'`);
+            step.gives = null;
+          }
+        }
+      }
+
+      // 5. Ensure win_condition has structured shape (additive — don't break legacy strings).
+      if (typeof wb.win_condition === "string" || !wb.win_condition || typeof wb.win_condition !== "object") {
+        const oldText = typeof wb.win_condition === "string" ? wb.win_condition : "Complete the adventure";
+        const finalGives = (wb.puzzle_chain || []).slice().reverse().find(s => s && s.gives);
+        const finalItem = (finalGives && finalGives.gives) ||
+          ((wb.key_items || [])[((wb.key_items || []).length - 1)] || {}).name || null;
+        wb.win_condition = {
+          required_items: finalItem ? [finalItem] : [],
+          required_location: firstRoom,
+          description: oldText,
+        };
+        fixes.push(`win_condition upgraded to structured shape (item=${finalItem || "?"}, room=${firstRoom})`);
+      } else {
+        if (!Array.isArray(wb.win_condition.required_items)) wb.win_condition.required_items = [];
+        if (!wb.win_condition.required_location || !roomSet.has(wb.win_condition.required_location)) {
+          wb.win_condition.required_location = firstRoom;
+          fixes.push(`win_condition.required_location snapped → ${firstRoom}`);
+        }
+        if (typeof wb.win_condition.description !== "string" || !wb.win_condition.description.trim()) {
+          const item = wb.win_condition.required_items[0] || "the prize";
+          wb.win_condition.description = `Obtain ${item} and return to ${firstRoom}`;
+        }
+      }
+
+      return fixes;
+    }
+
+    /**
+     * BFS-based solvability validator. Returns {ok, gaps, report}. Currently logs the
+     * report but does NOT block — the engine ships the bible regardless and lets the player
+     * see the warnings. Future: trigger micro-repair when ok===false.
+     */
+    function validateWorldBibleSolvability(wb) {
+      const gaps = [];
+      if (!wb || !Array.isArray(wb.locations) || !wb.locations.length) {
+        return { ok: false, gaps: ["no locations"], report: "BLOCKED: no rooms" };
+      }
+      const rooms = wb.locations.map(l => l && l.name).filter(Boolean);
+      const roomSet = new Set(rooms);
+      const adj = {};
+      for (const loc of wb.locations) {
+        if (!loc || !loc.name) continue;
+        adj[loc.name] = (loc.exits || []).filter(e => roomSet.has(e));
+      }
+      // BFS from first room
+      const start = rooms[0];
+      const reachable = new Set([start]);
+      const queue = [start];
+      while (queue.length) {
+        const r = queue.shift();
+        for (const next of (adj[r] || [])) {
+          if (!reachable.has(next)) { reachable.add(next); queue.push(next); }
+        }
+      }
+      for (const r of rooms) {
+        if (!reachable.has(r)) gaps.push(`unreachable room: ${r}`);
+      }
+      // Win location reachable?
+      const winLoc = wb.win_condition && wb.win_condition.required_location;
+      if (winLoc && roomSet.has(winLoc) && !reachable.has(winLoc)) {
+        gaps.push(`win location not reachable: ${winLoc}`);
+      }
+      // Every key_item placed?
+      const itemLocs = wb.item_locations || {};
+      for (const k of (wb.key_items || [])) {
+        if (!k || !k.name) continue;
+        if (!itemLocs[k.name]) gaps.push(`key_item '${k.name}' has no placement`);
+      }
+      // Every chain step's location reachable?
+      for (const step of (wb.puzzle_chain || [])) {
+        if (!step || !step.location) continue;
+        if (!reachable.has(step.location)) gaps.push(`chain step ${step.step} at unreachable ${step.location}`);
+      }
+      // Win-required items present in chain `gives`?
+      const chainGives = new Set((wb.puzzle_chain || []).map(s => s && s.gives ? String(s.gives).toLowerCase() : "").filter(Boolean));
+      for (const it of ((wb.win_condition && wb.win_condition.required_items) || [])) {
+        if (it && !chainGives.has(String(it).toLowerCase())) {
+          gaps.push(`win item '${it}' is never given by any chain step`);
+        }
+      }
+
+      // Chain length sanity (a 1-step "chain" is not a game).
+      if ((wb.puzzle_chain || []).length < 2) {
+        gaps.push(`puzzle_chain has only ${(wb.puzzle_chain || []).length} step(s) — not a playable adventure`);
+      }
+
+      // Chain progression: the last step should be at lastRoom and unlock "win".
+      const chain = wb.puzzle_chain || [];
+      if (chain.length >= 2) {
+        const last = chain[chain.length - 1];
+        const lastRoom = rooms[rooms.length - 1];
+        if (last && last.location && last.location !== lastRoom) {
+          gaps.push(`final chain step is in '${last.location}' instead of last room '${lastRoom}'`);
+        }
+        if (last && last.unlocks !== "win") {
+          gaps.push(`final chain step does not unlock "win" (got '${last.unlocks}')`);
+        }
+      }
+
+      const report = gaps.length
+        ? `solvability: ${gaps.length} gap(s)\n  - ` + gaps.join("\n  - ")
+        : `solvability: OK (${rooms.length} rooms, ${(wb.key_items || []).length} items, ${(wb.puzzle_chain || []).length} chain steps, all reachable)`;
+      return { ok: gaps.length === 0, gaps, report };
+    }
+
     async function generateWorldBible(theme, onStatus, genOpts) {
       const useOllama = genOpts && genOpts.useOllama === true;
       if (!useOllama && !llmPipe) throw new Error("LLM not loaded yet");
@@ -1358,9 +1978,21 @@
         const kn = (content.key_items || []).map(k => (typeof k === "object" ? k.name : k)).filter(Boolean);
         if (kn.length) slog(`pass2 key_items: ${kn.join(", ")}`);
 
+      } else if (USE_ATOMIC_PASS2) {
+        // ── Browser Gemma: atomic sub-passes (one field per LLM call) ──
+        // Each sub-pass is small enough for 4B to nail; pinned context (literal JSON arrays
+        // of allowed names) keeps cross-references consistent. See generateBrowserAtomic.
+        slog("Pass 2/2: ATOMIC sub-passes (browser Gemma; one field per call)");
+        content = await generateBrowserAtomic(skeleton, theme, runGen, sysMsg, slog, sstream);
+        const p2npcs = (content.npcs || []).length;
+        const p2items = (content.key_items || []).length;
+        const p2chain = (content.puzzle_chain || []).length;
+        slog(`Pass 2 (atomic) done: ${p2npcs} npcs, ${p2items} items, ${p2chain} chain steps`);
+        const kn = (content.key_items || []).map(k => (typeof k === "object" ? k.name : k)).filter(Boolean);
+        if (kn.length) slog(`pass2 key_items: ${kn.join(", ")}`);
       } else {
-        // ── Browser Gemma: single pass (works OK for simpler bibles) ──
-        slog("Pass 2/2: Generating gameplay content (browser)...");
+        // ── Browser Gemma: legacy single pass (kept as fallback) ──
+        slog("Pass 2/2: Generating gameplay content (browser, legacy single-shot)...");
         const pass2Prompt =
           `Theme reminder: ${theme.slice(0, 400)}${theme.length > 400 ? "…" : ""}\n\n` +
           `${forbidStockNames}\n\n` +
@@ -1470,11 +2102,53 @@
         }
       }
 
+      // Code-only auto-repair: place orphan items, snap NPCs/monsters to real rooms, drop
+      // phantom chain `gives`, ensure structured win_condition. Never invents content;
+      // never round-trips to the LLM. Runs for both atomic and legacy paths.
+      const repairs = autoRepairWorldBible(plan);
+      if (repairs.length) {
+        slog(`auto-repair: ${repairs.length} fix(es) applied`);
+        for (const f of repairs) slog(`  fix: ${f}`);
+        // Re-derive locations[].items from item_locations now that auto-repair filled gaps.
+        for (const loc of plan.locations) loc.items = [];
+        for (const [item, room] of Object.entries(plan.item_locations || {})) {
+          const target = plan.locations.find(l => l.name === room);
+          if (target && !target.items.includes(item)) target.items.push(item);
+        }
+      } else {
+        slog("auto-repair: no mechanical fixes needed");
+      }
+
       const { valid, issues } = validateWorldBible(plan);
       if (!valid) console.warn("[world_bible] Validation issues:", issues);
       const finalSummary = `Final: ${plan.locations.length} rooms, ${plan.key_items.length} items, ${plan.puzzle_chain.length} chain steps`;
       slog(valid ? `${finalSummary} — valid!` : `${finalSummary} — warnings: ${issues.join("; ")}`);
       slog(`Merged global_theme: ${plan.global_theme || plan.theme || ""}`);
+
+      // BFS-based solvability report. If gaps remain after code-only auto-repair, run the
+      // LLM micro-repair pass (single multiple-choice questions per gap — small models nail
+      // this format). Then re-validate. Skip micro-repair entirely on Ollama path (Ollama
+      // bibles are usually fine; saves an Ollama round-trip).
+      let sol = validateWorldBibleSolvability(plan);
+      slog(sol.report);
+      if (!sol.ok && !useOllama && llmPipe) {
+        slog(`micro-repair: ${sol.gaps.length} gap(s) remain after auto-repair — asking Gemma single-question fixups`);
+        const microFixes = await microRepairWorldBible(plan, runGen, slog);
+        if (microFixes.length) {
+          slog(`micro-repair: ${microFixes.length} fix(es) applied`);
+          for (const f of microFixes) slog(`  micro-fix: ${f}`);
+          // Re-derive locations[].items from item_locations (in case micro-repair changed them).
+          for (const loc of plan.locations) loc.items = [];
+          for (const [item, room] of Object.entries(plan.item_locations || {})) {
+            const target = plan.locations.find(l => l.name === room);
+            if (target && !target.items.includes(item)) target.items.push(item);
+          }
+          sol = validateWorldBibleSolvability(plan);
+          slog(`post-micro-repair ${sol.report}`);
+        } else {
+          slog("micro-repair: no fixes applied (gaps not in repairable categories)");
+        }
+      }
 
       return plan;
     }
@@ -1745,12 +2419,30 @@
     // AUTHOR WALKTHROUGH — solvability / hints (generated or synthesized)
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /** Render win_condition as printable text whether the bible uses the structured
+     *  {required_items, required_location, description} object or the legacy string. */
+    function winConditionText(wb) {
+      if (!wb || !wb.win_condition) return "";
+      const wc = wb.win_condition;
+      if (typeof wc === "string") return wc;
+      if (typeof wc === "object") {
+        if (wc.description && String(wc.description).trim()) return String(wc.description);
+        const item = (wc.required_items || [])[0];
+        const loc = wc.required_location;
+        if (item && loc) return `Obtain ${item} and return to ${loc}`;
+        if (loc) return `Reach ${loc}`;
+        return "Complete the adventure";
+      }
+      return String(wc);
+    }
+
     /** Build a plain-text solution from structured bible fields (always available). */
     function synthesizeAuthorWalkthrough(wb) {
       if (!wb) return "";
       const lines = [];
       lines.push("=== How to win (auto-built from world bible) ===");
-      if (wb.win_condition) lines.push(`Win: ${wb.win_condition}`);
+      const wcText = winConditionText(wb);
+      if (wcText) lines.push(`Win: ${wcText}`);
       if (wb.main_arc) lines.push(`Story: ${wb.main_arc}`);
       if (Array.isArray(wb.objectives) && wb.objectives.length) {
         lines.push("Goals:");
@@ -1818,7 +2510,8 @@
       if (!wb) return "(no world bible loaded)";
       const lines = [];
       if (wb.story_arc) lines.push("Arc: " + wb.story_arc);
-      if (wb.win_condition) lines.push("Win: " + wb.win_condition);
+      const wcText = winConditionText(wb);
+      if (wcText) lines.push("Win: " + wcText);
 
       // Rooms (name + exits only)
       if (wb.locations && wb.locations.length) {
@@ -2054,9 +2747,27 @@
     function checkWinCondition(stateMgr) {
       const s = stateMgr.state;
       if (s.gameFlags.game_complete || s.gameFlags.game_won) {
-        return `VICTORY! ${activeWorldBible.win_condition}\nCongratulations, adventurer!`;
+        const wcDesc = (activeWorldBible.win_condition && typeof activeWorldBible.win_condition === "object")
+          ? (activeWorldBible.win_condition.description || "Adventure complete")
+          : (activeWorldBible.win_condition || "Adventure complete");
+        return `VICTORY! ${wcDesc}\nCongratulations, adventurer!`;
       }
-      const wc = (activeWorldBible.win_condition || "").toLowerCase();
+
+      // Structured win_condition path (preferred — atomic Pass 2 + auto-repair always set this).
+      const wcObj = activeWorldBible.win_condition;
+      if (wcObj && typeof wcObj === "object" && Array.isArray(wcObj.required_items) && wcObj.required_location) {
+        const invLower = new Set((s.inventory || []).map(i => String(i).toLowerCase()));
+        const requiredHave = wcObj.required_items.length > 0 &&
+          wcObj.required_items.every(it => invLower.has(String(it).toLowerCase()));
+        const atLocation = String(s.location || "").toLowerCase() === String(wcObj.required_location).toLowerCase();
+        if (requiredHave && atLocation) {
+          return `VICTORY! ${wcObj.description || "Adventure complete"}\nCongratulations, adventurer!`;
+        }
+        return null;
+      }
+
+      // Legacy substring path (kept for backward compat with old saves and Ollama bibles).
+      const wc = (typeof wcObj === "string" ? wcObj : "").toLowerCase();
       // LLM/Ollama bibles may omit key_items[].name or use odd shapes — guard before toLowerCase.
       const winItems = (activeWorldBible.key_items || [])
         .filter(k => k && typeof k.name === "string" && k.name.length && wc.includes(k.name.toLowerCase()))
@@ -2065,7 +2776,7 @@
         for (const loc of (activeWorldBible.locations || [])) {
           if (!loc || typeof loc.name !== "string") continue;
           if (wc.includes(loc.name.toLowerCase()) && s.location.toLowerCase() === loc.name.toLowerCase()) {
-            return `VICTORY! ${activeWorldBible.win_condition}\nCongratulations, adventurer!`;
+            return `VICTORY! ${wc}\nCongratulations, adventurer!`;
           }
         }
       }
@@ -2416,7 +3127,7 @@
       pre.style.fontSize = "10px";
       const lines = [];
       lines.push(`Arc: ${wb.main_arc || "(none)"}`);
-      lines.push(`Win: ${wb.win_condition || "(none)"}`);
+      lines.push(`Win: ${winConditionText(wb) || "(none)"}`);
       lines.push("");
       if (wb.locations) {
         lines.push("MAP:");
