@@ -123,8 +123,8 @@
     .input-row { display: flex; gap: 6px; margin-bottom: 8px; }
     .input-row input { flex: 1; }
     .input-row button { flex: none; }
-    .tabbar { display: flex; gap: 4px; flex-wrap: wrap; justify-content: space-between; }
-    .tabbar button { flex: 1 1 22%; min-width: 0; font-size: 12px; padding: 8px 4px; }
+    .tabbar { display: flex; gap: 4px; }
+    .tabbar button { flex: 1 1 0; min-width: 0; font-size: 11px; padding: 9px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     /* ── Modals ── */
     #modal-bg { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,0.6); display: none; align-items: flex-end; justify-content: center; }
@@ -227,22 +227,18 @@
     <div class="bottom" id="bottom" style="display:none">
       <div class="age-row">
         <button class="primary ageup" id="btn-ageup">Age Up +1 🎂</button>
-        <button id="btn-menu-relationships" title="Relationships">👪</button>
-        <button id="btn-menu-assets" title="Assets & Investments">💹</button>
+        <button id="btn-awards" title="Achievements">🏅</button>
+        <button id="btn-menu" title="Save / New life">☰</button>
       </div>
       <div class="input-row">
         <input id="action-input" placeholder="Type anything you want to do…" autocomplete="off" />
         <button id="btn-send">Do</button>
       </div>
       <div class="tabbar">
+        <button data-tab="occupation">💼 Occupation</button>
         <button data-tab="activities">🧠 Activities</button>
-        <button data-tab="careers">💼 Careers</button>
-        <button data-tab="crime">🦹 Crime</button>
-        <button data-tab="casino">🎰 Casino</button>
-        <button data-tab="relationships">👪 Family</button>
+        <button data-tab="relationships">👪 Relationships</button>
         <button data-tab="assets">💹 Assets</button>
-        <button data-tab="achievements">🏅 Awards</button>
-        <button data-tab="menu">☰ Menu</button>
       </div>
       <div class="dbg-toggle" id="dbg-toggle">▸ Debug</div>
       <div id="dbg"></div>
@@ -715,7 +711,7 @@
     } else {
       log("casino", `You bet $${wager.toLocaleString()} on ${g.label} and lost it.`);
     }
-    autosave(); renderAll(); openModal("casino"); // keep casino open
+    autosave(); renderAll(); openModal("activities"); // keep the casino section open to keep betting
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1063,10 +1059,10 @@ Rules: effects are DELTAS only (never set absolute values). Keep each stat delta
     if (/gym|work ?out|exercise/.test(t)) { doActivity("mindBody", "gym"); return "Interpreted as: go to the gym"; }
     if (/study|library|learn|read/.test(t)) { doActivity("mindBody", "library"); return "Interpreted as: study at the library"; }
     if (/meditat|relax|calm/.test(t)) { doActivity("mindBody", "meditate"); return "Interpreted as: meditate"; }
-    if (/steal|shoplift|rob/.test(t)) { openModal("crime"); return "Opening Crime menu"; }
+    if (/steal|shoplift|rob/.test(t)) { openModal("activities"); return "Opening Activities (Crime)"; }
     if (/invest|stock|buy shares/.test(t)) { openModal("assets"); return "Opening Assets menu"; }
-    if (/job|work|apply/.test(t)) { openModal("careers"); return "Opening Careers menu"; }
-    if (/gambl|casino|bet/.test(t)) { openModal("casino"); return "Opening Casino menu"; }
+    if (/job|work|apply|school|university|college/.test(t)) { openModal("occupation"); return "Opening Occupation (School & Job)"; }
+    if (/gambl|casino|bet/.test(t)) { openModal("activities"); return "Opening Activities (Casino)"; }
     return null;
   }
 
@@ -1284,7 +1280,7 @@ Rules: effects are DELTAS only (never set absolute values). Keep each stat delta
   function renderHeader() {
     const c = game.character;
     $("h-name").textContent = c.name;
-    $("h-sub").textContent = `Age ${c.age} · ${lifeStageLabel(c.lifeStage)} · ${c.country}${c.job ? " · " + c.job.levelName + " " + c.job.title : ""}${game.prison.inPrison ? " · 🔒 PRISON" : ""}`;
+    $("h-sub").textContent = `Age ${c.age} · ${c.country} · ${occupationLine(c)}`;
     $("h-money").textContent = fmtMoney(c.money);
     const bars = $("h-bars"); bars.innerHTML = "";
     for (const [k, icon, color] of BAR_DEFS) {
@@ -1353,10 +1349,8 @@ Rules: effects are DELTAS only (never set absolute values). Keep each stat delta
 
   function openModal(tab) {
     if (tab === "menu") return openMenuModal();
+    if (tab === "occupation") return openOccupation();
     if (tab === "activities") return openActivities();
-    if (tab === "careers") return openCareers();
-    if (tab === "crime") return openCrime();
-    if (tab === "casino") return openCasino();
     if (tab === "relationships") return openRelationships();
     if (tab === "assets") return openAssets();
     if (tab === "achievements") return openAchievements();
@@ -1369,58 +1363,112 @@ Rules: effects are DELTAS only (never set absolute values). Keep each stat delta
     return parts.join(", ");
   }
 
+  // ── readable education / occupation status ──
+  function eduStatus(c) {
+    const ed = c.education;
+    if (ed.inSchool) {
+      if (ed.level === "elementary") return "In elementary school";
+      if (ed.level === "middle") return "In middle school";
+      if (ed.level === "high") return "In high school";
+      if (ed.level === "college") { const d = DATA.DEGREES.find(x => x.id === ed.degree); return `In university — year ${ed._collegeYears || 0}/4${d ? " (" + d.label + ")" : ""}`; }
+      return "In school";
+    }
+    if (ed.level === "highGrad") return "High school graduate";
+    if (ed.level === "collegeGrad" || ed.level === "gradGrad") { const d = DATA.DEGREES.find(x => x.id === ed.degree); return `${ed.level === "gradGrad" ? "Graduate degree" : "College graduate"}${d ? " in " + d.label : ""}`; }
+    if (["none", "elementary", "middle", "high"].includes(ed.level)) return "No diploma yet";
+    return "—";
+  }
+  function occupationLine(c) {
+    if (game.prison.inPrison) return "🔒 In prison";
+    if (c.job) return `${c.job.levelName} ${c.job.title}`;
+    if (c.education.inSchool) return eduStatus(c);
+    if (c.age >= 16) return "Unemployed";
+    return eduStatus(c);
+  }
+
   function openActivities() {
     modalShell("🧠 Activities", `<div id="acts"></div>`);
     const wrap = $("acts");
-    const sections = [["Mind & Body", "mindBody"], ["Doctor", "doctor"], ["Education", "education"]];
-    for (const [label, cat] of sections) {
-      const h = document.createElement("div"); h.className = "sub-h"; h.textContent = label; wrap.appendChild(h);
+    const add = (label) => { const h = document.createElement("div"); h.className = "sub-h"; h.textContent = label; wrap.appendChild(h); };
+    // Mind & Body, Doctor
+    for (const [label, cat] of [["Mind & Body", "mindBody"], ["Doctor", "doctor"]]) {
+      add(label);
       for (const act of (DATA.ACTIVITIES[cat] || [])) {
         const gated = (act.minAge != null && game.character.age < act.minAge) || (act.requires && !requirementsMet(act.requires));
         wrap.appendChild(optRow(act.label, effectsLabel(act) + (act.minAge ? ` · ${act.minAge}+` : ""), "Do", () => doActivity(cat, act.id), gated || game.prison.inPrison));
       }
     }
-    // college enrollment
-    if (game.character.education.level === "highGrad") {
-      const h = document.createElement("div"); h.className = "sub-h"; h.textContent = "College"; wrap.appendChild(h);
-      for (const d of DATA.DEGREES) wrap.appendChild(optRow("Study " + d.label, `needs ${d.minSmarts} smarts${d.grad ? " · grad degree" : ""}`, "Enroll", () => applyCollege(d.id), game.character.stats.smarts < d.minSmarts));
-    }
-  }
-
-  function openCareers() {
-    const c = game.character;
-    let html = "";
-    if (c.job) html += `<div class="sub-h">Current Job</div><div class="opt"><div class="info"><div class="t">${c.job.levelName} ${c.job.title}</div><div class="d">$${c.job.salary.toLocaleString()}/yr · performance ${c.job.performance} · ${c.job.yearsHeld||0}y</div></div></div>
-      <div class="row" style="margin-bottom:10px"><button id="j-work">Work harder</button><button id="j-promo">Ask for promotion</button><button id="j-quit">Quit</button></div>`;
-    html += `<div class="sub-h">Open Positions</div><div id="job-list"></div>`;
-    modalShell("💼 Careers", html);
-    if (c.job) { $("j-work").onclick = workHarder; $("j-promo").onclick = askPromotion; $("j-quit").onclick = quitJob; }
-    const list = $("job-list");
-    for (const car of DATA.CAREERS) {
-      const ok = requirementsMet(car.requires);
-      const req = car.requires.degree ? `degree: ${car.requires.degree}` : car.requires.level ? car.requires.level : `${car.requires.minAge||0}+`;
-      list.appendChild(optRow(car.title, `$${car.baseSalary.toLocaleString()}/yr · needs ${req}`, "Apply", () => applyJob(car.id), !ok || game.prison.inPrison));
-    }
-  }
-
-  function openCrime() {
-    modalShell("🦹 Crime", `<div class="hint" style="color:var(--text-muted);font-size:12px;margin-bottom:8px">Higher payoffs mean higher chance of prison.</div><div id="crime-list"></div>`);
+    // Crime (BitLife groups crime under Activities)
+    add("Crime");
     for (const cr of DATA.ACTIVITIES.crime) {
       const gated = game.character.age < cr.minAge || game.prison.inPrison;
-      const desc = cr.id === "murder" ? `${Math.round(cr.catchChance*100)}% caught · ${cr.jail[0]}-${cr.jail[1]}y` : `$${cr.payout[0]}-${cr.payout[1].toLocaleString()} · ${Math.round(cr.catchChance*100)}% caught · ${cr.jail[0]}-${cr.jail[1]}y`;
-      $("crime-list").appendChild(optRow(cr.label, desc + ` · ${cr.minAge}+`, "Attempt", () => commitCrime(cr.id), gated));
+      const desc = cr.id === "murder"
+        ? `${Math.round(cr.catchChance * 100)}% caught · ${cr.jail[0]}-${cr.jail[1]}y if caught`
+        : `$${cr.payout[0]}-${cr.payout[1].toLocaleString()} · ${Math.round(cr.catchChance * 100)}% caught · ${cr.minAge}+`;
+      wrap.appendChild(optRow(cr.label, desc, "Do", () => commitCrime(cr.id), gated));
+    }
+    // Casino (shared wager input)
+    add("Casino");
+    const wagerWrap = document.createElement("div"); wagerWrap.className = "field";
+    wagerWrap.innerHTML = `<label>Wager ($)</label><input id="wager" type="number" value="${window._lastWager || 100}" min="1" />`;
+    wrap.appendChild(wagerWrap);
+    $("wager").oninput = (e) => { window._lastWager = parseInt(e.target.value || "0", 10); };
+    for (const g of DATA.ACTIVITIES.casino) {
+      const gated = game.character.age < g.minAge || game.prison.inPrison;
+      wrap.appendChild(optRow(g.label, `${Math.round(g.winChance * 100)}% win · ${g.payoutMult[0]}-${g.payoutMult[1]}x · ${g.minAge}+`, "Play", () => gamble(g.id, parseInt($("wager").value || "0", 10)), gated));
     }
   }
 
-  function openCasino() {
-    const wager = (window._lastWager || 100);
-    modalShell("🎰 Casino", `<div class="field"><label>Wager ($)</label><input id="wager" type="number" value="${wager}" min="1" /></div><div id="casino-list"></div>`);
-    $("wager").oninput = (e) => { window._lastWager = parseInt(e.target.value || "0", 10); };
-    for (const g of DATA.ACTIVITIES.casino) {
-      const gated = game.character.age < g.minAge;
-      $("casino-list").appendChild(optRow(g.label, `${Math.round(g.winChance*100)}% win · ${g.payoutMult[0]}-${g.payoutMult[1]}x · ${g.minAge}+`, "Play", () => gamble(g.id, parseInt($("wager").value || "0", 10)), gated));
+  // Occupation = School + Job in one place (matches BitLife's Occupation tab)
+  function openOccupation() {
+    const c = game.character;
+    modalShell("💼 Occupation", `<div id="occ"></div>`);
+    const wrap = $("occ");
+    const add = (label) => { const h = document.createElement("div"); h.className = "sub-h"; h.textContent = label; wrap.appendChild(h); };
+
+    // ── School ──
+    add("School");
+    const status = document.createElement("div"); status.className = "opt";
+    status.innerHTML = `<div class="info"><div class="t">${eduStatus(c)}</div><div class="d">Smarts ${c.stats.smarts}. School from age 5–18 is automatic; choose university after high school.</div></div>`;
+    wrap.appendChild(status);
+    if (c.education.inSchool && c.education.level !== "college") {
+      // grade-school study options
+      for (const act of (DATA.ACTIVITIES.education || [])) {
+        const gated = act.requires && !requirementsMet(act.requires);
+        wrap.appendChild(optRow(act.label, effectsLabel(act), "Do", () => doActivity("education", act.id), gated || game.prison.inPrison));
+      }
+    }
+    if (c.education.level === "highGrad") {
+      const note = document.createElement("div"); note.className = "hint"; note.style.cssText = "color:var(--text-muted);font-size:12px;margin:2px 0 6px";
+      note.textContent = "Go to university to unlock higher-paying careers (doctor, lawyer, engineer…).";
+      wrap.appendChild(note);
+      for (const d of DATA.DEGREES) {
+        wrap.appendChild(optRow("University: " + d.label, `needs ${d.minSmarts} smarts${d.grad ? " · graduate degree" : ""}`, "Enroll", () => applyCollege(d.id), c.stats.smarts < d.minSmarts || game.prison.inPrison));
+      }
+    }
+
+    // ── Job ──
+    add("Job");
+    if (c.job) {
+      const cur = document.createElement("div"); cur.className = "opt";
+      cur.innerHTML = `<div class="info"><div class="t">${c.job.levelName} ${c.job.title}</div><div class="d">$${c.job.salary.toLocaleString()}/yr · performance ${c.job.performance} · ${c.job.yearsHeld || 0} yr held</div></div>`;
+      wrap.appendChild(cur);
+      const ctr = document.createElement("div"); ctr.className = "row"; ctr.style.marginBottom = "10px";
+      const mk = (label, fn) => { const b = document.createElement("button"); b.textContent = label; b.onclick = fn; b.disabled = game.prison.inPrison; return b; };
+      ctr.appendChild(mk("Work harder", workHarder)); ctr.appendChild(mk("Ask promotion", askPromotion)); ctr.appendChild(mk("Quit", quitJob));
+      wrap.appendChild(ctr);
+    }
+    const openH = document.createElement("div"); openH.className = "hint"; openH.style.cssText = "color:var(--text-muted);font-size:12px;margin:2px 0 6px";
+    openH.textContent = c.job ? "Other positions you qualify for:" : "Jobs you can apply for:";
+    wrap.appendChild(openH);
+    for (const car of DATA.CAREERS) {
+      if (c.job && car.id === c.job.id) continue;
+      const ok = requirementsMet(car.requires);
+      const req = car.requires.degree ? `needs ${car.requires.degree} degree` : car.requires.level ? `needs ${eduReqLabel(car.requires.level)}` : `age ${car.requires.minAge || 0}+`;
+      wrap.appendChild(optRow(car.title, `$${car.baseSalary.toLocaleString()}/yr · ${req}`, "Apply", () => applyJob(car.id), !ok || game.prison.inPrison));
     }
   }
+  function eduReqLabel(level) { return level === "highGrad" ? "high school diploma" : level; }
 
   function openRelationships() {
     modalShell("👪 Relationships", `<div id="rel-list"></div>`);
@@ -1633,8 +1681,8 @@ Rules: effects are DELTAS only (never set absolute values). Keep each stat delta
   $("btn-send").addEventListener("click", () => { const v = $("action-input").value; $("action-input").value = ""; handleTypedAction(v); });
   $("action-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { const v = $("action-input").value; $("action-input").value = ""; handleTypedAction(v); } });
   document.querySelectorAll(".tabbar button[data-tab]").forEach(b => b.addEventListener("click", () => openModal(b.dataset.tab)));
-  $("btn-menu-relationships").addEventListener("click", () => openModal("relationships"));
-  $("btn-menu-assets").addEventListener("click", () => openModal("assets"));
+  $("btn-awards").addEventListener("click", () => openModal("achievements"));
+  $("btn-menu").addEventListener("click", () => openModal("menu"));
   $("dbg-toggle").addEventListener("click", () => { const d = $("dbg"); const open = d.style.display === "block"; d.style.display = open ? "none" : "block"; $("dbg-toggle").textContent = (open ? "▸" : "▾") + " Debug"; });
 
   // ── go ──

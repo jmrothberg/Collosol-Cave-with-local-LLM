@@ -238,12 +238,18 @@ common life-event scenes during idle time — pausing while the player's typed a
 `manifest.json` ahead of time (covers priority #1).
 
 ### 4.6 UI (single-column, mobile-ish, dark theme)
-Header card (avatar + name/age/stage + 4 stat bars + money + ribbons) · scrollable **feed** (the life
-log; entries can carry an inline scene image) · big **Age Up** button (disabled during a pending
-event / prison-only / death) · **free-text input** (the only LLM path) · bottom **tab bar** opening
-**modals** (Activities, Careers, Crime, Casino, Relationships, Assets/Investments, Achievements,
-Menu) · collapsible **Debug** panel (last LLM prompt/response sizes, JSON parse status, effects) ·
+Header card (avatar + name/age/stage + the 4 stat bars + money + ribbons + an occupation/school
+status line) · scrollable **feed** (the life log; entries can carry an inline scene image) · big
+**Age Up** button (disabled during a pending event / prison-only / death) with small 🏅 Awards + ☰
+Menu icons · **free-text input** (the only LLM path) · a BitLife-style **4-tab bottom bar** opening
+**modals**: **💼 Occupation** (School + Job in one place), **🧠 Activities** (Mind & Body, Doctor,
+Crime, Casino), **👪 Relationships**, **💹 Assets/Investments** · collapsible **Debug** panel ·
 event-choice popup · death screen. Reuses the adventure's CSS tokens and overlay/debug patterns.
+
+> **Interface note (kept faithful to real BitLife):** education lives under **Occupation**, not
+> Activities — K–12 is automatic (`advanceEducation()` / `eduStatus()`), and university is an explicit
+> "Enroll" action shown once you're a high-school graduate. **Crime and Casino are under Activities**,
+> as in the original. The header always shows your current occupation/school via `occupationLine()`.
 
 ### 4.7 Boot flow
 `loadData()` → picker (New Life / Load Slot / AI options incl. Ollama + "Skip models") →
