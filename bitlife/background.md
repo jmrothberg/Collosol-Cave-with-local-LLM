@@ -1,37 +1,44 @@
 # BACKGROUND.md — everything a new LLM needs to improve & debug this BitLife clone
 
-> **Read this first.** It is the single source of truth for the project's intent, the original
-> BitLife mechanics we are cloning, the two (and only two) advances we add, the exact architecture
-> of this codebase, the known gaps to reach feature parity, and how to run/debug it.
+> **Read this first.** It is the single source of truth for the project's intent — a **faithful
+> clone of BitLife** whose only additions are local AI for **understanding** (typed input), **greater
+> description** (narration), and **illustration** (images) — plus the original BitLife mechanics we
+> are cloning, the exact architecture of this codebase, the known gaps to reach feature parity, and
+> how to run/debug it.
 
 ---
 
 ## 0. The one-sentence goal
 
-Build a game that plays **exactly like BitLife by Candywriter, LLC** — a text/button life
-simulator — and make it **as complete and faithful to the original as possible**, adding **only two
-advances**:
+**Build a faithful CLONE of BitLife by Candywriter, LLC** — the same text/button life simulator —
+and add **local, in-browser AI for exactly three things, and nothing else**:
 
-1. **A LOCAL LLM that runs in the browser** so the player can *type free-form actions* and have them
-   interpreted into game effects + narration (real BitLife is buttons-only).
-2. **A LOCAL image diffuser that runs in the browser** to illustrate the character (avatar) and life
-   events (real BitLife uses fixed emoji/clip-art).
+1. **Understanding** — a LOCAL LLM in the browser interprets *free-typed actions* and maps them to
+   game effects (real BitLife is buttons-only; this lets the player type anything).
+2. **Greater description** — the same LLM writes *richer narration* for what happens.
+3. **Illustration** — a LOCAL image diffuser in the browser draws the character **avatar** and **life
+   events** (real BitLife uses fixed emoji/clip-art).
 
-Everything else should converge toward real BitLife. The core game must remain **premade and
-deterministic** — it is a real simulation engine with buttons, *not* an "LLM pretends to be a game."
-The LLM and the diffuser are **enhancements layered on top**, and the game must stay fully playable
-with both turned off.
+**Everything else must match real BitLife.** Layout, menus, tabs, and mechanics should mirror the
+original game — **only change the interface to match something the real BitLife actually does**
+(verify against the wiki / the live game before changing layout). The core game is **premade and
+deterministic** — a real simulation engine with buttons, *not* an "LLM pretends to be a game." The two
+AI components (one LLM providing #1 + #2, one diffuser providing #3) are **enhancements layered on
+top**, and the game must stay fully playable with them turned off.
 
 ### Hard design rules (do not violate)
+- **Clone, don't reinvent.** Match BitLife's layout/menus/mechanics. Do not add UI the real game
+  doesn't have; do not add features unless the original has them and ours is missing them.
 - **Deterministic-first.** The engine never depends on the LLM or the diffuser. Buttons run instant
   local logic. Both AIs load in the background and only *enhance*. The game must be 100% playable
   with "Skip loading AI models" checked.
+- **AI does exactly three jobs:** understanding typed input, greater description, illustration.
 - **The LLM only touches the free-text input box.** Buttons never call the LLM.
 - **The LLM can flavor but never break the game.** Every effect it proposes is clamped/sanitized.
 - **Reproducibility.** All engine randomness flows through one seeded RNG (mulberry32). A given seed
   reproduces a life.
-- **Faithfulness over novelty.** When in doubt, do what BitLife does. The only intentional
-  divergences are the two advances above.
+- **Faithfulness over novelty.** When in doubt, do what BitLife does. The only intentional divergences
+  are the three AI capabilities above.
 
 ---
 
@@ -123,7 +130,7 @@ years you open menus to take actions. Keep this section as the feature checklist
 
 ---
 
-## 3. The two advances (how they work technically)
+## 3. The AI layer — understanding, description, illustration (how it works technically)
 
 Both reuse this repo's proven in-browser stack from `browser_adventure/adventure.html` and
 `llm_adventure/vendor/web-txt2img/`. **Do not reinvent these — copy the working patterns.**

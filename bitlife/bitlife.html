@@ -96,7 +96,7 @@
     .who .money { font-size: 15px; color: var(--money); font-weight: 700; margin-top: 2px; }
     .ribbons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
     .ribbon { font-size: 11px; background: var(--panel-alt); border: 1px solid var(--accent-dim); border-radius: 10px; padding: 1px 7px; }
-    .bars { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
+    .bars { margin: 2px 0 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
     .bar-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
     .bar-row .lbl { width: 16px; text-align: center; }
     .bar-track { flex: 1; height: 7px; background: var(--border); border-radius: 4px; overflow: hidden; }
@@ -219,12 +219,13 @@
         </div>
       </div>
       <div class="ribbons" id="h-ribbons"></div>
-      <div class="bars" id="h-bars"></div>
     </header>
 
     <main class="feed" id="feed" style="display:none"></main>
 
     <div class="bottom" id="bottom" style="display:none">
+      <!-- BitLife shows the four stat bars at the bottom, above the Age button -->
+      <div class="bars" id="h-bars"></div>
       <div class="age-row">
         <button class="primary ageup" id="btn-ageup">Age Up +1 🎂</button>
         <button id="btn-awards" title="Achievements">🏅</button>

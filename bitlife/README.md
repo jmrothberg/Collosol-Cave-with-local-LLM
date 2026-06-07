@@ -1,22 +1,29 @@
 # BitLife — local-LLM life simulator
 
-A **BitLife-style life simulator** that runs entirely in your browser. The game engine is **premade
-and deterministic** — you live a life by clicking **Age Up** and menu buttons, and it works
-**instantly with no AI models loaded at all**. The only two additions over real BitLife:
+## 🎯 Project goal
 
-1. **A local in-browser LLM** (Gemma 4 E4B via Transformers.js / WebGPU) interprets anything you
-   **type** in the free-text box into bounded, sanitized game effects + narration.
-2. **A local in-browser diffuser** (Stable Diffusion 1.5) paints your character **avatar** and
+**This is a faithful clone of BitLife (by Candywriter, LLC)** — the same life simulator you play with
+buttons, aged year by year. The game engine is **premade and deterministic** and runs **instantly
+with no AI at all**. We add **local, in-browser AI for exactly three things, and nothing else**:
+
+1. **Understanding** — a local LLM (Gemma 4 E4B, Transformers.js / WebGPU) interprets anything you
+   **type** in the free-text box and maps it to bounded, sanitized game effects.
+2. **Greater description** — the same LLM writes richer narration for what happens to you.
+3. **Illustration** — a local diffuser (Stable Diffusion 1.5) paints your character **avatar** and
    **life-event scenes**.
+
+Everything else should match real BitLife. **Layout, menus, and mechanics should mirror the original**
+— only change the interface to match something the real game actually does. The AI is a layer on top;
+the game must always stay fully playable with the AI turned off.
 
 It includes stats, yearly random events, activities, careers/education, crime → prison, casino, a
 stock market with **insider trading** (the "Martha" achievement), real estate, pets, fame,
 achievements/ribbons, seeded reproducible lives, and multiple save slots.
 
 > **Continuing this project / handing off to another LLM?** Read **[BACKGROUND.md](./background.md)**
-> first — it is the full brief: original goals, how real BitLife works (with sources), the two
-> advances in detail, the complete code architecture, the roadmap to feature parity, and debugging
-> notes. This README is the quick-start + "everything you need to start over."
+> first — it is the full brief: the goal above, how real BitLife works (with sources), the AI layer in
+> detail, the complete code architecture, the roadmap to feature parity, and debugging notes. This
+> README is the quick-start + "everything you need to start over."
 
 ---
 
