@@ -1,358 +1,225 @@
-# BACKGROUND.md — everything a new LLM needs to improve & debug this BitLife clone
+# BitLife clone — developer guide
 
-> **Read this first.** It is the single source of truth for the project's intent — a **faithful
-> clone of BitLife** whose only additions are local AI for **understanding** (typed input), **greater
-> description** (narration), and **illustration** (images) — plus the original BitLife mechanics we
-> are cloning, the exact architecture of this codebase, the known gaps to reach feature parity, and
-> how to run/debug it.
+A concise reference for continuing this project: **how to add features, debug, and make it more
+realistic / closer to the original BitLife.** Read this once and you have everything you need.
 
----
-
-## 0. The one-sentence goal
-
-**Build a faithful CLONE of BitLife by Candywriter, LLC** — the same text/button life simulator —
-and add **local, in-browser AI for exactly three things, and nothing else**:
-
-1. **Understanding** — a LOCAL LLM in the browser interprets *free-typed actions* and maps them to
-   game effects (real BitLife is buttons-only; this lets the player type anything).
-2. **Greater description** — the same LLM writes *richer narration* for what happens.
-3. **Illustration** — a LOCAL image diffuser in the browser draws the character **avatar** and **life
-   events** (real BitLife uses fixed emoji/clip-art).
-
-**Everything else must match real BitLife.** Layout, menus, tabs, and mechanics should mirror the
-original game — **only change the interface to match something the real BitLife actually does**
-(verify against the wiki / the live game before changing layout). The core game is **premade and
-deterministic** — a real simulation engine with buttons, *not* an "LLM pretends to be a game." The two
-AI components (one LLM providing #1 + #2, one diffuser providing #3) are **enhancements layered on
-top**, and the game must stay fully playable with them turned off.
-
-### Hard design rules (do not violate)
-- **Clone, don't reinvent.** Match BitLife's layout/menus/mechanics. Do not add UI the real game
-  doesn't have; do not add features unless the original has them and ours is missing them.
-- **Deterministic-first.** The engine never depends on the LLM or the diffuser. Buttons run instant
-  local logic. Both AIs load in the background and only *enhance*. The game must be 100% playable
-  with "Skip loading AI models" checked.
-- **AI does exactly three jobs:** understanding typed input, greater description, illustration.
-- **The LLM only touches the free-text input box.** Buttons never call the LLM.
-- **The LLM can flavor but never break the game.** Every effect it proposes is clamped/sanitized.
-- **Reproducibility.** All engine randomness flows through one seeded RNG (mulberry32). A given seed
-  reproduces a life.
-- **Faithfulness over novelty.** When in doubt, do what BitLife does. The only intentional divergences
-  are the three AI capabilities above.
+The game lives in one self-contained file, `bitlife/bitlife.html`, with content in
+`bitlife/bitlife_data.json`. It reuses the in-browser AI stack from this repo's `browser_adventure`
+and `llm_adventure/vendor/web-txt2img/`.
 
 ---
 
-## 1. The original ask (verbatim intent)
+## 1. Goal & rules
 
-The user wants a game "just like BitLife by Candywriter": you have buttons to push, you age up year
-by year, random things happen, you can do crime, gamble, work, have relationships, and **do insider
-trading**. It should be a **fully working HTML version**. The two differences from real BitLife:
-you can **type** to it (interpreted by a **small local LLM**), and it has **graphics from the same
-local diffuser** used in this repo's "local LLM adventure" game. As much art as practical should be
-**pre-generated** (ahead of time and/or on first run) so play is smooth.
+**This is a faithful clone of BitLife (Candywriter, LLC)** — a button-driven, age-up life simulator.
+The only additions are local, in-browser AI for three things:
+
+1. **Understanding** — a local LLM interprets free-typed actions and maps them to game effects.
+2. **Greater description** — the same LLM writes richer narration.
+3. **Illustration** — a local Stable Diffusion model draws the avatar and life-event scenes.
+
+**Hard rules (do not violate):**
+- **Clone, don't reinvent.** Match BitLife's layout, menus, and mechanics. Verify against the wiki or
+  the live game before changing the UI; don't add interface the real game lacks. Add features only if
+  the original has them and ours is missing them.
+- **Deterministic-first.** The engine never depends on the AI. It must be 100% playable with
+  "Skip loading AI models". The LLM and diffuser are background enhancements only.
+- **LLM only on the free-text box.** Buttons run instant local logic, never the LLM.
+- **AI can't break the game.** Every LLM effect is clamped via `sanitizeLlmEffects → applyEffects →
+  clampStat` (0–100).
+- **Reproducible.** All randomness uses one seeded `mulberry32` RNG; a seed reproduces a life.
+- **Prefer data over code.** Add content to `bitlife_data.json`, not new engine branches, when possible.
 
 ---
 
-## 2. How real BitLife works (the spec we are cloning)
+## 2. How real BitLife works (the target spec)
 
-BitLife is a turn-based life simulator. You are born, then press **Age** to advance one year at a
-time until death. Each year, random events pop up with multiple-choice responses, and between
-years you open menus to take actions. Keep this section as the feature checklist.
+Born → press **Age** to advance one year → random events pop up as multiple-choice popups → between
+years, open menus to act. Use this as the parity checklist; pull exact event wording and lists from
+the wiki.
 
-### 2.1 Core stats (0–100 bars, shown at the bottom)
-- **Happiness**, **Health**, **Smarts**, **Looks** — the four pillars.
-- Later unlockable bars: **Fame** (if you become famous) and **Approval** (politics).
-- Stats drift up/down a few points each age-up. Higher stats → longer, more successful life.
-  Health reaching 0 (or old age) → death. **Money** is a number (can go negative); **Age** increments.
+- **Stats** (0–100 bars, shown at the **bottom**): Happiness, Health, Smarts, Looks (+ Fame, Approval
+  later). Money is a number (can go negative); Age increments. Stats drift each year; health 0 or old
+  age → death.
+- **Random events** differ by life stage (childhood vs adult): bully, classmate acts up, adopt a pet,
+  disease, first crush, party, speeding ticket, health scare, etc. — each a popup with 2–4 choices and
+  success/fail outcomes.
+- **Activities menu** (BitLife groups these here): **Mind & Body** (gym, library, meditate, spa),
+  **Doctor** (checkup, therapy, plastic surgery, treat disease), **Crime** (shoplift, pickpocket,
+  burglary, GTA, assault, murder → jail), **Casino** (blackjack, slots, roulette, horses), plus
+  tattoos, emigrate, etc.
+- **Occupation menu:** **Education at the top** (school is automatic K–12; university with a major →
+  optional grad/professional school), then **Jobs** (apply with requirements → salary → work harder →
+  promotion). Education unlocks high-paying careers (doctor=medicine, lawyer=law, engineer…). Special
+  careers: royalty, military, famous, athlete, mafia, politics.
+- **Assets / Investments:** buy/sell stocks, crypto, bonds, penny stocks, funds, real estate, cars.
+  Prices fluctuate; **crypto is the only taxable asset** when sold. A **financial advisor** NPC can
+  manage money. **Insider trading:** tips from friends/family; buying then selling on them can trigger
+  an **arrest** → ~20-year sentence (pleading guilty roughly halves it) and the **"Martha"** ribbon.
+- **Other systems:** achievements/**ribbons** (life-summary at death), real estate/vehicles/pets,
+  prison (parole, riots, escape, contraband), deep relationships (friends, coworkers, exes, in-laws,
+  family tree, custody, inheritance), fame (social media, books, music, movies), and (paid) God Mode /
+  generations (continue as your child).
 
-### 2.2 The Age button & random events
-- Press **Age** → one year passes → 0+ random life events appear as popups needing a decision.
-- **Childhood events differ from adult events.** Examples: a bully teases you (do nothing / report /
-  talk / fight back / ask older sibling) with success/fail outcomes; a classmate acts up (ignore /
-  report / laugh / assault); adopt a stray pet; catch a disease; school club invitations; first
-  crush; underage party; speeding ticket; health scare; etc.
-
-### 2.3 Activities menu (grouped categories, age/requirement-gated)
-- **Mind & Body:** Gym (health/looks), Library (smarts), Meditate (happiness/health), Spa, Walk.
-- **Doctor:** checkups, therapy, plastic surgery (looks), dentist; treat diseases.
-- **School / Work:** attend school, study harder, apply for jobs, work harder, ask for promotion, quit.
-- **Love / Relationships:** interact with parents, siblings, friends, partners, children:
-  Compliment, Conversation, Give Money, Gift, Spend Time, Movie/Activity, Insult; date → propose →
-  marry → have kids; people age and die.
-- **Crime:** petty theft/shoplift, pickpocket, burglary, grand theft auto, assault, murder — each a
-  payoff vs. a chance of getting caught → **jail** (sentence; can plead, riot, or attempt escape).
-- **Casino:** blackjack, slots, roulette, horse races, etc. — gamble money.
-- (Also: Activities for tattoos, gym memberships, witch doctor, prostitution, emigrate, surrender to
-  death, mind & body, etc. — see the wiki for the full list.)
-
-### 2.4 Jobs / careers
-- Apply with requirements (age, education, sometimes specific degree). Get a salary; **work harder**
-  raises performance; **ask for promotion** climbs the ladder and raises pay.
-- **Education** raises Smarts and unlocks high-paying careers: Doctor (medicine degree), Lawyer (law),
-  Engineer, Pilot, Actor (fame), CEO, etc. School → graduate high school → college (pick a major) →
-  optionally graduate/professional school.
-- **Special careers:** royalty, military, famous (actor/musician/influencer), athlete, mafia.
-
-### 2.5 Assets & Investments (the stock-market update + insider trading)
-- **Assets → Investments** screen. Buy/sell **stocks, crypto, bonds, penny stocks, funds**, plus
-  **real estate**, cars, etc. Stocks/bonds indicate market health; crypto/funds show trends.
-- Prices fluctuate over time. **Crypto is the only taxable asset** when sold.
-- **Financial advisor** can manage investments (and can be dated/married — they're rich).
-- **INSIDER TRADING:** after the expansion, you get popups from friends/family with stock tips. If
-  you buy and then sell based on that information, you may be **arrested for insider trading**. Being
-  found guilty grants the **"Martha"** achievement (a Martha Stewart reference). The sentence is
-  ~20 years; pleading guilty roughly halves it.
-
-### 2.6 Other systems (extras to converge toward)
-- **Achievements / Ribbons** awarded for life outcomes (e.g., Rich, Scholar, Married, Jailbird,
-  Centenarian, Famous, Martha). A life ends with a summary ribbon.
-- **Real estate**, **vehicles**, **pets**.
-- **Prison:** sentences, parole, riots, escape attempts, contraband.
-- **Relationships depth:** friends, coworkers, exes, in-laws, family tree, custody, wills/inheritance.
-- **Fame** path: go viral, write books, music, movies, social media.
-- **God Mode / Bitizen** (paid in original): edit stats, surrender, time machine, generations
-  (continue as your child after death).
-
-### 2.7 Sources (verify mechanics & expand content here)
-- BitLife Wiki — Stats: https://bitlife-life-simulator.fandom.com/wiki/Stats
-- BitLife Wiki — Activities: https://bitlife-life-simulator.fandom.com/wiki/Activities
-- BitLife Wiki — Events: https://bitlife-life-simulator.fandom.com/wiki/Events
-- BitLife Wiki — Childhood events: https://bitlife-life-simulator.fandom.com/wiki/Events/Childhood_events
+**Sources** — pull exact wording/lists from these:
+- Stats: https://bitlife-life-simulator.fandom.com/wiki/Stats
+- Activities: https://bitlife-life-simulator.fandom.com/wiki/Activities
+- Events: https://bitlife-life-simulator.fandom.com/wiki/Events
+- Childhood events: https://bitlife-life-simulator.fandom.com/wiki/Events/Childhood_events
+- Casino: https://bitlife-life-simulator.fandom.com/wiki/Casino
 - Stock market / insider trading: https://www.gameskinny.com/tips/bitlife-how-to-use-the-stock-market/
-- Stock update guide: https://www.levelwinner.com/bitlife-stock-market-update-guide-everything-you-need-to-know-about-the-stock-market-update/
-- Stock update (Prima): https://primagames.com/tips/everything-added-in-the-bitlife-stock-market-update
-- General guide/tips: https://www.mrguider.org/cheats/bitlife-life-simulator-guide-tips-cheats-strategies/
-- Increase stats: https://thenerdstash.com/bitlife-how-to-increase-all-stats-looks-smarts-health-happiness/
-- Live long / mortality: https://gamerant.com/bitlife-live-long-old-age-how-diet-health-geriatric-100-years/
-
-> When adding content, prefer the Fandom wiki for exact event text, choice wording, and category
-> structure so it feels like the real game.
+- General guide: https://www.mrguider.org/cheats/bitlife-life-simulator-guide-tips-cheats-strategies/
 
 ---
 
-## 3. The AI layer — understanding, description, illustration (how it works technically)
+## 3. The AI layer (technical)
 
-Both reuse this repo's proven in-browser stack from `browser_adventure/adventure.html` and
-`llm_adventure/vendor/web-txt2img/`. **Do not reinvent these — copy the working patterns.**
+**LLM (understanding + description) — typed input only.**
+- Model `onnx-community/gemma-4-E4B-it-ONNX`, Transformers.js v4.0.1 on ONNX Runtime Web, device
+  `webgpu`→`wasm`. Sampling temp 1.0 / top_p 0.95 / top_k 64.
+- Gotcha: Gemma 4 ONNX keeps its chat template in `chat_template.jinja`, not `tokenizer_config.json`;
+  `ensureLlmChatTemplate()` fetches it explicitly — keep this or fresh loads throw.
+- Optional Ollama backend (`/api/chat`, `format:"json"`).
 
-### 3.1 Advance #1 — LOCAL in-browser LLM (typed input only)
-- **Model:** `onnx-community/gemma-4-E4B-it-ONNX` (Gemma 4 E4B, ~4B params).
-- **Runtime:** **Transformers.js v4.0.1** (`pipeline("text-generation", …, {dtype:"q4", device})`)
-  on **ONNX Runtime Web**, device `webgpu` with `wasm` fallback. Loaded from jsDelivr via an
-  importmap. ~3 GB download, cached by the browser.
-- **Critical gotcha:** Gemma 4 ONNX ships its chat template in `chat_template.jinja`, NOT in
-  `tokenizer_config.json`. Transformers.js leaves `tokenizer.chat_template` empty → `apply_chat_template`
-  throws on a fresh load. We fetch the `.jinja` explicitly (`ensureLlmChatTemplate`). Keep this.
-- **Sampling:** temp 1.0, top_p 0.95, top_k 64 (Google's recommended Gemma settings).
-- **Role in the game:** ONLY the free-text box. The model receives a compact JSON state snapshot +
-  the player's typed action and must return a small JSON directive (see §4.4). Output is parsed
-  tolerantly and **sanitized/clamped** before applying. A parse failure → narration only.
-- **Optional Ollama backend:** the same typed path can POST to a local Ollama server
-  (`/api/chat`, `format:"json"`) instead of in-browser Gemma.
-- KV-cache reuse across turns exists in the adventure but is **disabled** there due to regressions;
-  we don't use it. Streaming via `TextStreamer` is used to accumulate text.
+**Diffuser (illustration) — avatar + scenes.**
+- Stable Diffusion 1.5 (`"sd-1.5"`) via the vendored `web-txt2img` worker (`Txt2ImgWorkerClient`) in a
+  Web Worker. **Constraints:** 512×512 only, steps 20, guidance 7.5, CLIP truncates at 77 tokens →
+  keep prompts short (subject-first, ~195 chars).
 
-### 3.2 Advance #2 — LOCAL in-browser diffuser (avatar + event scenes)
-- **Model:** **Stable Diffusion 1.5** (id `"sd-1.5"`, the Microsoft WebNN ONNX build).
-- **Runtime:** the vendored **`web-txt2img`** worker (`vendor/web-txt2img/index.js` →
-  `Txt2ImgWorkerClient`), ONNX Runtime Web on WebGPU, run in a Web Worker so the UI never freezes.
-- **API:** `client = Txt2ImgWorkerClient.createDefault()`; `await client.load("sd-1.5", opts, onProgress)`;
-  `client.generate({model:"sd-1.5", prompt, seed, steps, guidanceScale}, onProgress, {busyPolicy:"queue", debounceMs:200})`
-  → `{promise}` → `{ok, blob}`.
-- **Hard constraints (from `vendor/web-txt2img/adapters/sd15.js`):** **only 512×512**; steps fixed
-  (we use **20**); guidance **7.5**; CLIP truncates at **77 tokens** → keep prompts short
-  (we cap ~195 chars, subject-first).
-- **Roles:** (a) **avatar** portrait, regenerated when the character's `appearanceHash` changes
-  (life stage / job / looks bucket / wealth bucket); (b) **event scenes** for notable moments
-  (birth, graduation, new job, wedding, baby, prison, lottery, death, promotion, home purchase).
-
-### 3.3 Why it must be served over http from the repo root
-- The worker resolves `./host.js` relative to the `index.js` import URL, and ES modules + Web Workers
-  + SharedArrayBuffer don't work on `file://`. Use the included `serve.py` (sends **COOP/COEP**
-  headers for `crossOriginIsolated`, enabling threaded WASM). Open `http://localhost:8080/index.html`.
-- Requires **Chrome/Edge 113+ with WebGPU** for good performance (WASM fallback works, slow).
+**Why http from repo root:** the worker resolves `./host.js` relative to its import URL; ES modules +
+workers + SharedArrayBuffer don't work on `file://`. `scripts/serve-threaded.py` serves the root and
+sends COOP/COEP headers. Use Chrome/Edge 113+ with WebGPU.
 
 ---
 
-## 4. Architecture of THIS codebase
+## 4. Code architecture (`bitlife/bitlife.html`, one file, banner-commented sections)
 
-Two equivalent layouts exist:
-- **Standalone repo (what the user is running):** `index.html` (the game), `bitlife_data.json`,
-  `vendor/web-txt2img/` (bundled worker), `serve.py`, `pregen_art.py`, `assets/`, `README.md`.
-- **In the original monorepo:** `bitlife/bitlife.html` (imports the worker from
-  `../llm_adventure/vendor/web-txt2img/`), `bitlife/bitlife_data.json`, etc., served by
-  `scripts/serve-threaded.py`. (The only difference is the image-worker import path.)
+- **Content data** — loaded from `bitlife_data.json`; an in-HTML `FALLBACK_DATA` subset keeps the game
+  playable if the fetch fails. Keys: `LIFE_STAGES, COUNTRIES, NAME_POOLS, ACHIEVEMENTS, EVENTS (by life
+  stage), ACTIVITIES (mindBody/doctor/education/crime/casino), CAREERS, DEGREES, MARKET
+  (stocks/crypto/bonds), REAL_ESTATE, INSIDER_TIPS, SCENE_EVENTS`.
+- **State** — one `game` object (created by `createNewLife()`): `character` (stats, money, age,
+  education, job, `appearanceHash`), `relationships[]`, `assets[]`/`portfolio[]`, `market`, `prison`,
+  `flags`, `achievements[]`, `pendingEvent`, `activeTip`, `log[]`, `seed`/`rngState`. Saved to
+  `localStorage` (multiple slots); image blob URLs are stripped before saving and regenerated lazily.
+- **Engine (deterministic; RNG via seeded `rng()`):** `ageUp()` runs the yearly loop (stat drift,
+  education auto-advance, markets, salary, prison time, relationship aging/deaths, maybe an insider
+  tip, a weighted random event that may block on a choice popup, death check). **`applyEffects()` is
+  the single mutation choke point** (clamps stats 0–100, applies money/fame/flags/relationship/
+  achievement changes) — both the engine and the LLM path go through it. Other functions: `applyChoice,
+  doActivity, applyJob/workHarder/askPromotion/quitJob, applyCollege, commitCrime/sendToPrison, gamble,
+  advanceMarkets/buyAsset/sellAsset/buyRealEstate, maybeInsiderTip/runInsiderTip, interact,
+  ageRelationships, checkDeath, grantAchievement`.
+- **LLM contract** — `BITLIFE_SYSTEM` asks for one narration paragraph + one JSON block:
+  `{narration, effects{health,happiness,smarts,looks,money,fame}, relationship_changes[{name,bar}],
+  set_flags, grant_achievement, event_image}`. `extractFirstJson()` parses tolerantly;
+  **`sanitizeLlmEffects()`** clamps stat deltas ±20, money to a wealth band, relationship bars ±25,
+  whitelists flags/achievements — keep it strict.
+- **Image manager** — `getImage(key, prompt)` resolves **static asset (`assets/manifest.json`) →
+  IndexedDB cache → live SD generate (then cache)**. Avatars regenerate when `appearanceHash` changes;
+  notable events attach a scene via `SCENE_PROMPTS`. An idle queue (`enqueuePregen`/`runPregen`)
+  pre-renders upcoming avatar + scenes once SD loads. `pregen_art.py` bakes the static set ahead of time.
+- **UI** — header (avatar + name/age/occupation + money + ribbons) · feed (life log, inline scene
+  images) · stat bars + **Age Up** + small 🏅/☰ · free-text box (the only LLM path) · BitLife 4-tab
+  bottom bar → modals: **💼 Occupation** (School at top, then Jobs), **🧠 Activities** (Mind & Body,
+  Doctor, Crime, Casino), **👪 Relationships**, **💹 Assets/Investments** · Debug panel · event-choice
+  popup · death screen. Helpers `occupationLine()`/`eduStatus()` render status; `advanceEducation()`
+  auto-runs K–12.
 
-`index.html` / `bitlife.html` is ONE self-contained file: importmap + CSS + content `FALLBACK_DATA`
-+ engine + LLM integration + image manager + UI + boot. Sections are marked with banner comments.
-
-### 4.1 Content data (`bitlife_data.json` + in-HTML `FALLBACK_DATA`)
-Premade, deterministic content so the game plays like BitLife with no AI. Loaded at boot via
-`fetch("./bitlife_data.json")`; if that fails (offline/file://), the embedded `FALLBACK_DATA`
-(a smaller subset) is used. Keys:
-- `LIFE_STAGES`, `COUNTRIES`, `NAME_POOLS`, `ACHIEVEMENTS`
-- `EVENTS` keyed by life stage → weighted entries `{id, weight, minAge, maxAge, text, choices[]}`
-  where each choice has `effects` (flat deltas) and optional `outcome{chance, success, fail}`;
-  `noChoice:true` events auto-apply.
-- `ACTIVITIES` per category (`mindBody, doctor, education, crime, casino`)
-- `CAREERS` (ladder), `DEGREES`, `MARKET` (stocks/crypto/bonds), `REAL_ESTATE`, `INSIDER_TIPS`,
-  `SCENE_EVENTS`.
-
-> **To make it more like BitLife: this file is where most growth happens.** Add events (faithful
-> wording from the wiki), activities, careers (incl. special careers), assets, and tips.
-
-### 4.2 Game state (`game` object, one source of truth)
-Created by `createNewLife()`. Fields: `seed`, `rngState`, `character{name,gender,country,birthYear,
-age,lifeStage,alive,causeOfDeath, stats{health,happiness,smarts,looks}, fame, money,
-education{level,inSchool,degree,major}, job, appearanceHash}`, `relationships[]`, `assets[]`,
-`portfolio[]`, `market{year,prices,history}`, `crimeRecord`, `prison`, `flags`, `achievements[]`,
-`pendingEvent`, `activeTip`, `log[]`. Persisted to `localStorage` (multiple save slots) via
-`autosave()`/`loadLife()`; blob image URLs are stripped before serialization and regenerated lazily.
-
-### 4.3 Engine functions (deterministic; all RNG via seeded `rng()`)
-- `ageUp()` — the core loop: age++, recompute life stage (→ avatar regen + milestone), education
-  auto-advance, stat drift, `advanceMarkets()`, accrue salary, prison time, age relationships +
-  roll their deaths, `maybeInsiderTip()`, fire a weighted yearly event (choice events set
-  `pendingEvent` and BLOCK age-up until resolved), `checkDeath()`, autosave, re-render.
-- `applyEffects(effects)` — **the single mutation choke point**; clamps stats 0–100, applies money/
-  fame/flags/relationship/achievement changes. Both the engine and the LLM path go through it.
-- `applyChoice`, `doActivity`, `applyJob/workHarder/askPromotion/quitJob`, `applyCollege`,
-  `commitCrime/sendToPrison`, `gamble`, `advanceMarkets/buyAsset/sellAsset/buyRealEstate`,
-  `maybeInsiderTip/runInsiderTip` (the SEC arrest roll → prison + "Martha"), `interact` (relationship
-  actions), `ageRelationships`, `checkDeath`, `grantAchievement`.
-
-### 4.4 LLM directive contract (typed input)
-`BITLIFE_SYSTEM` instructs Gemma to return ONE narration paragraph + one ```json``` block:
-```json
-{ "narration":"…", "effects":{"health":0,"happiness":0,"smarts":0,"looks":0,"money":0,"fame":0},
-  "relationship_changes":[{"name":"Mom","bar":0}], "set_flags":{}, "grant_achievement":null,
-  "event_image":"short visual phrase or null" }
-```
-`extractFirstJson()` parses tolerantly; **`sanitizeLlmEffects()`** clamps stat deltas to ±20, money
-to a wealth-band, relationship bars to ±25, whitelists flags/achievements, and event_image to a
-short string. Then `applyEffects()` applies it. This is the safety boundary — keep it strict.
-
-### 4.5 Image manager + art pre-generation (the "make art in advance" part)
-Every image request goes through `getImage(key, prompt)` with priority:
-1. **Static asset** — if `assets/manifest.json` maps the key → a shipped PNG, use it **instantly**.
-2. **IndexedDB cache** — persistent across reloads/sessions (DB `bitlife-art`, store `img`), keyed by
-   prompt/scene hash. Second run is instant.
-3. **Live generate** via the SD worker, then store the blob in IndexedDB.
-Plus an **idle background pre-render queue** (`enqueuePregen`/`runPregen`, driven by
-`requestIdleCallback`) that, once SD loads, pre-renders the current + next life-stage avatar and the
-common life-event scenes during idle time — pausing while the player's typed action needs the GPU.
-`pregen_art.py` is an **optional GPU batch baker** that writes `assets/scene_<key>.png` +
-`manifest.json` ahead of time (covers priority #1).
-
-### 4.6 UI (single-column, mobile-ish, dark theme)
-Header card (avatar + name/age/stage + the 4 stat bars + money + ribbons + an occupation/school
-status line) · scrollable **feed** (the life log; entries can carry an inline scene image) · big
-**Age Up** button (disabled during a pending event / prison-only / death) with small 🏅 Awards + ☰
-Menu icons · **free-text input** (the only LLM path) · a BitLife-style **4-tab bottom bar** opening
-**modals**: **💼 Occupation** (School + Job in one place), **🧠 Activities** (Mind & Body, Doctor,
-Crime, Casino), **👪 Relationships**, **💹 Assets/Investments** · collapsible **Debug** panel ·
-event-choice popup · death screen. Reuses the adventure's CSS tokens and overlay/debug patterns.
-
-> **Interface note (kept faithful to real BitLife):** education lives under **Occupation**, not
-> Activities — K–12 is automatic (`advanceEducation()` / `eduStatus()`), and university is an explicit
-> "Enroll" action shown once you're a high-school graduate. **Crime and Casino are under Activities**,
-> as in the original. The header always shows your current occupation/school via `occupationLine()`.
-
-### 4.7 Boot flow
-`loadData()` → picker (New Life / Load Slot / AI options incl. Ollama + "Skip models") →
-`detectLocalModels()` (uses `/local_models/...` on localhost if present) → `createNewLife()` or
-`loadLife()` → show game immediately → `startModelsBackground()` loads LLM + SD in the background and
-kicks off avatar render + idle pre-gen when SD is ready.
+**Reuse from the monorepo** (proven patterns, don't reinvent): `browser_adventure/adventure.html`
+(`loadLlm`, `ensureLlmChatTemplate`, `generateLlmResponse`, `runOllamaGeneration`, `loadImageModel`,
+`generateSceneImage`, JSON parsing, save/load, dark CSS); `llm_adventure/vendor/web-txt2img/`
+(`adapters/sd15.js` for the SD constraints + `mulberry32`); `scripts/serve-threaded.py`.
 
 ---
 
-## 5. Reference implementations to copy from (in the original monorepo)
-- `browser_adventure/adventure.html` — the proven Transformers.js + web-txt2img integration:
-  `loadLlm`, `ensureLlmChatTemplate`, `generateLlmResponse`, `runOllamaGeneration`,
-  `loadImageModel`, `generateSceneImage`, JSON parsing (`tryParseJson`/`extractJsonFromText`),
-  save/load, picker/Ollama UI, dark-theme CSS, OOM-aware error handling.
-- `llm_adventure/vendor/web-txt2img/` — the image worker (and `adapters/sd15.js` for the 512×512 /
-  steps / CLIP-77 / `mulberry32` constraints).
-- `scripts/serve-threaded.py` — COOP/COEP server.
-- `mini_flux_MTS_CUDA_8_1_25.py`, `zimageturbo.py` — GPU diffusion scripts that `pregen_art.py` mirrors.
+## 5. How to add a feature
+
+All content lives in `bitlife/bitlife_data.json` (mirror tiny additions into the HTML `FALLBACK_DATA`
+if you want them to work offline). Effects are flat deltas and are auto-clamped by `applyEffects`.
+
+- **New activity** → add to `ACTIVITIES.mindBody|doctor|education|crime|casino`:
+  `{id, label, minAge, cost?, requires?, effects:{stat:delta,...}, random?:{stat:[min,max]}, notable?}`.
+  Consumed by `doActivity()` / shown by `openActivities()`.
+- **New random event** → add to `EVENTS.<lifeStage>`:
+  `{id, weight, minAge, maxAge, text, choices:[{label, effects, outcome?:{chance,success,fail}}]}`
+  (or `{..., noChoice:true, effects}` to auto-apply). Fired by `fireYearlyEvent()`; choices handled by
+  `applyChoice()`. Use faithful wiki wording.
+- **New career / degree** → add to `CAREERS`
+  `{id, title, baseSalary, requires:{minAge|level|degree}, levels:[...], raisePerLevel, fameGain?}` and
+  `DEGREES {id,label,minSmarts,grad?}`. Gated by `requirementsMet()`; applied by `applyJob()`.
+- **New market asset / insider tip** → add to `MARKET.stocks|crypto|bonds`
+  `{id,name,start,vol,drift,taxable?}` and `INSIDER_TIPS {id,source,assetType,text,gainMult,
+  arrestChance,sentence,achievement}`. Prices walk in `advanceMarkets()`; tips via `maybeInsiderTip()`/
+  `runInsiderTip()`.
+- **New achievement / ribbon** → add to `ACHIEVEMENTS {id:{label,icon,desc}}`, then call
+  `grantAchievement("id")` from the relevant event/effect (or list it as an event `grantAchievement`).
+- **New life-event illustration** → add a key to `SCENE_PROMPTS` (in the HTML) and pass that key as the
+  third arg to `log(kind, text, sceneKey)`; the image manager paints + caches it.
+- **New relationship interaction** → add a case in `interact()` and a button in `openRelationships()`.
+
+Keep every addition deterministic and route stat/money changes through `applyEffects`.
 
 ---
 
-## 6. Known gaps & roadmap to reach BitLife parity
-This v1 is a faithful skeleton. To get closer to the real game, prioritize (roughly in order):
+## 6. How to debug
 
-1. **Much more content in `bitlife_data.json`** — dozens more random events per life stage with
-   faithful wiki wording; more activities; more careers incl. **special careers** (royalty, military,
-   famous/influencer, athlete, mafia, politics); diseases + doctor treatments; addictions.
-2. **Education depth** — elementary→middle→high→community college / university with majors, GPA,
-   grad/professional school, student loans, dropping out, scholarships.
-3. **Finance depth** — bank accounts, loans/mortgages, taxes (esp. crypto), bankruptcy, lawsuits,
-   wills & **inheritance**, the **financial advisor** NPC.
-4. **Investments parity** — penny stocks, funds; a richer price model and market-health indicators;
-   the insider-tip popup flow polished (buy window, spike, sell, SEC probe, plead guilty halves sentence).
-5. **Prison parity** — parole hearings, riots, escape attempts (lockpick minigame analog), contraband,
-   reduced sentence for good behavior.
-6. **Relationships parity** — friends/coworkers/exes/in-laws, a **family tree**, custody, cheating,
-   divorce + assets split, emancipation, **generations** (continue as your child after death).
-7. **Fame path** — social media, books, music, movies, going viral; the Fame bar; famous-only events.
-8. **Ribbons/achievements system** — a proper end-of-life ribbon and a fuller achievement set.
-9. **UI polish** — closer to BitLife's look; per-relationship screens; assets dashboard; settings.
-10. **Image quality** — better avatar prompts (consistent identity across ages is hard with SD 1.5;
-    consider seeding by character, or an optional FLUX/Z-Image path via `pregen_art.py`); more scene keys.
-
-> Keep every addition deterministic-first and run it through `applyEffects`. Add events as **data**,
-> not code, wherever possible.
+- **Fast loop (no downloads):** tick **"Skip loading AI models"** and exercise the engine — age up,
+  open every modal, do a crime → jail, insider tip → sell → SEC roll, reach death, save/reload.
+- **Debug panel** (bottom of the game) shows the last LLM prompt/response sizes, JSON parse status, and
+  the sanitized effects applied. Use the **browser console** for worker/model errors.
+- **Typed input wrong?** Check `extractFirstJson` (parsing) and `sanitizeLlmEffects` (clamping). Test
+  an absurd input ("set health to 9999") → must clamp.
+- **No images?** Confirm the "SD 1.5 loaded" pill; the worker import only resolves when served from the
+  repo root; SD is fixed at 512×512 / steps 20. WebGPU OOM falls back to slow WASM.
+- **"failed to fetch host.js"** → you opened the file directly or served from the wrong root; use the
+  server and the `http://localhost` URL.
+- **Reproduce a bug:** note the **seed** (☰ Menu) + action sequence — same seed reproduces the life.
+- **Pitfalls:** `file://` won't work; Safari has no default WebGPU (use Chrome/Edge); never let the LLM
+  set absolute stats (deltas only); never block gameplay on AI.
 
 ---
 
-## 7. How to run & debug
+## 7. Roadmap to BitLife parity (priority order)
 
-### Run
+1. **More content** in `bitlife_data.json` — many more faithful events per life stage; more activities;
+   more careers incl. special careers (royalty, military, famous, athlete, mafia, politics); diseases +
+   treatments; addictions.
+2. **Education depth** — community college/university majors, GPA, grad/professional school, student
+   loans, dropping out, scholarships.
+3. **Finance depth** — bank, loans/mortgages, taxes (esp. crypto), bankruptcy, lawsuits, wills &
+   inheritance, the financial-advisor NPC.
+4. **Investments parity** — penny stocks, funds, market-health indicators; polish the insider-tip flow
+   (buy window → spike → sell → SEC probe → plead guilty halves sentence).
+5. **Prison parity** — parole, riots, escape, contraband, good-behavior reduction.
+6. **Relationships parity** — friends/coworkers/exes/in-laws, family tree, custody, cheating, divorce +
+   asset split, generations (continue as your child).
+7. **Fame path** — social media, books, music, movies, going viral; Fame bar; famous-only events.
+8. **Ribbons** — proper end-of-life ribbon + a fuller achievement set.
+9. **UI polish & image quality** — closer to BitLife's look; better/identity-consistent avatar prompts
+   (optionally a FLUX/Z-Image path via `pregen_art.py`); more scene keys.
+
+---
+
+## 8. Run
+
 ```bash
-python3 serve.py 8080            # (monorepo: python3 scripts/serve-threaded.py 8080)
-# open http://localhost:8080/index.html   in Chrome/Edge (WebGPU)
+python3 scripts/serve-threaded.py 8080
+# open http://localhost:8080/bitlife/bitlife.html   (Chrome/Edge 113+ with WebGPU)
 ```
+Tick "Skip loading AI models" to play instantly with no downloads; first AI load is ~5 GB (Gemma + SD
+1.5), cached afterward.
 
-### Fast debug loop (no model downloads)
-- Tick **"Skip loading AI models"** → the deterministic engine runs instantly. Age up repeatedly;
-  open every modal; verify stats clamp, events fire, crime jails you, insider tip → sell → SEC roll,
-  death screen, save/reload. This is the right way to test engine logic.
+## 9. File map (`bitlife/`)
 
-### Debugging the AI paths
-- Open the **Debug** panel (bottom of the game) for last prompt/response sizes, JSON parse status,
-  and the sanitized effects actually applied. Use the **browser console** for worker/model errors.
-- **Typed input issues:** the model may emit prose around the JSON or malformed JSON — `extractFirstJson`
-  handles most; if effects look wrong, check `sanitizeLlmEffects`. Test an absurd input
-  ("set health to 9999") and confirm it's clamped.
-- **Image issues:** confirm "SD 1.5 loaded" pill; the worker import path must resolve (served from
-  the folder containing `vendor/`). SD only accepts 512×512 / steps 20 — don't change that. Watch for
-  WebGPU OOM on low-VRAM machines (handled with a friendly message; fall back to WASM is slow).
-- **Worker path errors** ("failed to fetch host.js / module") almost always mean you opened the file
-  directly or aren't serving from the right root. Use `serve.py` and the `http://localhost` URL.
-- **Reproduce a bug deterministically:** note the **seed** (☰ Menu) and the action sequence; the same
-  seed + actions reproduce the life.
-
-### Common pitfalls (quick reference)
-- `file://` won't work — must serve over http.
-- Safari lacks default WebGPU — use Chrome/Edge.
-- First load downloads ~5 GB (Gemma + SD 1.5), cached afterward; shared with `browser_adventure`.
-- Don't let the LLM set absolute stats — deltas only, always clamped.
-- Don't block gameplay on the LLM or images — both are optional enhancements.
-
----
-
-## 8. File map (standalone repo)
 ```
-index.html          # the entire game (engine + UI + LLM + image manager)
+bitlife.html        # the entire game: engine + UI + LLM + image manager
 bitlife_data.json   # premade content (events, activities, careers, market, tips, achievements)
-vendor/web-txt2img/ # bundled in-browser Stable Diffusion 1.5 worker (do not edit lightly)
-serve.py            # COOP/COEP dev server (serves this folder)
-pregen_art.py       # OPTIONAL GPU batch baker -> assets/ + manifest.json
-assets/             # optional pre-generated PNGs (manifest.json maps scene keys -> files)
-requirements.txt    # deps for pregen_art.py only
+pregen_art.py       # OPTIONAL GPU baker -> assets/ + manifest.json
+assets/             # optional pre-baked PNGs (manifest.json maps scene keys -> files)
 README.md           # quick start
-BACKGROUND.md       # this document
+background.md       # this developer guide
 ```
-
-*Maintainer: Jonathan Rothberg, 2026. The local-AI stack is reused from this repo's
-`browser_adventure` / `llm_adventure`.*
+The image worker is imported from `../llm_adventure/vendor/web-txt2img/`; the server (`scripts/
+serve-threaded.py`) serves the repo root so that path resolves. (A standalone variant bundles the
+worker under `vendor/` and uses `index.html` + `serve.py`.)
