@@ -272,8 +272,8 @@
 
   <!-- ═══ Loading overlay / Adventure picker ═══ -->
   <div id="loading-overlay">
-    <h2>JMR's LLM Adventure</h2>
-    <p id="load-version" style="font-size:0.75rem;color:var(--accent-dim);margin-bottom:8px">v1.1 — debug panel: Copy debug + Run tests</p>
+    <h2 id="load-title">JMR's LLM Adventure</h2>
+    <p id="load-version" style="font-size:1rem;color:var(--accent);font-weight:bold;margin:6px 0 10px 0">v1.1.1</p>
     <p>A fully LLM-driven text adventure running entirely in your browser.
        Gemma 4B generates the story; Stable Diffusion 1.5 paints the scenes.</p>
     <p style="font-size:0.8rem;color:var(--text-muted)">
@@ -282,7 +282,7 @@
 
     <!-- Adventure picker section -->
     <div class="adventure-picker" id="adventure-picker">
-      <h3>Choose Your Adventure</h3>
+      <h3>Choose Your Adventure <span id="picker-version" style="font-size:0.85rem;color:var(--accent);font-weight:normal"></span></h3>
 
       <!-- Option 1: Default -->
       <div class="pick-card selected" data-pick="default" id="pick-default">
@@ -333,7 +333,7 @@
   <header>
     <div>
       <h1>JMR's LLM Adventure</h1>
-      <div class="subtitle" id="game-version">Gemma 4B + SD 1.5 — all in browser &nbsp;|&nbsp; v1.1 Jonathan Rothberg 2026</div>
+      <div class="subtitle" id="game-version">Gemma 4B + SD 1.5 — all in browser</div>
     </div>
     <div class="header-actions">
       <button id="btn-save" title="Save world bible and current progress to this browser (localStorage)">Save game</button>
@@ -400,7 +400,7 @@
     // CONFIGURATION
     // ═══════════════════════════════════════════════════════════════════════════
     /** Bump when shipping UI/engine changes — visible on load screen + header. */
-    const GAME_VERSION = "1.1";
+    const GAME_VERSION = "1.1.1";
     const LLM_MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
     const IMG_MODEL_ID = "sd-1.5";
     const LLM_MAX_TOKENS = 512;
@@ -2687,6 +2687,21 @@
     // UI HELPERS
     // ═══════════════════════════════════════════════════════════════════════════
     const $ = (id) => document.getElementById(id);
+
+    /** Single source of truth: stamp version on load screen, picker, and in-game header. */
+    function applyGameVersionLabels() {
+      const label = `v${GAME_VERSION}`;
+      const detail = `${label} — debug: Copy debug · Run tests`;
+      const loadTitle = $("load-title");
+      if (loadTitle) loadTitle.textContent = `JMR's LLM Adventure ${label}`;
+      const loadVer = $("load-version");
+      if (loadVer) loadVer.textContent = detail;
+      const pickVer = $("picker-version");
+      if (pickVer) pickVer.textContent = `(${label})`;
+      const gameVer = $("game-version");
+      if (gameVer) gameVer.textContent = `Gemma 4B + SD 1.5 — all in browser | ${label} Jonathan Rothberg 2026`;
+    }
+    applyGameVersionLabels();
 
     function appendTurn(playerCmd, narrativeText) {
       const div = document.createElement("div");
