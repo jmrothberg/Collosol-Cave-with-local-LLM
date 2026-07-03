@@ -45,6 +45,16 @@ source .venv/bin/activate
 
 Then follow the README in whichever game folder you want to play.
 
+### Tests (Colossal Cave)
+
+```bash
+source .venv/bin/activate
+pip install -r colossal_cave/requirements.txt
+cd colossal_cave && pytest -m "not gpu and not ollama"
+```
+
+See [`colossal_cave/README.md`](colossal_cave/README.md) for architecture and full test docs. GitHub Actions runs the same CI-safe suite on push.
+
 ---
 
 ## Project Structure

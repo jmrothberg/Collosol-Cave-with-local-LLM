@@ -121,6 +121,65 @@ def ensure_mflux_installed():
             print("You may need to install mflux manually: pip install mflux")
             return False
 
+
+class _MfluxPipelineAdapter:
+    """MFLUX backend for MLX-quantized local FLUX folders (no diffusers model_index.json)."""
+
+    def __init__(self, model_path: str, diff_name: str):
+        self.model_path = model_path
+        self.diff_name = diff_name
+        self._flux = None
+
+    def _lazy_init(self):
+        if self._flux is not None:
+            return
+        from mflux.models.common.config.model_config import ModelConfig
+
+        name_l = self.diff_name.lower()
+        is_flux2 = "flux2" in name_l or "klein" in name_l
+        config_name = "flux2-klein-9b" if is_flux2 else self.diff_name.lower()
+        if is_flux2:
+            from mflux.models.flux2.variants import Flux2Klein
+            self._flux = Flux2Klein(
+                model_config=ModelConfig.from_name(config_name),
+                model_path=self.model_path,
+                quantize=None,
+            )
+        else:
+            from mflux.models.flux.variants.txt2img.flux import Flux1
+            self._flux = Flux1(
+                model_config=ModelConfig.from_name(config_name),
+                model_path=self.model_path,
+                quantize=None,
+            )
+
+    def __call__(self, prompt, height=1024, width=1024, num_inference_steps=4, guidance_scale=0.0, num_images_per_prompt=1):
+        import random
+
+        self._lazy_init()
+        is_flux2 = "flux2" in self.diff_name.lower() or "klein" in self.diff_name.lower()
+        if is_flux2:
+            result = self._flux.generate_image(
+                seed=random.randint(0, 2**32 - 1),
+                prompt=prompt,
+                num_inference_steps=num_inference_steps or 4,
+                height=height,
+                width=width,
+                guidance=1.0,
+                scheduler="flow_match_euler_discrete",
+            )
+        else:
+            result = self._flux.generate_image(
+                seed=random.randint(0, 2**32 - 1),
+                prompt=prompt,
+                num_inference_steps=num_inference_steps or 20,
+                height=height,
+                width=width,
+                guidance=3.5,
+            )
+        # Use in-memory PIL image — mflux save() skips existing empty temp files (overwrite=False).
+        return type("_PipeOut", (), {"images": [result.image]})()
+
 # === UI AND DIALOG IMPORTS ===
 from tkinter import filedialog, Tk
 import gradio as gr
@@ -255,11 +314,13 @@ if platform.system() != 'Darwin' or torch.backends.mps.is_available():
     
     # Try different possible paths for Pyramid Flow
     possible_paths = [
-        os.path.join(current_dir, 'Pyramid-Flow'),  # Correct path with dash
-        os.path.join(current_dir, 'Pyramid_Flow'),  # Alternative with underscore
+        os.path.join(current_dir, 'Pyramid-Flow'),
+        os.path.join(current_dir, '..', 'Pyramid-Flow'),  # repo root (sibling of colossal_cave/)
+        os.path.join(current_dir, 'Pyramid_Flow'),
+        os.path.join(current_dir, '..', 'Pyramid_Flow'),
         os.path.join(current_dir, '@Pyramid-Flow'),
         os.path.join(current_dir, 'pyramid_flow'),
-        current_dir  # If modules are directly in current directory
+        current_dir,
     ]
 
     # Add first existing path to sys.path
@@ -913,7 +974,7 @@ class AdventureGame:
         
         num_inf_steps = 25
         # Check if it's a FLUX pipeline by checking the class name or config
-        if isinstance(pipe, FluxPipeline):
+        if isinstance(pipe, FluxPipeline) or isinstance(pipe, _MfluxPipelineAdapter):
             num_inf_steps = 4
             guidance_scale = 0.0
             print("Using FLUX-specific settings: 4 steps, 0.0 guidance")
@@ -3552,14 +3613,19 @@ def set_up_llm_diffuser(diff_name, llm_name):
 
     # Check if it's a local model path or HuggingFace model ID
     if os.path.exists(os.path.join(diff_dir, diff_name)):
-        # It's a local model
         model_path = os.path.join(diff_dir, diff_name)
-        print(f"Loading local diffusion model from: {model_path}")
-        pipe = DiffusionPipeline.from_pretrained(
-            model_path,
-            torch_dtype=dtype,
-            device_map="balanced"
-        )
+        # MLX/MFLUX folders (e.g. FLUX2-klein-9B-mlx-8bit) lack diffusers model_index.json.
+        if "mlx" in diff_name.lower() or not os.path.isfile(os.path.join(model_path, "model_index.json")):
+            print(f"Loading MLX/MFLUX model from: {model_path}")
+            ensure_mflux_installed()
+            pipe = _MfluxPipelineAdapter(model_path, diff_name)
+        else:
+            print(f"Loading local diffusion model from: {model_path}")
+            pipe = DiffusionPipeline.from_pretrained(
+                model_path,
+                torch_dtype=dtype,
+                device_map="balanced"
+            )
     else:
         # It's a HuggingFace model ID - download/cache automatically
         print(f"Loading HuggingFace model: {diff_name}")

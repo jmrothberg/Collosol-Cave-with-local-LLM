@@ -5682,6 +5682,7 @@ def load_default_world_bible_if_needed() -> bool:
     if isinstance(WORLD_BIBLE, dict) and WORLD_BIBLE:
         return False
     candidates = [
+        os.path.join(_SCRIPT_DIR, "default_cave.json"),
         os.path.join(_SCRIPT_DIR, "..", "browser_adventure", "default_cave.json"),
         os.path.join(os.path.dirname(_SCRIPT_DIR), "browser_adventure", "default_cave.json"),
     ]
@@ -5724,7 +5725,7 @@ def load_default_world_bible_if_needed() -> bool:
         )
         return True
     print(
-        "[default_cave] No browser_adventure/default_cave.json found; engine will "
+        "[default_cave] No default_cave.json found; engine will "
         "use its inline default_plan only when generation is requested without a model."
     )
     return False
@@ -7112,7 +7113,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 _assign_world_bible(None)
                 loaded = load_default_world_bible_if_needed()
                 if not loaded:
-                    return ("❌ Could not find browser_adventure/default_cave.json",
+                    return ("❌ Could not find default_cave.json",
                             get_world_bible_view())
                 # Reset dynamic state so seed/start_story re-seeds from the new bible.
                 player_name = state_mgr.state.player_name
@@ -7350,11 +7351,22 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             outputs=[load_status, gallery, narration_box, debug_md, health, inventory, map_box, latest_image, world_bible_display, location],
         )
 
-    # CHANGE: Use GRADIO_SERVER_PORT if provided; default to 7860 to avoid occupied-port crash
+    # Pick a free port: honor GRADIO_SERVER_PORT, else scan from 7860 upward.
+    import socket
     try:
-        _env_port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
+        _env_port = int(os.environ.get("GRADIO_SERVER_PORT", "0"))
     except Exception:
+        _env_port = 0
+    if _env_port <= 0:
         _env_port = 7860
+        for _port in range(7860, 7890):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sock:
+                try:
+                    _sock.bind(("127.0.0.1", _port))
+                    _env_port = _port
+                    break
+                except OSError:
+                    continue
     app.launch(server_name="127.0.0.1", server_port=_env_port, share=True, show_error=True)
 
 
@@ -7374,11 +7386,11 @@ from engine.world_bible.validate import (  # noqa: E402
 )
 from engine.world_bible.repair import auto_repair_world_bible, micro_repair_world_bible  # noqa: E402
 from engine.world_bible.win_condition import (  # noqa: E402
-    _parse_win_condition,
+    parse_win_condition as _parse_win_condition,
     check_win_condition,
 )
 from engine.world_bible.normalize import (  # noqa: E402
-    _normalize_browser_chain,
+    normalize_browser_chain as _normalize_browser_chain,
     load_default_world_bible_if_needed,
 )
 from engine.commands import (  # noqa: E402

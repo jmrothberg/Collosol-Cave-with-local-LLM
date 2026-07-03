@@ -1,0 +1,148 @@
+{
+  "objectives": [
+    "Get a light source and explore the caves",
+    "Cross the underground river safely",
+    "Open the sealed forge and retrieve the enchanted blade",
+    "Defeat the stone dragon and claim the Starfire Gem"
+  ],
+  "theme": "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere",
+  "global_theme": "Dark fantasy cave with glowing crystals, ancient stone architecture, misty atmosphere",
+  "locations": [
+    {
+      "name": "Cave Mouth",
+      "description": "A wide rocky entrance where daylight fades into shadow. An old hermit sits beside a crackling campfire. A coil of rope hangs from a spike driven into the wall.",
+      "exits": ["Mushroom Grotto", "Dark Passage"],
+      "items": ["rope"],
+      "scenery": ["campfire", "spike in wall", "carved warning sign", "scattered explorer supplies"]
+    },
+    {
+      "name": "Mushroom Grotto",
+      "description": "A damp cavern lit by clusters of glowing blue mushrooms. Ancient wall carvings depict a forge being lit by sparks. A piece of flint glints on the ground near a dead campfire.",
+      "exits": ["Cave Mouth", "Underground River"],
+      "items": ["flint"],
+      "scenery": ["glowing mushrooms", "wall carvings", "dead campfire", "dripping stalactites"]
+    },
+    {
+      "name": "Dark Passage",
+      "description": "A narrow pitch-black tunnel. Without a light source you cannot see anything. The air smells of damp stone and something musky.",
+      "exits": ["Cave Mouth", "Underground River"],
+      "items": ["explorer journal"],
+      "scenery": ["narrow walls", "damp floor", "faint claw marks on stone"],
+      "blocked_by": "total darkness (need torch to navigate)"
+    },
+    {
+      "name": "Underground River",
+      "description": "A roaring underground river cuts through the cavern. A rickety rope bridge spans the gap but a massive troll stands guard at the far side, snarling.",
+      "exits": ["Mushroom Grotto", "Dark Passage", "Ancient Forge"],
+      "items": [],
+      "scenery": ["rope bridge", "rushing dark water", "troll nest of bones", "far ledge with iron door"],
+      "blocked_by": "River Troll guards the bridge (fears fire)"
+    },
+    {
+      "name": "Ancient Forge",
+      "description": "A vast chamber dominated by a cold stone forge and anvil. An iron door on the far wall is sealed with a heavy lock. Soot-blackened runes circle the forge reading: FIRE AWAKENS WHAT STONE REMEMBERS.",
+      "exits": ["Underground River", "Dragon's Vault"],
+      "items": [],
+      "scenery": ["stone forge", "anvil", "iron door with lock", "soot-blackened runes", "bellows"],
+      "blocked_by": "iron door to Dragon's Vault is locked (need iron key)"
+    },
+    {
+      "name": "Dragon's Vault",
+      "description": "A treasure chamber bathed in amber light from crystal veins in the walls. A stone dragon crouches before a pedestal holding a brilliant Starfire Gem. The dragon's eyes glow when you approach.",
+      "exits": ["Ancient Forge"],
+      "items": ["Starfire Gem"],
+      "scenery": ["crystal veins", "stone dragon", "gem pedestal", "ancient mural of a hero with a glowing blade"],
+      "blocked_by": "stone dragon guardian (only an enchanted blade can pierce its heart)"
+    }
+  ],
+  "npcs": [
+    {
+      "name": "Old Hermit",
+      "location": "Cave Mouth",
+      "personality": "friendly but cautious old explorer who lost his nerve years ago",
+      "provides": "gives torch freely, warns that a troll lives near the river and fears fire, hints that the deep forge holds a powerful weapon"
+    },
+    {
+      "name": "Forge Spirit",
+      "location": "Ancient Forge",
+      "personality": "ancient whispering presence that awakens when the forge is lit",
+      "provides": "reveals the enchanted blade hidden in the anvil, warns that only this blade can defeat the stone dragon"
+    }
+  ],
+  "monsters": [
+    {
+      "name": "River Troll",
+      "location": "Underground River",
+      "difficulty": "medium",
+      "weakness": "panics and flees when shown fire from the torch",
+      "blocks": "bridge crossing to Ancient Forge",
+      "drops": "iron key (fell from its nest when it fled)"
+    },
+    {
+      "name": "Stone Dragon",
+      "location": "Dragon's Vault",
+      "difficulty": "hard",
+      "weakness": "only the enchanted blade from the forge can pierce its stone heart",
+      "blocks": "access to the Starfire Gem on the pedestal"
+    }
+  ],
+  "riddles": [
+    {
+      "location": "Ancient Forge",
+      "hint": "FIRE AWAKENS WHAT STONE REMEMBERS — runes circling the forge",
+      "solution": "use flint on forge (or light forge)",
+      "reward": "forge ignites, Forge Spirit appears, enchanted blade revealed in anvil"
+    },
+    {
+      "location": "Mushroom Grotto",
+      "hint": "Wall carvings show figures striking sparks into a great forge, and a blade emerging from flame",
+      "solution": "this is a clue, not a puzzle — it foreshadows the forge puzzle",
+      "reward": "player learns that fire and the forge are connected"
+    }
+  ],
+  "key_items": [
+    { "name": "torch", "purpose": "illuminates Dark Passage and scares the River Troll" },
+    { "name": "rope", "purpose": "secures the bridge crossing at Underground River" },
+    { "name": "flint", "purpose": "lights the Ancient Forge to reveal the enchanted blade" },
+    { "name": "explorer journal", "purpose": "contains a note: 'The troll fled when I waved my torch. It dropped something metal as it ran.'" },
+    { "name": "iron key", "purpose": "unlocks the iron door from Ancient Forge to Dragon's Vault" },
+    { "name": "enchanted blade", "purpose": "the only weapon that can pierce the Stone Dragon's heart" },
+    { "name": "Starfire Gem", "purpose": "the legendary treasure — bring it back to Cave Mouth to complete the quest" }
+  ],
+  "item_locations": {
+    "torch": "Given by Old Hermit at Cave Mouth",
+    "rope": "Hanging from a spike on the wall at Cave Mouth",
+    "flint": "On the ground near the dead campfire in Mushroom Grotto",
+    "explorer journal": "On the floor in the Dark Passage, visible once lit with torch",
+    "iron key": "Dropped by the River Troll when it flees from fire",
+    "enchanted blade": "Revealed in the anvil when the Ancient Forge is lit with flint",
+    "Starfire Gem": "On the pedestal in Dragon's Vault, guarded by Stone Dragon"
+  },
+  "progression_hints": [
+    "Talk to the hermit — he has a torch and useful warnings",
+    "Explore every room and examine things before moving deeper",
+    "The wall carvings in the grotto hint at what the forge needs",
+    "Read the journal — a dead explorer's notes reveal the troll's weakness",
+    "Fire is your most versatile tool: it lights, it scares, it forges"
+  ],
+  "mechanics": [
+    { "action": "give torch or wave torch at troll", "effect": "troll panics, flees across bridge, drops iron key from its nest", "location": "Underground River" },
+    { "action": "use flint on forge or light forge", "effect": "forge ignites, Forge Spirit appears, enchanted blade revealed in anvil", "location": "Ancient Forge" },
+    { "action": "use iron key on iron door", "effect": "iron door unlocks, passage to Dragon's Vault opens", "location": "Ancient Forge" },
+    { "action": "use enchanted blade on stone dragon", "effect": "blade pierces dragon's heart, dragon crumbles, Starfire Gem accessible", "location": "Dragon's Vault" },
+    { "action": "use rope on bridge", "effect": "secures the rope bridge for safe crossing", "location": "Underground River" }
+  ],
+  "puzzle_chain": [
+    { "step": 1, "action": "talk to hermit", "gives": "torch", "unlocks": "Dark Passage (light)" },
+    { "step": 2, "action": "take rope from wall", "gives": "rope", "unlocks": null },
+    { "step": 3, "action": "take flint in Mushroom Grotto", "gives": "flint", "unlocks": null },
+    { "step": 4, "action": "read explorer journal in Dark Passage", "gives": "explorer journal", "unlocks": null },
+    { "step": 5, "action": "wave torch at River Troll", "gives": "iron key", "unlocks": "bridge crossing" },
+    { "step": 6, "action": "use flint on forge", "gives": "enchanted blade", "unlocks": "Forge Spirit appears" },
+    { "step": 7, "action": "use iron key on iron door", "gives": null, "unlocks": "Dragon's Vault" },
+    { "step": 8, "action": "use enchanted blade on Stone Dragon", "gives": "Starfire Gem", "unlocks": "win" }
+  ],
+  "main_arc": "A daring explorer descends into ancient caves seeking the legendary Starfire Gem. To reach it they must outwit a bridge troll, rekindle a forgotten forge, and defeat a stone dragon with the enchanted blade hidden within.",
+  "win_condition": "Obtain the Starfire Gem and return to Cave Mouth",
+  "author_walkthrough": "1. At Cave Mouth, talk to the Old Hermit. He gives you a torch and warns about the troll.\n2. Take the rope hanging from the spike on the wall (Cave Mouth).\n3. Go to Mushroom Grotto (exit from Cave Mouth). Pick up the flint near the dead campfire.\n4. Return to Cave Mouth, then enter Dark Passage (torch lights the way). Read the explorer journal on the floor — it hints the troll fears fire and drops something metal.\n5. Go to Underground River (exit from Dark Passage or Mushroom Grotto). Wave the torch at the River Troll — it panics, flees, and drops an iron key.\n6. Cross the bridge to Ancient Forge. Use the flint on the forge — it ignites, the Forge Spirit appears, and the enchanted blade is revealed in the anvil. Take the blade.\n7. Use the iron key on the iron door in Ancient Forge — it unlocks the passage to Dragon's Vault.\n8. Enter Dragon's Vault. Use the enchanted blade on the Stone Dragon — it crumbles and the Starfire Gem is accessible. Take the gem.\n9. Return through Ancient Forge → Underground River → Mushroom Grotto or Dark Passage → Cave Mouth. You win!"
+}

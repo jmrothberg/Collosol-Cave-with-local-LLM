@@ -1,5 +1,7 @@
 # LLM Adventure
 
+> **Superseded:** Active development has moved to **[JMR-LLM-Adventure](https://github.com/jmrothberg/JMR-LLM-Adventure)** — the browser edition (Gemma 4B + SD 1.5, no install). **[Play on GitHub Pages](https://jmrothberg.github.io/JMR-LLM-Adventure/browser_adventure/adventure.html)**. This Python/MLX folder remains for reference and local Apple Silicon use.
+
 An LLM-driven, turn-based text adventure where **the AI is the game master**. You type actions; a local LLM writes the story and emits JSON directives that the engine executes to update game state, generate images, and keep the world consistent.
 
 As local LLMs keep getting better -- cleaner JSON, smarter tool use, richer narrative -- the game automatically improves with no code changes.

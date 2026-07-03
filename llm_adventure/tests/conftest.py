@@ -65,9 +65,11 @@ def minimal_bible():
 
 @pytest.fixture
 def default_cave_bible():
-    path = os.path.normpath(
-        os.path.join(_LLM_ADVENTURE_DIR, "..", "browser_adventure", "default_cave.json")
-    )
+    path = os.path.join(_LLM_ADVENTURE_DIR, "default_cave.json")
+    if not os.path.isfile(path):
+        path = os.path.normpath(
+            os.path.join(_LLM_ADVENTURE_DIR, "..", "browser_adventure", "default_cave.json")
+        )
     if not os.path.isfile(path):
         pytest.skip("default_cave.json not found")
     with open(path, "r", encoding="utf-8") as f:

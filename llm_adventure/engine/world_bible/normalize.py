@@ -95,6 +95,7 @@ def load_default_world_bible_if_needed() -> bool:
     if isinstance(get_world_bible(), dict) and get_world_bible():
         return False
     candidates = [
+        os.path.join(SCRIPT_DIR, "default_cave.json"),
         os.path.join(SCRIPT_DIR, "..", "browser_adventure", "default_cave.json"),
         os.path.join(os.path.dirname(SCRIPT_DIR), "browser_adventure", "default_cave.json"),
     ]
@@ -129,5 +130,5 @@ def load_default_world_bible_if_needed() -> bool:
         chain_steps = len(wb.get("solution_chain", []) or [])
         print(f"[default_cave] Loaded {path} ({rooms} rooms, {items} key items, {chain_steps} chain steps)")
         return True
-    print("[default_cave] No browser_adventure/default_cave.json found.")
+    print("[default_cave] No default_cave.json found.")
     return False
