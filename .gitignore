@@ -41,6 +41,8 @@ env/
 # Gradio
 .gradio/
 
+jmr-llm-adventure-export/
+
 # Large model directories (users download their own)
 LTX-Video/
 Pyramid_Flow/

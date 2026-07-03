@@ -1,6 +1,8 @@
 # JMR's LLM Adventure — browser edition
 
-In-browser text adventure: **Gemma 4B** (Transformers.js) narrates and runs game logic; **Stable Diffusion 1.5** draws scenes. Same design idea as the Python engine [`../llm_adventure/LMM_adventure_April_30.py`](../llm_adventure/LMM_adventure_April_30.py).
+> **Moved:** This game now lives in its own repository: **[JMR-LLM-Adventure](https://github.com/jmrothberg/JMR-LLM-Adventure)** · **[Play on GitHub Pages](https://jmrothberg.github.io/JMR-LLM-Adventure/browser_adventure/adventure.html)**
+
+In-browser text adventure: **Gemma 4B** (Transformers.js) narrates and runs game logic; **Stable Diffusion 1.5** draws scenes. Same design idea as the Python engine [`../llm_adventure/LMM_adventure_May_2_2026.py`](../llm_adventure/LMM_adventure_May_2_2026.py).
 
 | File | Role |
 |------|------|
