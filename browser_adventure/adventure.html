@@ -273,7 +273,7 @@
   <!-- ═══ Loading overlay / Adventure picker ═══ -->
   <div id="loading-overlay">
     <h2 id="load-title">JMR's LLM Adventure</h2>
-    <p id="load-version" style="font-size:1rem;color:var(--accent);font-weight:bold;margin:6px 0 10px 0">v1.1.1</p>
+    <p id="load-version" style="font-size:1rem;color:var(--accent);font-weight:bold;margin:6px 0 10px 0"></p>
     <p>A fully LLM-driven text adventure running entirely in your browser.
        Gemma 4B generates the story; Stable Diffusion 1.5 paints the scenes.</p>
     <p style="font-size:0.8rem;color:var(--text-muted)">
@@ -282,7 +282,7 @@
 
     <!-- Adventure picker section -->
     <div class="adventure-picker" id="adventure-picker">
-      <h3>Choose Your Adventure <span id="picker-version" style="font-size:0.85rem;color:var(--accent);font-weight:normal"></span></h3>
+      <h3>Choose Your Adventure</h3>
 
       <!-- Option 1: Default -->
       <div class="pick-card selected" data-pick="default" id="pick-default">
@@ -388,6 +388,7 @@
       extractFirstJson, extractMapSkeleton, extractJsonFromText, scoreChainCandidate,
       synthesizeAuthorWalkthrough, winConditionText, cloneWorldBible,
       forceSyntheticChainHardFloor, hasChainSolvabilityGaps,
+      snapRoomToBible, snapItemToBible, roomsMatch, mergeRoomAlias,
     } from "./world_bible_logic.mjs";
     import { runWorldBibleTests, formatTestResults } from "./world_bible_tests.mjs";
 
@@ -400,7 +401,7 @@
     // CONFIGURATION
     // ═══════════════════════════════════════════════════════════════════════════
     /** Bump when shipping UI/engine changes — visible on load screen + header. */
-    const GAME_VERSION = "1.1.1";
+    const GAME_VERSION = "1.1.2";
     const LLM_MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
     const IMG_MODEL_ID = "sd-1.5";
     const LLM_MAX_TOKENS = 512;
@@ -2021,6 +2022,57 @@
       const payloads = extractJsonFromText(text);
       const narrative = cleanNarration(text);
       let imagePrompts = [];
+      const wb = activeWorldBible;
+
+      // Snap current location to bible canonical name (handles prior-turn alias drift)
+      if (wb && stateMgr.state.location) {
+        const rawLoc = stateMgr.state.location;
+        const canonLoc = snapRoomToBible(rawLoc, wb);
+        if (canonLoc !== rawLoc) {
+          mergeRoomAlias(stateMgr.state, rawLoc, canonLoc);
+          debug.push(`snap location: ${rawLoc} → ${canonLoc}`);
+        }
+      }
+
+      const snapRoom = (raw) => {
+        const name = String(raw);
+        if (!wb) return name;
+        const snapped = snapRoomToBible(name, wb);
+        if (snapped !== name) {
+          mergeRoomAlias(stateMgr.state, name, snapped);
+          debug.push(`snap room: ${name} → ${snapped}`);
+        }
+        return snapped;
+      };
+
+      const snapItem = (raw) => {
+        const name = String(raw);
+        if (!wb) return name;
+        const snapped = snapItemToBible(name, wb);
+        if (snapped !== name) debug.push(`snap item: ${name} → ${snapped}`);
+        return snapped;
+      };
+
+      /** room_take with bible-aware item/room matching */
+      const takeFromRoom = (rawItem) => {
+        const item = snapItem(rawItem);
+        if (stateMgr.removeItemFromRoom(item)) {
+          stateMgr.addItem(item);
+          return `take: ${item}`;
+        }
+        // Search all known rooms — LLM may use alias room keys or partial item names
+        for (const [room, items] of Object.entries(stateMgr.state.roomItems || {})) {
+          const canonRoom = snapRoom(room);
+          const match = (items || []).find(i => i === item || snapItem(i) === item);
+          if (match) {
+            stateMgr.removeItemFromRoom(match, canonRoom);
+            stateMgr.addItem(item);
+            return `take: ${item}${canonRoom !== room ? ` (from ${canonRoom})` : ""}`;
+          }
+        }
+        stateMgr.addItem(item);
+        return `take(auto): ${item} (not in room, added anyway)`;
+      };
 
       if (!payloads.length) {
         debug.push("[WARNING] No valid JSON found — narration only");
@@ -2038,49 +2090,50 @@
           if (Array.isArray(updates.connect)) {
             for (const pair of updates.connect) {
               if (Array.isArray(pair) && pair.length === 2) {
-                stateMgr.connectRooms(String(pair[0]), String(pair[1]));
-                debug.push(`connect: ${pair[0]} <-> ${pair[1]}`);
+                const a = snapRoom(pair[0]);
+                const b = snapRoom(pair[1]);
+                stateMgr.connectRooms(a, b);
+                debug.push(`connect: ${a} <-> ${b}`);
               }
             }
           }
 
           // Place items in current room
           for (const item of asArray(updates.place_items)) {
-            stateMgr.placeItemInRoom(String(item));
-            debug.push(`place: ${item} @ ${stateMgr.state.location}`);
+            const snapped = snapItem(item);
+            stateMgr.placeItemInRoom(snapped);
+            debug.push(`place: ${snapped} @ ${stateMgr.state.location}`);
           }
 
           // room_take: move item from room to inventory
           for (const item of asArray(updates.room_take)) {
-            const taken = stateMgr.removeItemFromRoom(String(item));
-            if (taken) { stateMgr.addItem(String(item)); debug.push(`take: ${item}`); }
-            else {
-              // Auto-correct: if item not in room, just add to inventory (common small-model mistake)
-              stateMgr.addItem(String(item));
-              debug.push(`take(auto): ${item} (not in room, added anyway)`);
-            }
+            debug.push(takeFromRoom(item));
           }
 
           // Move player — also reveal world bible exits for newly visited rooms
           if (typeof updates.move_to === "string") {
-            const isNew = !stateMgr.state.knownMap[updates.move_to];
-            stateMgr.moveTo(updates.move_to);
-            if (isNew && activeWorldBible && Array.isArray(activeWorldBible.locations)) {
-              const wbLoc = activeWorldBible.locations.find(l => l.name === updates.move_to);
+            const dest = snapRoom(updates.move_to);
+            const isNew = !stateMgr.state.knownMap[dest];
+            stateMgr.moveTo(dest);
+            if (isNew && wb && Array.isArray(wb.locations)) {
+              const wbLoc = wb.locations.find(l => roomsMatch(l.name, dest));
               if (wbLoc) {
-                const mapEntry = stateMgr.state.knownMap[updates.move_to];
+                const mapEntry = stateMgr.state.knownMap[dest];
                 if (wbLoc.description && !mapEntry.notes) mapEntry.notes = wbLoc.description;
                 if (Array.isArray(wbLoc.exits)) {
-                  for (const ex of wbLoc.exits) { if (!mapEntry.exits.includes(ex)) mapEntry.exits.push(ex); }
+                  for (const ex of wbLoc.exits) {
+                    const snapEx = snapRoom(ex);
+                    if (!mapEntry.exits.includes(snapEx)) mapEntry.exits.push(snapEx);
+                  }
                 }
               }
             }
-            debug.push(`move: ${updates.move_to}${isNew ? " (new room discovered)" : ""}`);
+            debug.push(`move: ${dest}${isNew ? " (new room discovered)" : ""}`);
           }
 
           // Inventory: add_items / remove_items
-          const addList = asArray(updates.add_items).map(String);
-          const removeList = asArray(updates.remove_items).map(String);
+          const addList = asArray(updates.add_items).map(i => snapItem(i));
+          const removeList = asArray(updates.remove_items).map(i => snapItem(i));
           // Detect add+remove same item = room_take intention
           const overlap = addList.filter(x => removeList.includes(x));
           for (const item of overlap) {
@@ -2135,11 +2188,11 @@
       // Puzzle chain progress
       const chain = activeWorldBible.puzzle_chain || [];
       if (chain.length) {
-        const invLower = new Set(s.inventory.map(i => i.toLowerCase()));
+        const invCanon = new Set(s.inventory.map(i => snapItemToBible(i, activeWorldBible)));
         let done = 0;
         let nextStep = null;
         for (const step of chain) {
-          if (step.gives && invLower.has(step.gives.toLowerCase())) { done++; }
+          if (step.gives && invCanon.has(step.gives)) { done++; }
           else if (!nextStep) { nextStep = step; }
         }
         const nextDesc = nextStep ? ` (next: ${nextStep.action})` : " (all done!)";
@@ -2262,22 +2315,21 @@
       const out = {};
       if (!wb || typeof wb !== "object") return out;
       const s = stateMgr.state;
-      const invLower = new Set((s.inventory || []).map(i => String(i).toLowerCase()));
-      const visited = new Set(Object.keys(s.knownMap || {}));
+      const invCanon = new Set((s.inventory || []).map(i => snapItemToBible(i, wb)));
 
       // key_items the player neither holds nor has seen in any visited room
       const seenInRoom = new Set();
       for (const room of Object.keys(s.roomItems || {})) {
-        if (!visited.has(room)) continue;
-        for (const it of (s.roomItems[room] || [])) seenInRoom.add(String(it).toLowerCase());
+        const visitedHere = Object.keys(s.knownMap || {}).some(v => roomsMatch(v, room));
+        if (!visitedHere) continue;
+        for (const it of (s.roomItems[room] || [])) seenInRoom.add(snapItemToBible(it, wb));
       }
       const missing = [];
       const seenNotTaken = [];
       for (const k of (wb.key_items || [])) {
         if (!k || typeof k.name !== "string" || !k.name) continue;
-        const nameLower = k.name.toLowerCase();
-        if (invLower.has(nameLower)) continue;
-        if (seenInRoom.has(nameLower)) seenNotTaken.push(k.name);
+        if (invCanon.has(k.name)) continue;
+        if (seenInRoom.has(k.name)) seenNotTaken.push(k.name);
         else missing.push(k.name);
       }
       if (missing.length) out.missing_items = missing;
@@ -2287,8 +2339,8 @@
       const chain = wb.puzzle_chain || [];
       for (const step of chain) {
         if (!step) continue;
-        const givesLower = step.gives ? String(step.gives).toLowerCase() : "";
-        if (givesLower && !invLower.has(givesLower)) {
+        const gives = step.gives ? String(step.gives) : "";
+        if (gives && !invCanon.has(gives)) {
           out.next_chain_step = {
             step: step.step,
             action: step.action,
@@ -2301,12 +2353,14 @@
 
       // Rooms in the bible the player has never entered
       const allRooms = (wb.locations || []).map(l => l && l.name).filter(Boolean);
-      const unvisited = allRooms.filter(n => !visited.has(n));
+      const unvisited = allRooms.filter(n =>
+        !Object.keys(s.knownMap || {}).some(v => roomsMatch(v, n))
+      );
       if (unvisited.length) out.unvisited_rooms = unvisited;
 
       // Current-room blocker if the matching `_unblocked` flag isn't set
       for (const loc of (wb.locations || [])) {
-        if (!loc || loc.name !== s.location) continue;
+        if (!loc || !roomsMatch(loc.name, s.location)) continue;
         const ubKey = String(loc.name).replace(/[^a-zA-Z0-9]+/g, "_") + "_unblocked";
         if (loc.blocked_by && !s.gameFlags[ubKey]) out.blocked_here = loc.blocked_by;
         break;
@@ -2323,10 +2377,10 @@
       const s = stateMgr.state;
       const currentItems = s.roomItems[s.location] || [];
       const currentExits = (s.knownMap[s.location] || {}).exits || [];
-      const locLower = s.location.toLowerCase();
+      const loc = s.location;
 
       // Compact context — omit empty arrays to save tokens
-      const context = { location: s.location, health: s.health };
+      const context = { location: loc, health: s.health };
       if (s.inventory.length) context.inventory = s.inventory;
       if (currentExits.length) context.current_exits = currentExits;
       if (currentItems.length) context.current_room_items = currentItems;
@@ -2346,41 +2400,41 @@
 
       // World bible cues for current location
       const cues = [];
-      for (const loc of (activeWorldBible.locations || [])) {
-        if (loc.name.toLowerCase() === locLower) {
-          if (loc.description) cues.push(`Room: ${loc.description}`);
-          if (Array.isArray(loc.scenery) && loc.scenery.length) cues.push(`Scenery: ${loc.scenery.join(", ")}`);
+      for (const locEntry of (activeWorldBible.locations || [])) {
+        if (roomsMatch(locEntry.name, loc)) {
+          if (locEntry.description) cues.push(`Room: ${locEntry.description}`);
+          if (Array.isArray(locEntry.scenery) && locEntry.scenery.length) cues.push(`Scenery: ${locEntry.scenery.join(", ")}`);
           // Only inject blocked_by if the corresponding _unblocked flag has NOT been set
-          const ubKey = loc.name.replace(/[^a-zA-Z0-9]+/g, "_") + "_unblocked";
-          if (loc.blocked_by && !s.gameFlags[ubKey]) cues.push(`Blocked: ${loc.blocked_by}`);
+          const ubKey = locEntry.name.replace(/[^a-zA-Z0-9]+/g, "_") + "_unblocked";
+          if (locEntry.blocked_by && !s.gameFlags[ubKey]) cues.push(`Blocked: ${locEntry.blocked_by}`);
           break;
         }
       }
       for (const npc of (activeWorldBible.npcs || [])) {
-        if (npc.location && npc.location.toLowerCase() === locLower) {
+        if (npc.location && roomsMatch(npc.location, loc)) {
           cues.push(`NPC: ${npc.name} (${npc.personality}${npc.provides ? ", provides: " + npc.provides : ""})`);
         }
       }
       for (const mon of (activeWorldBible.monsters || [])) {
-        if (mon.location && mon.location.toLowerCase() === locLower) {
+        if (mon.location && roomsMatch(mon.location, loc)) {
           // Only inject monster cue if the corresponding _defeated flag has NOT been set
           const mKey = mon.name.replace(/[^a-zA-Z0-9]+/g, "_") + "_defeated";
           if (!s.gameFlags[mKey]) cues.push(`Monster: ${mon.name}${mon.weakness ? " weakness: " + mon.weakness : ""}`);
         }
       }
       for (const riddle of (activeWorldBible.riddles || [])) {
-        if (riddle.location && riddle.location.toLowerCase() === locLower) {
+        if (riddle.location && roomsMatch(riddle.location, loc)) {
           cues.push(`Puzzle: "${riddle.hint}" -> ${riddle.reward || "reward"}`);
         }
       }
       for (const mech of (activeWorldBible.mechanics || [])) {
-        if (mech.location && mech.location.toLowerCase() === locLower) {
+        if (mech.location && roomsMatch(mech.location, loc)) {
           cues.push(`Mechanic: ${mech.action} -> ${mech.effect}`);
         }
       }
       // Items available at this location
       for (const [item, locDesc] of Object.entries(activeWorldBible.item_locations || {})) {
-        if (locLower.split(" ").some(w => locDesc.toLowerCase().includes(w)) && !s.inventory.includes(item)) {
+        if (roomsMatch(locDesc, loc) && !s.inventory.includes(item)) {
           const info = (activeWorldBible.key_items || []).find(k => k.name === item);
           if (info) cues.push(`Item here: ${item} (${info.purpose})`);
         }
@@ -2441,10 +2495,10 @@
       // Structured win_condition path (preferred — atomic Pass 2 + auto-repair always set this).
       const wcObj = activeWorldBible.win_condition;
       if (wcObj && typeof wcObj === "object" && Array.isArray(wcObj.required_items) && wcObj.required_location) {
-        const invLower = new Set((s.inventory || []).map(i => String(i).toLowerCase()));
+        const invCanon = new Set((s.inventory || []).map(i => snapItemToBible(i, activeWorldBible)));
         const requiredHave = wcObj.required_items.length > 0 &&
-          wcObj.required_items.every(it => invLower.has(String(it).toLowerCase()));
-        const atLocation = String(s.location || "").toLowerCase() === String(wcObj.required_location).toLowerCase();
+          wcObj.required_items.every(it => invCanon.has(it));
+        const atLocation = roomsMatch(s.location, wcObj.required_location);
         if (requiredHave && atLocation) {
           return `VICTORY! ${wcObj.description || "Adventure complete"}\nCongratulations, adventurer!`;
         }
@@ -2460,7 +2514,7 @@
       if (winItems.length && winItems.every(it => s.inventory.includes(it))) {
         for (const loc of (activeWorldBible.locations || [])) {
           if (!loc || typeof loc.name !== "string") continue;
-          if (wc.includes(loc.name.toLowerCase()) && s.location.toLowerCase() === loc.name.toLowerCase()) {
+          if (wc.includes(loc.name.toLowerCase()) && roomsMatch(s.location, loc.name)) {
             return `VICTORY! ${wc}\nCongratulations, adventurer!`;
           }
         }
@@ -2688,18 +2742,13 @@
     // ═══════════════════════════════════════════════════════════════════════════
     const $ = (id) => document.getElementById(id);
 
-    /** Single source of truth: stamp version on load screen, picker, and in-game header. */
+    /** Version on load screen and in-game header only. */
     function applyGameVersionLabels() {
       const label = `v${GAME_VERSION}`;
-      const detail = `${label} — debug: Copy debug · Run tests`;
-      const loadTitle = $("load-title");
-      if (loadTitle) loadTitle.textContent = `JMR's LLM Adventure ${label}`;
       const loadVer = $("load-version");
-      if (loadVer) loadVer.textContent = detail;
-      const pickVer = $("picker-version");
-      if (pickVer) pickVer.textContent = `(${label})`;
+      if (loadVer) loadVer.textContent = label;
       const gameVer = $("game-version");
-      if (gameVer) gameVer.textContent = `Gemma 4B + SD 1.5 — all in browser | ${label} Jonathan Rothberg 2026`;
+      if (gameVer) gameVer.textContent = `Gemma 4B + SD 1.5 — all in browser | ${label}`;
     }
     applyGameVersionLabels();
 

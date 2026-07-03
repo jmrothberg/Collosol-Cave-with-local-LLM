@@ -10,7 +10,12 @@ import {
   prepareBibleForValidation,
   cloneWorldBible,
   scoreChainCandidate,
+  normalizeWinCondition,
   hasChainSolvabilityGaps,
+  snapRoomToBible,
+  snapItemToBible,
+  roomsMatch,
+  mergeRoomAlias,
 } from "./world_bible_logic.mjs";
 
 /** Known fixture paths (relative to browser_adventure/). */
@@ -165,6 +170,52 @@ export async function runWorldBibleTests(opts = {}) {
     assert(typeof wb.win_condition === "object", "win_condition not object");
     assert(Array.isArray(wb.win_condition.required_items), "missing required_items");
     return `required_items: ${wb.win_condition.required_items.join(", ")}`;
+  }));
+
+  regression.push(runCase("snapRoomToBible underscore alias", () => {
+    const wb = {
+      locations: [
+        { name: "The Threshold of Gloomfang", exits: ["The Whispering Antechamber"] },
+        { name: "The Whispering Antechamber", exits: ["The Threshold of Gloomfang"] },
+      ],
+    };
+    assert(snapRoomToBible("Threshold_of_Gloomfang", wb) === "The Threshold of Gloomfang");
+    assert(snapRoomToBible("Whispering_Antechamber", wb) === "The Whispering Antechamber");
+    assert(roomsMatch("Threshold_of_Gloomfang", "The Threshold of Gloomfang"));
+    return "underscore aliases snapped";
+  }));
+
+  regression.push(runCase("snapItemToBible partial name", () => {
+    const wb = {
+      key_items: [
+        { name: "Mithril-threaded Rope", purpose: "traverse chasms" },
+        { name: "Elven Sightstone", purpose: "see hidden paths" },
+      ],
+    };
+    assert(snapItemToBible("rope", wb) === "Mithril-threaded Rope");
+    assert(snapItemToBible("mithril threaded rope", wb) === "Mithril-threaded Rope");
+    return "rope → Mithril-threaded Rope";
+  }));
+
+  regression.push(runCase("mergeRoomAlias consolidates state", () => {
+    const state = {
+      location: "Threshold_of_Gloomfang",
+      knownMap: {
+        Threshold_of_Gloomfang: { exits: ["Whispering_Antechamber"], notes: "entry" },
+        "The Threshold of Gloomfang": { exits: [], notes: "" },
+      },
+      roomItems: {
+        Threshold_of_Gloomfang: ["Mithril-threaded Rope"],
+        "The Threshold of Gloomfang": [],
+      },
+      roomImageBlobs: {},
+      roomsWithImages: [],
+    };
+    mergeRoomAlias(state, "Threshold_of_Gloomfang", "The Threshold of Gloomfang");
+    assert(state.location === "The Threshold of Gloomfang");
+    assert(!state.knownMap.Threshold_of_Gloomfang);
+    assert(state.roomItems["The Threshold of Gloomfang"].includes("Mithril-threaded Rope"));
+    return "alias merged into canonical room";
   }));
 
   // ── Live tests on active bible ──

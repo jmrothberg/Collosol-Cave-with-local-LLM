@@ -467,6 +467,130 @@ export function autoRepairWorldBible(wb) {
 }
 
 /** Score a chain candidate so best-of-N can pick the winner. */
+/** Normalize room names for fuzzy match (The Foo_Bar → foo bar). */
+export function normalizeRoomKey(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/^the\s+/, "")
+    .replace(/[_\-]+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Normalize item names for fuzzy match. */
+export function normalizeItemKey(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** True when game room and bible room refer to the same place. */
+export function roomsMatch(a, b) {
+  const ka = normalizeRoomKey(a);
+  const kb = normalizeRoomKey(b);
+  return ka.length > 0 && ka === kb;
+}
+
+/** Snap LLM room name to canonical locations[].name; returns raw if no good match. */
+export function snapRoomToBible(rawName, wb) {
+  if (!rawName || !wb) return rawName;
+  const rooms = (wb.locations || []).map(l => l && l.name).filter(Boolean);
+  if (!rooms.length) return rawName;
+  if (rooms.includes(rawName)) return rawName;
+
+  const rawKey = normalizeRoomKey(rawName);
+  for (const canon of rooms) {
+    if (normalizeRoomKey(canon) === rawKey) return canon;
+  }
+
+  let best = null;
+  let bestScore = 0;
+  for (const canon of rooms) {
+    const canonKey = normalizeRoomKey(canon);
+    if (canonKey.includes(rawKey) || rawKey.includes(canonKey)) {
+      const score = Math.min(canonKey.length, rawKey.length) / Math.max(canonKey.length, rawKey.length);
+      if (score > bestScore) { bestScore = score; best = canon; }
+    }
+    const rawTokens = new Set(rawKey.split(" ").filter(Boolean));
+    const canonTokens = canonKey.split(" ").filter(Boolean);
+    let overlap = 0;
+    for (const t of canonTokens) if (rawTokens.has(t)) overlap++;
+    if (canonTokens.length) {
+      const tokenScore = overlap / Math.max(canonTokens.length, rawTokens.size || 1);
+      if (overlap >= 2 && tokenScore > bestScore) { bestScore = tokenScore; best = canon; }
+    }
+  }
+  if (best && bestScore >= 0.55) return best;
+  return rawName;
+}
+
+/** Snap LLM item name to canonical key_items[].name. */
+export function snapItemToBible(rawName, wb) {
+  if (!rawName || !wb) return rawName;
+  const items = (wb.key_items || []).map(k => k && k.name).filter(Boolean);
+  if (!items.length) return rawName;
+  if (items.includes(rawName)) return rawName;
+
+  const rawKey = normalizeItemKey(rawName);
+  for (const it of items) {
+    if (normalizeItemKey(it) === rawKey) return it;
+  }
+  for (const it of items) {
+    const itKey = normalizeItemKey(it);
+    if (rawKey.length >= 3 && itKey.includes(rawKey)) return it;
+  }
+  const rawTokens = rawKey.split(" ").filter(t => t.length >= 3);
+  if (rawTokens.length) {
+    const matches = items.filter(it => {
+      const itKey = normalizeItemKey(it);
+      return rawTokens.every(t => itKey.includes(t));
+    });
+    if (matches.length === 1) return matches[0];
+  }
+  return rawName;
+}
+
+/** Merge duplicate room key (LLM alias) into canonical bible room in game state. */
+export function mergeRoomAlias(state, alias, canonical) {
+  if (!state || !alias || !canonical || alias === canonical) return;
+  if (state.knownMap[alias]) {
+    const src = state.knownMap[alias];
+    if (!state.knownMap[canonical]) state.knownMap[canonical] = { exits: [], notes: "" };
+    const dst = state.knownMap[canonical];
+    if (src.notes && !dst.notes) dst.notes = src.notes;
+    for (const ex of (src.exits || [])) {
+      if (!dst.exits.includes(ex)) dst.exits.push(ex);
+    }
+    delete state.knownMap[alias];
+  }
+  for (const entry of Object.values(state.knownMap || {})) {
+    if (Array.isArray(entry.exits)) {
+      for (let i = 0; i < entry.exits.length; i++) {
+        if (entry.exits[i] === alias) entry.exits[i] = canonical;
+      }
+    }
+  }
+  if (state.roomItems && state.roomItems[alias]) {
+    if (!state.roomItems[canonical]) state.roomItems[canonical] = [];
+    for (const it of state.roomItems[alias]) {
+      if (!state.roomItems[canonical].includes(it)) state.roomItems[canonical].push(it);
+    }
+    delete state.roomItems[alias];
+  }
+  if (state.location === alias) state.location = canonical;
+  if (state.roomImageBlobs && state.roomImageBlobs[alias]) {
+    state.roomImageBlobs[canonical] = state.roomImageBlobs[alias];
+    delete state.roomImageBlobs[alias];
+  }
+  if (Array.isArray(state.roomsWithImages) && state.roomsWithImages.includes(alias)) {
+    state.roomsWithImages = state.roomsWithImages.filter(r => r !== alias);
+    if (!state.roomsWithImages.includes(canonical)) state.roomsWithImages.push(canonical);
+  }
+}
+
 export function scoreChainCandidate(chainObj, rooms, items, firstRoom, lastRoom) {
   if (!chainObj || !Array.isArray(chainObj.puzzle_chain)) return -Infinity;
   const chain = chainObj.puzzle_chain;
