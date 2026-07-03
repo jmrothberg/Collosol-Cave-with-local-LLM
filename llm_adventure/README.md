@@ -21,16 +21,23 @@ huggingface-cli download Qwen/Qwen3-30B-A3B-8bit --local-dir ~/MLX_Models/Qwen3-
 huggingface-cli download AITRADER/FLUX2-klein-9B-mlx-8bit --local-dir ~/Diffusion_Models/FLUX2-klein-9B-mlx-8bit
 
 # Run
-python LMM_adventure_April_30.py
+python LMM_adventure_May_2_2026.py
 ```
 
 Command-line options:
 
 ```bash
-python LMM_adventure_April_30.py --model Qwen3-30B-A3B-8bit   # Specify LLM model
-python LMM_adventure_April_30.py --no-images                    # Disable image generation
-python LMM_adventure_April_30.py --cli                          # CLI mode (no Gradio UI)
-python LMM_adventure_April_30.py --player "Gandalf"             # Set player name
+python LMM_adventure_May_2_2026.py --model Qwen3-30B-A3B-8bit   # Specify LLM model
+python LMM_adventure_May_2_2026.py --no-images                    # Disable image generation
+python LMM_adventure_May_2_2026.py --cli                          # CLI mode (no Gradio UI)
+python LMM_adventure_May_2_2026.py --player "Gandalf"             # Set player name
+```
+
+### Run tests
+
+```bash
+cd llm_adventure
+pytest
 ```
 
 ---
@@ -96,6 +103,21 @@ The engine got significantly more reliable on local 27B–35B class models witho
 | `DEBUG=1` | off | CLI: dump full payload JSON each turn |
 | `ADV_VERBOSE_DEBUG=1` | off | Show every per-tool debug line in UI |
 | `ADV_INJECT_ENGINE_NOTES=1` | off | Inject `[WARN]`s into next user prompt |
+| `USE_ATOMIC_PASS2=1` | off | Use atomic Pass-2 sub-passes for world-bible generation (small/Ollama models) |
+
+### World Bible schema (solvability)
+
+The engine validates every bible before play using `validate_world_bible` (schema richness) and `validate_world_bible_solvability` (graph + chain):
+
+- **`locations[]`**: each room has `name`, `description`, `exits[]` (bidirectional graph from first room)
+- **`key_items[]`**: `{name, purpose}` — every win/item reference must appear here
+- **`item_locations`**: maps item name → `"RoomName: hint"` (room name must match)
+- **`win_condition`**: `{required_items[], required_location, description}` — exact match at runtime
+- **`solution_chain[]`**: ordered `{step, location, requires_item, blocker, result}` — proves reachability
+
+`auto_repair_world_bible` patches mechanical gaps; `synthesize_solution_chain` builds a minimal chain when the LLM omits one. Fast-path movement/take respects monster and chain blockers via `engine/blockers.py`.
+
+See also [`../COMPARISON_AND_BEST_OF_BOTH_WORLDS.md`](../COMPARISON_AND_BEST_OF_BOTH_WORLDS.md) for cross-engine parity notes.
 
 ### What did NOT change
 - The LLM is still the GM. Every guard is a warning, never a block. The model can still introduce new rooms (`connect`), new items (`place_items`), new NPCs in narration. Schema flexibility is intact.
@@ -238,7 +260,9 @@ The key: all improvements come from the LLM better using the same simple tools.
 
 | File | Description |
 |------|-------------|
-| `LMM_adventure_April_30.py` | Main game engine (MLX-LM + MFLUX + Gradio) |
+| `LMM_adventure_May_2_2026.py` | Main game engine (MLX-LM + MFLUX + Gradio) |
+| `engine/` | Extracted logic: world bible validate/repair, fast-path commands, state, JSON parse |
+| `tests/` | Pytest suite — run `pytest` from `llm_adventure/` |
 | [`../browser_adventure/`](../browser_adventure/) | **JMR's LLM Adventure** (browser) — game + detailed docs ([`adventure.html`](../browser_adventure/adventure.html), [`README.md`](../browser_adventure/README.md)) |
 | `llm_adventure/adventure.html` | Redirect to `../browser_adventure/adventure.html` (keep old bookmarks working) |
 | Root `adventure.html` | Redirect stub when `http.server` runs from repo root (→ `browser_adventure/adventure.html`) |

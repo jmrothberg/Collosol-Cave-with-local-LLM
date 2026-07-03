@@ -49,5 +49,6 @@ fuzzywuzzy
 python-Levenshtein
 spacy>=3.7.5
 
-# Build tools
-wheel
+# Dev / test dependencies
+pytest>=8.0
+pytest-mock>=3.12

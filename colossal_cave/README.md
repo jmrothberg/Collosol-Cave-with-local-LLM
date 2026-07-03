@@ -25,6 +25,79 @@ AI artwork and (optionally) Pyramid Flow generates per-room videos.
   on Mac MPS with PyTorch 2.9.0+).
 - **Gradio** web UI for gameplay, with image gallery and map.
 
+---
+
+## Architecture
+
+The game is organized in layers under `colossal_cave/`:
+
+```
+Player command
+    → engine/preprocess.py      (typo correction)
+    → engine/llm_commands.py    (Ollama JSON parse + shortcuts)
+    → execute_action()          (dispatch: move, take, attack, …)
+    → engine/session.py         (GameSession — gradual migration from globals)
+    → ui/gradio_app.py          (Gradio web UI)
+    → media/lazy_imports.py     (diffusion loaded on first use)
+```
+
+| Package | Role |
+|---------|------|
+| `engine/` | Pure logic: preprocess, item matching, data validation, map, trophies, LLM parse helpers, `GameSession` |
+| `ui/` | Gradio Blocks and launch (`ui/gradio_app.py`) |
+| `media/` | Lazy-loaded diffusion pipeline cache |
+| `config/` | MPS/CUDA device detection |
+| `tests/` | pytest suite |
+
+**Entry point:** `python Colossal_Cave_Aug_2_25.py` (canonical). Root-level copies of `mini_flux_*` / `mini_pyramid_*` point here.
+
+---
+
+## Testing
+
+Install dev dependencies (included in `requirements.txt`):
+
+```bash
+# from repo root — use the project venv
+source .venv/bin/activate
+pip install -r colossal_cave/requirements.txt
+```
+
+Run CI-safe tests (no GPU, no Ollama):
+
+```bash
+cd colossal_cave
+pytest -m "not gpu and not ollama"
+```
+
+Optional markers:
+
+| Marker | Meaning |
+|--------|---------|
+| `gpu` | Needs CUDA or MPS — run with `pytest -m gpu` locally |
+| `ollama` | Needs `ollama serve` running |
+| `slow` | Long integration tests |
+
+On **Mac (MPS)**, `pytest` runs all tests; one CUDA-only smoke test skips automatically.
+On **CUDA Linux**, all 49 tests should pass including `test_diffusion_manager_reports_cuda`.
+
+### Feature → test mapping
+
+| Feature | Test file |
+|---------|-----------|
+| Command typo preprocess | `tests/test_preprocess.py` |
+| Item fuzzy match | `tests/test_item_matching.py` |
+| `adventure_dataRA.json` schema | `tests/test_data_schema.py` |
+| Map PNG generation | `tests/test_map.py` |
+| Trophy win conditions | `tests/test_trophy.py` |
+| LLM JSON parse / shortcuts | `tests/test_llm_parse.py` |
+| Command dispatch helpers | `tests/test_command_dispatch.py` |
+| Save/load pickle | `tests/test_save_load.py` |
+| Mocked Ollama integration | `tests/test_integration_mock_llm.py` (needs gradio + torch) |
+| GPU smoke | `tests/test_gpu_smoke.py` |
+
+CI runs on every push via `.github/workflows/colossal_cave_tests.yml`.
+
 > Note: `sentence-transformers` is currently imported and a model is loaded at
 > startup (`vector_model = SentenceTransformer('all-mpnet-base-v2', ...)`),
 > but it is **not used** by the current command pipeline -- Ollama JSON-mode
@@ -49,10 +122,11 @@ In a separate terminal, keep Ollama running: `ollama serve`.
 ### 2. Install Python dependencies
 
 ```bash
-cd colossal_cave
-pip install -r requirements.txt          # core runtime (game + image gen)
+# from repo root
+source .venv/bin/activate
+pip install -r colossal_cave/requirements.txt          # core runtime + tests
 # optional, full features (video generation, extra utilities, MFLUX):
-pip install -r colossal_requirements.txt
+pip install -r colossal_cave/colossal_requirements.txt
 ```
 
 ### 3. Run
@@ -155,6 +229,12 @@ monster locations in her answer.
 | `Adventure_Game_Saved/` | Pickled save files (`Adv_*.pkl`). |
 | `temp_videos/` | Temporary `.mp4` files for room videos passed to the Gradio video player. |
 | `PLAN_BETTER_ADVENTURE.md` | Working notes for upcoming engine + UX improvements. |
+| `engine/` | Extracted pure logic (preprocess, items, data, map, trophy, session, llm_commands, commands). |
+| `ui/gradio_app.py` | Gradio web UI (launched via `main()` in entry script). |
+| `media/lazy_imports.py` | Lazy-loaded diffusion pipeline cache. |
+| `config/devices.py` | MPS/CUDA device detection. |
+| `tests/` | pytest suite — run `pytest -m "not gpu and not ollama"`. |
+| `pytest.ini` | pytest markers: `gpu`, `ollama`, `slow`. |
 | `README.md` | This file. |
 | `README_pyramid_MPS_Video_Generation.md` | Mac MPS + Pyramid Flow setup guide (video generation). |
 

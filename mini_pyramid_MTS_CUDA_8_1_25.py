@@ -1,5 +1,6 @@
 """
-July 24 2025 - added code to work with pyramid flow on CUDA with 2x 24GB GPUs. 
+July 24 2025 - added code to work with pyramid flow on CUDA with 2x 24GB GPUs.
+Canonical copy: colossal_cave/mini_pyramid_MTS_CUDA_8_1_25.py (this root file is a convenience duplicate) 
 
 PYRAMID FLOW VIDEO GENERATION - OPTIMIZED FOR GPU POWER
 

@@ -357,7 +357,7 @@ but don't move the needle on a play session.
 | P2 fun+perf | `fast-path` | `try_local_command` before `llm_process_command`; **must** check `dest_room.monsters` for movement (~100 lines) |
 | P2 perf | `prompt-trim` | Trim `llm_process_command` prompt; conditional sections + `last_described_room` cache (~50 lines) |
 | P2 fun | `combat-flavor` | One short LLM flavor line per swing, cached by (actor, weapon, monster, hit/kill); deterministic damage stays in code (~30 lines) |
-| P3 maintain | `split-modules` | Extract `colossal_cave/{config,media,engine,ui}/` submodules; keep `Aug_2_25.py` as thin entry. Touches many files but no behavior change |
-| P3 maintain | `lazy-media` | Defer diffusers/video imports; scope FLUX torch monkey-patches to inference call |
-| P3 maintain | `pytest-core` | pytest for parsing/matching/trophy helpers + new `adjacent_cues`, no GPU or Ollama needed |
+| P3 maintain | `split-modules` | **PARTIAL (2026-07):** `engine/`, `ui/`, `media/`, `config/` extracted; main file still holds classes + game loop. Further split: `engine/commands.py` full dispatch, class move to `engine/models.py`. **Test gate:** run `pytest -m "not gpu and not ollama"` after each extraction. |
+| P3 maintain | `lazy-media` | **PARTIAL (2026-07):** `media/lazy_imports.py` added; main game still eager-imports diffusers at startup — wire lazy path when enabling images. |
+| P3 maintain | `pytest-core` | **DONE (2026-07):** `tests/` with 40+ CI-safe tests; GitHub Actions workflow `.github/workflows/colossal_cave_tests.yml`. P1/P2 features must add/update tests in matching file (e.g. `adjacent_cues` → `tests/test_adjacent_cues.py`). |
 | P3 ASK first | `dead-vector-load` | Two-line removal of unused `SentenceTransformer` load at L124 + L397; saves ~3 s + ~440 MB startup |

@@ -1,4 +1,5 @@
 # FLUX Image Generation with Multi-GPU Support
+# Canonical copy: colossal_cave/mini_flux_MTS_CUDA_8_1_25.py (this root file is a convenience duplicate)
 # This configuration WORKS with 2x 24GB RTX 4090 GPUs
 # 
 # KEY LEARNINGS:

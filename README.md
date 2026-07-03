@@ -6,9 +6,7 @@ Two text-adventure games inspired by the classic "Colossal Cave Adventure," each
 
 ---
 
-## Browser AI Demo (no install needed)
-
-**[JMR's LLM Adventure — play in your browser](https://jmrothberg.github.io/JMR-LLM-Adventure/browser_adventure/adventure.html)** — Gemma 4B + Stable Diffusion 1.5 text adventure, runs entirely in-browser via WebGPU. Requires Chrome/Edge 113+. First run downloads ~5 GB of models (cached). Source: [`JMR-LLM-Adventure`](https://github.com/jmrothberg/JMR-LLM-Adventure).
+## Browser demo (no install)
 
 **[Run WebGPU Text-to-Image Compare in your browser](https://jmrothberg.github.io/Collosol-Cave-with-local-LLM/llm_adventure/diffusers-webgpu-compare-test.html)** — compare SD-Turbo, Janus-Pro-1B, and SD 1.5 multi-step side by side. Runs entirely in-browser via ONNX Runtime Web + WebGPU. Requires Chrome/Edge 113+ with WebGPU. First run downloads ~2 GB per model (cached).
 

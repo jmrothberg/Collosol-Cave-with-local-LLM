@@ -350,7 +350,7 @@ def execute_world_bible_generation(state_mgr: "StateManager", model_id: str, the
     result = generate_world_bible(state_mgr, heavy_model_id, theme, max_tokens)
     
     if result:
-        WORLD_BIBLE = result
+        _assign_world_bible(result)
         return True, "World bible generated successfully.", WORLD_BIBLE
     else:
         return False, "Failed to generate world bible.", None
@@ -1332,7 +1332,7 @@ class StateManager:
                     self.state.game_flags = getattr(self.state, 'game_flags', {})
                     
                     # Load world bible
-                    WORLD_BIBLE = data.get('world_bible')
+                    _assign_world_bible(data.get('world_bible'))
                     
                     # Restore images
                     image_data = data.get('images', {})
@@ -1393,16 +1393,16 @@ class StateManager:
                     if wb_files:
                         try:
                             with open(os.path.join(tmp_dir, wb_files[0]), "r", encoding="utf-8") as f:
-                                WORLD_BIBLE = json.load(f)
+                                _assign_world_bible(json.load(f))
                         except UnicodeDecodeError as e:
                             print(f"[load] UTF-8 decode error in world bible {wb_files[0]}: {e}")
                             try:
                                 with open(os.path.join(tmp_dir, wb_files[0]), "r", encoding="latin-1") as f:
-                                    WORLD_BIBLE = json.load(f)
+                                    _assign_world_bible(json.load(f))
                             except Exception:
-                                WORLD_BIBLE = None
+                                _assign_world_bible(None)
                         except Exception:
-                            WORLD_BIBLE = None
+                            _assign_world_bible(None)
                     # Merge images into IN_GAME_IMG_DIR
                     img_src = os.path.join(tmp_dir, "in_game_images")
                     if os.path.isdir(img_src):
@@ -5715,7 +5715,7 @@ def load_default_world_bible_if_needed() -> bool:
                     print(f"  - {r}")
         except Exception:
             pass
-        WORLD_BIBLE = wb
+        _assign_world_bible(wb)
         rooms = len(wb.get("locations", []) or [])
         items = len(wb.get("key_items", []) or [])
         chain_steps = len(wb.get("solution_chain", []) or [])
@@ -7079,7 +7079,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
                 if not theme_text.strip():
                     return "❌ Provide a theme first", theme_text
                 if WORLD_BIBLE is None:
-                    WORLD_BIBLE = {"global_theme": theme_text.strip()}
+                    _assign_world_bible({"global_theme": theme_text.strip()})
                 else:
                     WORLD_BIBLE["global_theme"] = theme_text.strip()
                 return f"✅ Theme set: {theme_text.strip()}", theme_text.strip()
@@ -7109,7 +7109,7 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
             global WORLD_BIBLE
             try:
                 # Force-reset so loader actually reloads even if a bible is set.
-                WORLD_BIBLE = None
+                _assign_world_bible(None)
                 loaded = load_default_world_bible_if_needed()
                 if not loaded:
                     return ("❌ Could not find browser_adventure/default_cave.json",
@@ -7358,7 +7358,72 @@ def launch_gradio_ui(state_mgr: StateManager, llm: LLMEngine, image_gen: Optiona
     app.launch(server_name="127.0.0.1", server_port=_env_port, share=True, show_error=True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENGINE MODULE WIRE-UP (May 2026) — overrides in-file duplicates with tested modules
+# ═══════════════════════════════════════════════════════════════════════════════
+import sys as _engine_sys
+
+_ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _ENGINE_ROOT not in _engine_sys.path:
+    _engine_sys.path.insert(0, _ENGINE_ROOT)
+
+from engine import bible_store as _engine_bible_store  # noqa: E402
+from engine.world_bible.validate import (  # noqa: E402
+    validate_world_bible,
+    validate_world_bible_solvability,
+)
+from engine.world_bible.repair import auto_repair_world_bible, micro_repair_world_bible  # noqa: E402
+from engine.world_bible.win_condition import (  # noqa: E402
+    _parse_win_condition,
+    check_win_condition,
+)
+from engine.world_bible.normalize import (  # noqa: E402
+    _normalize_browser_chain,
+    load_default_world_bible_if_needed,
+)
+from engine.commands import (  # noqa: E402
+    try_local_command,
+    handle_look_command,
+    post_turn_bookkeeping as _post_turn_bookkeeping,
+)
+from engine.item_matching import (  # noqa: E402
+    normalize_item_token as _normalize_item_token,
+    split_item_list as _split_item_list,
+    match_item as _match_item,
+    match_exit as _match_exit,
+)
+from engine.parse import (  # noqa: E402
+    fix_common_json_errors,
+    parse_json_with_fallbacks,
+    extract_json_from_text,
+    strip_llm_thinking_blocks,
+    score_world_bible_candidate,
+    pick_world_bible_from_candidates,
+)
+from engine.session import seed_game_state_from_world_bible  # noqa: E402
+
+
+def _sync_world_bible_to_engine_store() -> None:
+    """Keep bible_store in sync with module-level WORLD_BIBLE global."""
+    _engine_bible_store.set_world_bible(WORLD_BIBLE)
+
+
+def _assign_world_bible(wb: Optional[Dict[str, Any]]) -> None:
+    """Single write path for WORLD_BIBLE (main module + engine store)."""
+    global WORLD_BIBLE
+    WORLD_BIBLE = wb
+    _engine_bible_store.set_world_bible(wb)
+
+
+def _get_world_bible() -> Optional[Dict[str, Any]]:
+    wb = _engine_bible_store.get_world_bible()
+    if wb is not None:
+        return wb
+    return WORLD_BIBLE
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _sync_world_bible_to_engine_store()
     ensure_directories_exist()
 
     parser = argparse.ArgumentParser(description="LLM Adventure — MLX-LM + MFLUX on Apple Silicon")
@@ -7403,7 +7468,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # World bible is loaded from .pkl files now, not separate files
     global WORLD_BIBLE
-    WORLD_BIBLE = None
+    _assign_world_bible(None)
     print("\nWelcome to the Minimal LLM Adventure!")
     print("The world is driven by your chosen LLM. Images use MFLUX (FLUX.2-klein-9B).")
 

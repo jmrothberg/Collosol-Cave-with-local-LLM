@@ -1,4 +1,4 @@
-# Core runtime
+# Core runtime (Colossal Cave + tests)
 gradio>=4.0.0
 torch>=2.2.0
 ollama>=0.1.0
@@ -12,6 +12,12 @@ safetensors>=0.4.5
 # Image/array utils
 numpy>=1.26.0
 Pillow>=10.0.0
+
+# Command parsing + tests
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.25.0
+pytest>=8.0
+pytest-mock>=3.12
 
 # Optional: video utilities used by Pyramid-Flow submodule
 opencv-python>=4.8.0

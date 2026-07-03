@@ -43,6 +43,14 @@ ARCHITECTURE OVERVIEW:
 - LLM processes natural language commands into game actions
 - All game data loaded from adventure_dataRA.json
 
+PACKAGE LAYOUT (colossal_cave/):
+- engine/     — preprocess, items, data, map, trophy, session, llm_commands, commands
+- ui/         — Gradio web interface (ui/gradio_app.py)
+- media/      — lazy-loaded diffusion imports (media/lazy_imports.py)
+- config/     — device detection (config/devices.py)
+- tests/      — pytest suite (pytest -m "not gpu and not ollama")
+- Entry point: python Colossal_Cave_Aug_2_25.py  (or main() when imported)
+
 DEVICE ALLOCATION:
 - Mac: Uses MPS device for diffusion AND video generation (PyTorch 2.9.0+)
 - Multi-GPU: Distributes LLM, diffusion, and video across GPUs
@@ -129,6 +137,23 @@ from huggingface_hub import login
 
 # === GAME-SPECIFIC IMPORTS ===
 from complete_instruction import get_complete_instructions  # Game help system
+
+# CHANGE (test/org): extracted pure engine helpers — see colossal_cave/engine/
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+if _current_dir not in sys.path:
+    sys.path.insert(0, _current_dir)
+from engine.preprocess import preprocess_command as _engine_preprocess_command
+from engine.items import find_item_smart
+from engine.map_utils import draw_map_png as _engine_draw_map_png
+from engine.trophy import check_trophy as _engine_check_trophy
+from engine.data import load_adventure_data_file, validate_adventure_data, default_adventure_data_path
+from engine.llm_commands import (
+    apply_command_shortcuts,
+    parse_llm_json_response,
+    filter_entities_for_room,
+    needs_clarification,
+)
+from engine.session import get_session, sync_session_from_globals
 
 # === HUGGING FACE AUTHENTICATION ===
 # Try to login to Hugging Face, but don't fail if offline
@@ -419,6 +444,11 @@ def load_adventure_data():
     try:
         with open(adventure_data_path, 'r', encoding='utf-8') as f:
             adventure_data = json.load(f)
+
+            # Validate schema via engine.data (non-fatal warnings)
+            valid, schema_issues = validate_adventure_data(adventure_data)
+            if not valid:
+                print(f"Warning: adventure data schema issues: {'; '.join(schema_issues[:5])}")
 
             # Load primary content lists with validation
             room_descs_riddles = adventure_data.get("room_descs_riddles", [])
@@ -1455,37 +1485,7 @@ class Player(LivingThing):
 
     def _find_item_smart(self, item_name, items):
         """Find item using intelligent partial matching prioritizing substring matches"""
-        if not item_name or not items:
-            return None
-        
-        item_name_lower = item_name.lower()
-        
-        # First try exact match
-        for item in items:
-            if item.name.lower() == item_name_lower:
-                return item
-        
-        # Second try partial substring match (highest priority)
-        for item in items:
-            if item_name_lower in item.name.lower():
-                return item
-        
-        # Third try reverse substring match (item name contained in search term)
-        for item in items:
-            if item.name.lower() in item_name_lower:
-                return item
-        
-        # Finally try fuzzy match as fallback
-        best_match = None
-        best_score = 0
-        
-        for item in items:
-            score = fuzz.ratio(item.name.lower(), item_name_lower)
-            if score > best_score and score > 60:
-                best_score = score
-                best_match = item
-        
-        return best_match
+        return find_item_smart(item_name, items)
 
     def _describe_single_item(self, item, addvalue = None): #full description
         console = ""
@@ -3379,53 +3379,7 @@ class Monster(LivingThing):
 ###############################################################################
 
 def draw_map_png(cheat_mode=False):
-    num_rooms = len(rooms)
-    num_rooms_side = int(num_rooms**0.5)
-    room_size = 60  # Size of one room square in pixels
-    connection_size = 8  # Width of the connection lines in pixels
-    room_size = 60  # Offset of the west connection line from the center of the room in pixels
-    room_size = 60  # Offset of the north connection line from the center of the room in pixels
-    w, h = 10,10 # adjustment for room numbers
-    
-    # Calculate the total size of the image
-    image_size = ((num_rooms_side) * room_size, (num_rooms_side) * room_size)
-    image = Image.new("RGB", image_size, "white")
-    draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default()  # Load a default font
-    
-    for number, room in rooms.items():
-        x = ((number - 1) % num_rooms_side) * room_size
-        y = ((number - 1) // num_rooms_side) * room_size
-        if room.explored or cheat_mode:
-            if room.image:
-                imagetopaste = room.image.resize((room_size,room_size), Image.LANCZOS)
-                image.paste(imagetopaste, (x, y))
-
-    # Draw connections (if rooms are explored or in cheat mode)
-    for number, room in rooms.items():
-        x = ((number - 1) % num_rooms_side) * room_size
-        y = ((number - 1) // num_rooms_side) * room_size
-        if room.explored or cheat_mode:
-            for direction, connected_room in room.connected_rooms.items():
-                if direction == "east":
-                    draw.line([(x + room_size/1.2, y + room_size / 2 ), 
-                               (x + room_size*1.2, y + room_size / 2 )], 
-                              fill="green", width=connection_size)
-                if direction == "south":
-                    draw.line([(x + room_size/2, y + room_size / 1.2 ), 
-                               (x + room_size/2, y + room_size * 1.2 )], 
-                              fill="blue", width=connection_size)
-                if direction == "west":
-                    draw.line([(x - (room_size / 1.2 - room_size), y + room_size/2), 
-                               (x - (room_size * 1.2 - room_size), y + room_size/2)], 
-                              fill="pink", width=connection_size)
-                if direction == "north":
-                    draw.line([(x + room_size / 2 , y + room_size / 1.2 - room_size), 
-                               (x + room_size / 2 , y + room_size * 1.2 - room_size)], 
-                              fill="orange", width=connection_size)
-        draw.text((x + (room_size - w) / 2, y + (room_size - h) / 2), str(number), fill="black", font=font)
-    image.save(f"map.png")
-    return image
+    return _engine_draw_map_png(rooms, cheat_mode=cheat_mode, output_path="map.png")
 
 
 def riddle_create_connections(number):
@@ -3981,26 +3935,7 @@ def process_game_command(command, player, current_room):
 
 def preprocess_command(command):
     """Preprocess command for better LLM understanding"""
-    # Basic spell correction for common typos
-    common_typos = {
-        'attck': 'attack', 'atack': 'attack', 'attac': 'attack',
-        'tke': 'take', 'tak': 'take', 'tkae': 'take',
-        'ridde': 'riddle', 'ridle': 'riddle', 'riddel': 'riddle',
-        'sovle': 'solve', 'slove': 'solve', 'solv': 'solve',
-        'waer': 'wear', 'ware': 'wear', 'wera': 'wear',
-        'noth': 'north', 'soth': 'south', 'esst': 'east', 'wst': 'west',
-        'invntory': 'inventory', 'hlp': 'help', 'hlep': 'help',
-        'trdae': 'trade', 'traed': 'trade', 'talkk': 'talk'
-    }
-    
-    cmd_lower = command.lower()
-    for typo, correct in common_typos.items():
-        if typo in cmd_lower:
-            command = command.replace(typo, correct)
-            command = command.replace(typo.upper(), correct.upper())
-            command = command.replace(typo.capitalize(), correct.capitalize())
-    
-    return command.strip()
+    return _engine_preprocess_command(command)
 
 def llm_process_command(command, player, current_room):
     """
@@ -4026,14 +3961,7 @@ def llm_process_command(command, player, current_room):
     """
     
     # Apply shortcuts for common single-letter commands
-    cmd_lower = command.lower().strip()
-    shortcuts = {
-        'n': 'go north', 's': 'go south', 'e': 'go east', 'w': 'go west',
-        'i': 'inventory', 'l': 'look around', 'h': 'help', '?': 'help'
-    }
-    
-    if cmd_lower in shortcuts:
-        command = shortcuts[cmd_lower]
+    command = apply_command_shortcuts(command)
     
     # Build context directly inline - no need for separate function
     # Define all possible game actions for LLM
@@ -4165,56 +4093,20 @@ Command: "{command}"
     response_text = ollama_generate(prompt, max_tokens=400, temperature=0.1, format="json")
     print(f"response: {response_text}")
     
-    # Initialize the result structure
-    result = {
-        "chosen_action": [],
-        "entities": {k: [] for k in ["location", "room_items", "monsters", "npcs", "npc_items", "my_items", "my_magic", "weapons", "my_armor", "worn_armor", "directions", "values"]},
-        "confidence": 0.5
-    }
-
     # Parse JSON response (much simpler with format="json")
-    try:
-        # Fix common LLM typos in field names
-        cleaned_response = response_text.replace('"cchosen_action"', '"chosen_action"')
-        cleaned_response = cleaned_response.replace('"atttack"', '"attack"')
-        
-        parsed_response = json.loads(cleaned_response)
-        print("JSON parsing successful")
-        
-        result["chosen_action"] = parsed_response.get("chosen_action", [])
-        if not isinstance(result["chosen_action"], list):
-            result["chosen_action"] = [result["chosen_action"]]
-        
-        entity_categories = parsed_response.get("entity_categories", {})
-        for category, entities in entity_categories.items():
-            if category in result["entities"]:
-                result["entities"][category] = entities
-        
-        result["confidence"] = parsed_response.get("confidence", 0.8)
-        
-    except json.JSONDecodeError as e:
-        print(f"JSON parsing failed even with format='json': {e}")
-        print(f"Raw response: {response_text}")
-        
-        # Minimal fallback - just set low confidence and empty result
-        result["confidence"] = 0.3
-        result["chosen_action"] = []
+    result = parse_llm_json_response(response_text)
+    print("JSON parsing successful" if result["chosen_action"] else f"JSON parsing low confidence: {result['confidence']}")
 
     # Validate entities based on current room state  
     all_room_items = room_weapons + room_magic + room_armor + room_treasure
-    if all_room_items:
-        # Prefer specific item names, but allow special keywords as fallback
-        special_keywords = ["all", "everything"]
-        result["entities"]["room_items"] = [e for e in result["entities"]["room_items"] 
-                                          if e in all_room_items or e in special_keywords]
-    
     monster_names = [m.name for m in current_room.monsters]
-    if monster_names:
-        result["entities"]["monsters"] = [e for e in result["entities"]["monsters"] if e in monster_names]
-    
     directions = list(current_room.connected_rooms.keys())
-    if directions:
-        result["entities"]["directions"] = [e for e in result["entities"]["directions"] if e in directions]
+    result = filter_entities_for_room(
+        result,
+        room_item_names=all_room_items,
+        monster_names=monster_names,
+        directions=directions,
+    )
 
     print(f"Final result with confidence {result['confidence']}: {result}")
     return result
@@ -4244,7 +4136,7 @@ def execute_action(chosen_action, entities_by_type, command, confidence=0.5):
     
     # Low confidence - ask for clarification only for complex commands
     # Skip clarification for simple movement commands
-    if confidence < 0.4 and chosen_action and chosen_action not in ['go', 'take', 'leave']:
+    if needs_clarification(confidence, chosen_action):
         return get_llm_clarification(command, chosen_action, entities_by_type)
     
     
@@ -4418,30 +4310,9 @@ def generate_riddle_info(room_i):
 # If the condition is met, it adds the trophy to the list and updates the console.
 def check_trophy(trophy, condition, victory_message, victory_action):
     global trophies
-    # Check if the trophy is not already in the list
-    player_image = None
-    trophie_images = []
-    console = ""
-    if trophy not in trophies:
-        all_conditions_met = True
-        # Iterate over all rooms
-        for room in rooms.values():
-            # The condition function is called here with the room as argument.
-            # This function is a lambda function that was passed as an argument to check_trophy.
-            # It checks a specific condition in the room (e.g., if there are any treasures, monsters, riddles, or if the room is explored).
-            if condition(room):
-                all_conditions_met = False
-        # If all conditions are met (i.e., there are no more treasures, monsters, riddles, or unexplored rooms), the player wins the trophy
-        if all_conditions_met:
-            console = console + (f"Congratulations, {victory_message}!\n")
-            playerOne.drawing_self(victory_action)
-            player_image = playerOne.image
-            playerOne.current_room.add_treasure(False, f"{trophy.capitalize()}-Trophie")
-            temp_console, trophie_images  = playerOne.take(f"{trophy.capitalize()}-Trophie")  # returns the console and the image of the trophy
-            trophies.append(trophy)
-            print (f"trophies: {trophies}")
-            console = console +temp_console + f"Your trophies: {', '.join(trophies)}\n"
-    
+    console, player_image, trophie_images = _engine_check_trophy(
+        trophy, condition, victory_message, rooms, trophies, playerOne, victory_action,
+    )
     player_image = [player_image] if player_image is not None else []
     return console, player_image, trophie_images
 
@@ -4922,100 +4793,40 @@ list_of_diffusers = saved_diffusers()
 
 TEMP_VIDEO_DIR = setup_temp_directory()
 
-###############################################################################
-# ═══════════════════════ GRADIO UI ══════════════════════════════════════ #
-###############################################################################
+# CHANGE (test/org): sync legacy globals into GameSession for gradual migration
+def _sync_session_at_startup():
+    try:
+        sync_session_from_globals(
+            rooms=rooms,
+            player_one=playerOne,
+            old_room=old_room,
+            cheat_mode=cheat_mode,
+            magicword=magicword,
+            trophies=trophies,
+            active_game=active_game,
+            art_style_g=art_style_g,
+        )
+    except NameError:
+        pass
 
-with gr.Blocks(theme=gr.themes.Default(font=[gr.themes.GoogleFont("IBM Plex Mono")])) as web_interface:
-    if not list_of_saved_games:
-        list_of_saved_games = ["No saved games"]
-    if not list_of_llms or list_of_llms == ["No Ollama models found"]:
-        list_of_llms = ["No Ollama models found - please install models with 'ollama pull <model>'"]
-    if not list_of_diffusers:
-        list_of_diffusers = ["No saved diffusers"]
 
-    with gr.Row():
-        gr.Markdown("<h1 style='text-align: center;'>JMR's Colossal Cave Adventure</h1>")
-    with gr.Row():
-        with gr.Column():
-            image_output = gr.Gallery(label="Room Image")
-            video_output = gr.Video(label="Room Video", format="mp4")
-            text_input = gr.Textbox(autofocus=True, label="What do you want to do>")
-            difficulty_selector = gr.Radio(["Cheat", "Easy", "Medium", "Hard"], value = "Easy", label="Difficulty")
-            game_state_selector = gr.Radio(["Play-Game","Load-Game", "New-Game", "Save-Game"], label="Game State")
-            
-            with gr.Row():
-                game_selector = gr.Dropdown(list_of_saved_games, visible=False, label="Select a saved game to load" , value = list_of_saved_games[0])
-                name_of_game = gr.Textbox(visible = False, label="Name of game")  
-                number_of_rooms = gr.Textbox(visible = False, label="Number of rooms")
-                art_style = gr.Textbox(visible = False, label="Art Style")
-            with gr.Row():
-                room_npc_desc_art = gr.Checkbox(visible = False, value= True, label="Room & NPC Art and Description")
-                generate_videos = gr.Checkbox(label="Generate Videos", value=False, interactive=True)  # Now supported on Mac with MPS!
-                monster_desc_art = gr.Checkbox(visible = False, value= True, label="Monster Art & Description")
-                item_desc_art = gr.Checkbox(visible = False, value= True, label="Item Art and Description")
-            with gr.Row():
-                llm_select = gr.Dropdown(list_of_llms, visible=False, label="Select LLM", value = list_of_llms[0])
-                diff_select = gr.Dropdown(list_of_diffusers, visible=False, label="Select a Diffuser", value = list_of_diffusers[0])
-                
-            submit_button = gr.Button("Submit", visible=False)
-        with gr.Column():
-            room_desc_output = gr.Textbox(label="Room Description")
-            contents_output = gr.Textbox(label="Room Contents")
-            console_output = gr.Textbox(label="Console")
-            status_output = gr.Textbox(label="Health, Wealth, Points, Killed")
-            # Use a Row here to place map_output and map_image_output side by side
-            with gr.Row():
-                map_image_output = gr.Image(label=" ")
-                with gr.Column():
-                    rooms_explored = gr.Textbox(label="Rooms Explored")
-                    inventory_out = gr.Textbox(label="Inventory")
-            long_description_output = gr.Textbox(label="Room Long Description")
-    
-    # Conditionally show the game_selector
-    def update_game_selector(game_state):
-        if game_state == "Load-Game":
-            return (gr.Dropdown(visible=True), gr.Textbox(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False), gr.Checkbox(visible=False), 
-        gr.Checkbox(visible=False), gr.Button(visible=True), gr.Dropdown(visible=True), gr.Dropdown(visible=True), gr.Textbox(visible=True), gr.Checkbox(visible=False))
-        elif game_state == "Save-Game":
-            return (gr.Dropdown(visible=False), gr.Textbox(visible=True), gr.Textbox(visible=False), gr.Checkbox(visible=False), gr.Checkbox(visible=False), 
-        gr.Checkbox(visible=False), gr.Button(visible=True), gr.Dropdown(visible=False), gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False))
-        elif game_state == "New-Game":
-            return (gr.Dropdown(visible=False), gr.Textbox(visible=True), gr.Textbox(visible=True), gr.Checkbox(visible=True), gr.Checkbox(visible=True), 
-                gr.Checkbox(visible=True), gr.Button(visible=True), gr.Dropdown(visible=True), gr.Dropdown(visible=True), gr.Textbox(visible=True), gr.Checkbox(visible=True, interactive=True))  # Mac MPS video support!
-        elif game_state == "Play-Game":
-            return (gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False), gr.Checkbox(visible=False), 
-                gr.Checkbox(visible=False), gr.Button(visible=True), gr.Dropdown(visible=False), gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False))
-        else:
-            return (gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False) , gr.Checkbox(visible=False), 
-        gr.Checkbox(visible=False), gr.Button(visible=False), gr.Dropdown(visible=False), gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False))
+_sync_session_at_startup()
 
-    game_state_selector.change(update_game_selector, inputs=[game_state_selector], 
-                               outputs=[game_selector, name_of_game, number_of_rooms, room_npc_desc_art, monster_desc_art, item_desc_art, submit_button, llm_select, diff_select, art_style, generate_videos])
-    # Now the function will be called when the submit button is clicked or Enter is pressed
-    submit_inputs = [text_input, game_selector, difficulty_selector, game_state_selector, name_of_game, number_of_rooms, room_npc_desc_art, 
-                     monster_desc_art, item_desc_art, llm_select, diff_select, art_style, generate_videos]
-    submit_outputs = [image_output, map_image_output, room_desc_output, contents_output, console_output, status_output, rooms_explored, 
-                      inventory_out, long_description_output, game_state_selector, video_output]
-    
-    text_input.submit(  # Set up the submit event
-        fn=talk_to_functions,
-        inputs=submit_inputs,
-        outputs=submit_outputs
-    )
-    submit_button.click(
-        fn=talk_to_functions,
-        inputs=submit_inputs,
-        outputs=submit_outputs
+
+def main():
+    """Launch Gradio UI (entry point for python Colossal_Cave_Aug_2_25.py)."""
+    from ui.gradio_app import build_and_launch_ui
+    build_and_launch_ui(
+        talk_to_functions=talk_to_functions,
+        list_of_saved_games=list_of_saved_games,
+        list_of_llms=list_of_llms,
+        list_of_diffusers=list_of_diffusers,
+        ensure_mflux_installed_fn=ensure_mflux_installed,
     )
 
-# Ensure mflux is installed for Mac compatibility
-ensure_mflux_installed()
 
-try:
-    web_interface.launch(share=True)
-except Exception:
-    web_interface.launch(share=False)
+if __name__ == "__main__":
+    main()
 
 """
 === AREAS FOR LLM EDITING AND ENHANCEMENT ===

@@ -27,8 +27,8 @@ os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 # Now import torch AFTER CUDA environment is set
 import torch
 
-# Force CUDA to re-check after environment setup
-if hasattr(torch.cuda, '_lazy_init'):
+# Force CUDA to re-check after environment setup (skip on Mac / CPU-only builds)
+if hasattr(torch.cuda, '_lazy_init') and torch.cuda.is_available():
     torch.cuda._lazy_init()
 
 print(f"[diffusion_manager] CUDA available: {torch.cuda.is_available()}")
