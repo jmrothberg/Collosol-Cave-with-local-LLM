@@ -188,9 +188,19 @@
     /* ── Debug panel ── */
     .debug-toggle {
       font-size: 12px; color: var(--text-muted); cursor: pointer; user-select: none;
-      padding: 4px 0;
     }
     .debug-toggle:hover { color: var(--text); }
+    .debug-row {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 4px 0;
+    }
+    .debug-btn {
+      font-size: 11px; color: var(--text-muted); background: var(--panel);
+      border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px;
+      cursor: pointer; font-family: inherit;
+    }
+    .debug-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+    .debug-btn:disabled { opacity: 0.5; cursor: wait; }
     #debug-panel {
       display: none; padding: 8px 10px; margin-top: 4px;
       background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
@@ -358,7 +368,11 @@
       <input type="text" id="player-input" placeholder="What do you want to do?" autocomplete="off" disabled />
       <button class="primary" id="btn-send" disabled>Send</button>
     </div>
-    <div class="debug-toggle" id="debug-toggle">&#9654; Debug</div>
+    <div class="debug-row">
+      <div class="debug-toggle" id="debug-toggle">&#9654; Debug</div>
+      <button type="button" class="debug-btn" id="debug-copy-btn" hidden>Copy debug</button>
+      <button type="button" class="debug-btn" id="debug-run-tests-btn">Run tests</button>
+    </div>
     <div id="debug-panel"></div>
   </main>
 
@@ -368,6 +382,13 @@
     // ═══════════════════════════════════════════════════════════════════════════
     import { pipeline, TextStreamer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.1/+esm";
     import { Txt2ImgWorkerClient } from "../llm_adventure/vendor/web-txt2img/index.js";
+    import {
+      validateWorldBible, validateWorldBibleSolvability, autoRepairWorldBible,
+      extractFirstJson, extractMapSkeleton, extractJsonFromText, scoreChainCandidate,
+      synthesizeAuthorWalkthrough, winConditionText, cloneWorldBible,
+      forceSyntheticChainHardFloor, hasChainSolvabilityGaps,
+    } from "./world_bible_logic.mjs";
+    import { runWorldBibleTests, formatTestResults } from "./world_bible_tests.mjs";
 
     // #8 Cache the ORT-Web WASM runtime in the browser so the second visit doesn't re-download
     // it (useful on flaky networks; harmless when offline). Added in Transformers.js v4.
@@ -799,54 +820,8 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // JSON PARSING — robust extraction of LLM JSON directives
+    // JSON PARSING — extractFirstJson/extractMapSkeleton in world_bible_logic.mjs
     // ═══════════════════════════════════════════════════════════════════════════
-
-    function fixCommonJsonErrors(s) {
-      s = s.replace(/,\s*}/g, "}").replace(/,\s*]/g, "]");
-      let ob = 0, cb = 0, osq = 0, csq = 0;
-      for (const c of s) { if (c === "{") ob++; else if (c === "}") cb++; else if (c === "[") osq++; else if (c === "]") csq++; }
-      while (cb < ob) { s += "}"; cb++; }
-      while (csq < osq) { s += "]"; csq++; }
-      while (s.split("}").length - 1 > s.split("{").length - 1) s = s.replace(/}$/, "");
-      while (s.split("]").length - 1 > s.split("[").length - 1) s = s.replace(/]$/, "");
-      return s;
-    }
-
-    function tryParseJson(s) {
-      try { const o = JSON.parse(s); if (o && typeof o === "object") return o; } catch {}
-      try { const o = JSON.parse(fixCommonJsonErrors(s)); if (o && typeof o === "object") return o; } catch {}
-      return null;
-    }
-
-    /** Extract JSON objects from LLM text. Returns array of parsed objects. */
-    function extractJsonFromText(text) {
-      const results = [];
-
-      // Strategy 1: fenced ```json``` blocks
-      const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
-      let m;
-      while ((m = fenceRe.exec(text)) !== null) {
-        const parsed = tryParseJson(m[1].trim());
-        if (parsed) results.push(parsed);
-      }
-      if (results.length) return results;
-
-      // Strategy 2: balanced-brace extraction
-      let depth = 0, start = -1;
-      for (let i = 0; i < text.length; i++) {
-        if (text[i] === "{") { if (depth === 0) start = i; depth++; }
-        else if (text[i] === "}") {
-          depth--;
-          if (depth === 0 && start >= 0) {
-            const parsed = tryParseJson(text.slice(start, i + 1));
-            if (parsed) results.push(parsed);
-            start = -1;
-          }
-        }
-      }
-      return results;
-    }
 
     /** Strip JSON blocks / artifacts from text, returning clean narration. */
     function cleanNarration(text) {
@@ -865,87 +840,8 @@
 
     // ═══════════════════════════════════════════════════════════════════════════
     // WORLD BIBLE GENERATION — create a new adventure from a theme description
+    // (validateWorldBible, autoRepairWorldBible, etc. in world_bible_logic.mjs)
     // ═══════════════════════════════════════════════════════════════════════════
-
-    function validateWorldBible(wb) {
-      const issues = [];
-      const warnings = [];
-      const required = ["objectives", "locations", "key_items", "win_condition"];
-      for (const f of required) {
-        if (!wb[f] || (Array.isArray(wb[f]) && wb[f].length === 0)) issues.push(`Missing or empty: ${f}`);
-      }
-      if (wb.locations && wb.locations.length < 3) issues.push(`Too few locations (${wb.locations.length}), need at least 3`);
-      if (wb.key_items && wb.key_items.length < 3) issues.push(`Too few items (${wb.key_items.length}), need at least 3`);
-      if (wb.key_items) {
-        for (const item of wb.key_items) {
-          if (typeof item === "object" && !item.purpose) issues.push(`Item '${item.name || "?"}' has no purpose`);
-        }
-      }
-
-      const roomNames = new Set();
-      if (wb.locations) {
-        for (const loc of wb.locations) {
-          if (typeof loc === "object" && !loc.description) issues.push(`Location '${loc.name || "?"}' has no description`);
-          if (loc.name) roomNames.add(loc.name);
-        }
-
-        // Check exits reference real rooms and no orphans
-        const reachable = new Set();
-        for (const loc of wb.locations) {
-          if (!Array.isArray(loc.exits) || loc.exits.length === 0) {
-            warnings.push(`Location '${loc.name}' has no exits`);
-          } else {
-            reachable.add(loc.name);
-            for (const exit of loc.exits) {
-              reachable.add(exit);
-              if (!roomNames.has(exit)) warnings.push(`Exit '${exit}' from '${loc.name}' not in locations list`);
-            }
-          }
-        }
-        for (const name of roomNames) {
-          if (!reachable.has(name)) warnings.push(`Location '${name}' is orphaned (unreachable)`);
-        }
-      }
-
-      // Check puzzle_chain references real items
-      if (Array.isArray(wb.puzzle_chain)) {
-        const itemNames = new Set((wb.key_items || []).map(k => (k.name || "").toLowerCase()));
-        for (const step of wb.puzzle_chain) {
-          if (step.gives && !itemNames.has(step.gives.toLowerCase())) {
-            warnings.push(`puzzle_chain step ${step.step}: gives '${step.gives}' not in key_items`);
-          }
-          if (step.unlocks && roomNames.size && !roomNames.has(step.unlocks)
-              && step.unlocks !== "win" && step.unlocks !== null) {
-            warnings.push(`puzzle_chain step ${step.step}: unlocks '${step.unlocks}' not a known room`);
-          }
-        }
-      } else {
-        warnings.push("No puzzle_chain defined");
-      }
-
-      // Check NPC/monster locations reference real rooms
-      for (const npc of (wb.npcs || [])) {
-        if (npc.location && roomNames.size && !roomNames.has(npc.location)) {
-          warnings.push(`NPC '${npc.name}' location '${npc.location}' not in locations`);
-        }
-      }
-      for (const mon of (wb.monsters || [])) {
-        if (mon.location && roomNames.size && !roomNames.has(mon.location)) {
-          warnings.push(`Monster '${mon.name}' location '${mon.location}' not in locations`);
-        }
-      }
-
-      // Check item_locations reference real rooms
-      if (wb.item_locations && roomNames.size) {
-        for (const [item, locDesc] of Object.entries(wb.item_locations)) {
-          const matchesRoom = [...roomNames].some(rn => locDesc.toLowerCase().includes(rn.toLowerCase()));
-          if (!matchesRoom) warnings.push(`item_locations['${item}'] doesn't clearly reference a room`);
-        }
-      }
-
-      if (warnings.length) console.warn("[world_bible] Warnings:", warnings);
-      return { valid: issues.length === 0, issues: [...issues, ...warnings] };
-    }
 
     /** Helper: run LLM generation and return raw text. */
     async function runLlmGeneration(systemMsg, userMsg, maxTokens, temperature, onChunk) {
@@ -1108,38 +1004,7 @@
       return out;
     }
 
-    /** Helper: extract first valid JSON object from LLM output. */
-    function extractFirstJson(raw) {
-      const cleaned = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
-      const candidates = extractJsonFromText(cleaned);
-      if (candidates.length) return candidates[0];
-      const start = cleaned.indexOf("{");
-      const end = cleaned.lastIndexOf("}") + 1;
-      if (start >= 0 && end > start) return tryParseJson(cleaned.slice(start, end));
-      return null;
-    }
-
-    /** Map skeleton from pass 1: try several strategies (truncated JSON, prose with embedded object). */
-    function extractMapSkeleton(raw, genDebugArr) {
-      if (raw == null || !String(raw).trim()) return null;
-      let cut = String(raw).trim();
-      const brace = cut.indexOf("{");
-      if (brace > 0) {
-        cut = cut.slice(brace);
-        if (genDebugArr) genDebugArr.push(`[world-gen detail] skeleton: stripped ${brace} chars before first {`);
-      }
-      let sk = extractFirstJson(cut);
-      if (sk && Array.isArray(sk.rooms) && sk.rooms.length) return sk;
-      const all = extractJsonFromText(cut);
-      for (const obj of all) {
-        if (obj && Array.isArray(obj.rooms) && obj.rooms.length) return obj;
-      }
-      if (genDebugArr) genDebugArr.push(`[world-gen detail] skeleton: no object with .rooms[] (${all.length} JSON object(s) found)`);
-      return sk;
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // ATOMIC SUB-PASS HELPERS — give Gemma 4 E4B exactly ONE narrow job per LLM call.
+    // ── ATOMIC SUB-PASS HELPERS — give Gemma 4 E4B exactly ONE narrow job per LLM call.
     // The MAKING_ADVENTURES doc spells out why: small models love structure and choke on
     // freedom. Single-shot "give me 11 cross-referenced fields" reliably produces 0-NPC,
     // 0-chain garbage on a 4B model. One field at a time + literally pinned context = wins.
@@ -1405,30 +1270,7 @@
       return names;
     }
 
-    // ── Agent helper: score a chain candidate so best-of-N can pick the winner. ──
-    // A higher score means a more playable chain. Used by the chain best-of-2 logic.
-    function scoreChainCandidate(chainObj, rooms, items, firstRoom, lastRoom) {
-      if (!chainObj || !Array.isArray(chainObj.puzzle_chain)) return -Infinity;
-      const chain = chainObj.puzzle_chain;
-      if (!chain.length) return -Infinity;
-      const roomSet = new Set(rooms);
-      const itemSetLower = new Set(items.map(i => String(i).toLowerCase()));
-      let score = 0;
-      // Base: more steps = more game (capped so we don't reward absurd lengths).
-      score += Math.min(chain.length, 8);
-      // Bonus per step with valid location.
-      score += chain.filter(s => s && s.location && roomSet.has(s.location)).length;
-      // Bonus per step with valid `gives` (real item name from pinned list, OR null which is fine).
-      score += chain.filter(s => s && (!s.gives || itemSetLower.has(String(s.gives).toLowerCase()))).length;
-      // Big bonus: first step in firstRoom.
-      if (chain[0] && chain[0].location === firstRoom) score += 5;
-      // Big bonus: last step in lastRoom AND unlocks="win" AND has a `gives`.
-      const last = chain[chain.length - 1];
-      if (last && last.location === lastRoom) score += 5;
-      if (last && last.unlocks === "win") score += 5;
-      if (last && last.gives && itemSetLower.has(String(last.gives).toLowerCase())) score += 3;
-      return score;
-    }
+    // ── Agent helper: scoreChainCandidate imported from world_bible_logic.mjs ──
 
     async function generateBrowserAtomic(skeleton, theme, runGen, sysMsg, slog, sstream) {
       const roomNames = (skeleton.rooms || []).map(r => r.name).filter(Boolean);
@@ -1620,238 +1462,6 @@
       // most failure-prone field in the legacy single-shot pass).
 
       return content;
-    }
-
-    /**
-     * Deterministic auto-repair — code-only fixes after generation. No LLM round-trip.
-     * Patterned after auto_repair_world_bible in LMM_adventure_May_2_2026.py. Fills gaps
-     * mechanically; never invents new content. Returns a list of repairs applied.
-     */
-    function autoRepairWorldBible(wb) {
-      const fixes = [];
-      if (!wb || typeof wb !== "object") return fixes;
-      const rooms = (wb.locations || []).map(l => l && l.name).filter(Boolean);
-      if (!rooms.length) return fixes;
-      const firstRoom = rooms[0];
-      const lastRoom = rooms[rooms.length - 1];
-      const roomSet = new Set(rooms);
-      const lowerRoomMap = new Map(rooms.map(r => [r.toLowerCase(), r]));
-
-      // 1. NPCs / monsters whose location isn't a real room → snap to firstRoom (NPCs) or lastRoom (monsters).
-      for (const npc of (wb.npcs || [])) {
-        if (!npc || typeof npc !== "object") continue;
-        if (!npc.location || !roomSet.has(npc.location)) {
-          const guess = npc.location ? lowerRoomMap.get(String(npc.location).toLowerCase()) : null;
-          npc.location = guess || firstRoom;
-          fixes.push(`npc '${npc.name || "?"}' relocated → ${npc.location}`);
-        }
-      }
-      for (const mon of (wb.monsters || [])) {
-        if (!mon || typeof mon !== "object") continue;
-        if (!mon.location || !roomSet.has(mon.location)) {
-          const guess = mon.location ? lowerRoomMap.get(String(mon.location).toLowerCase()) : null;
-          mon.location = guess || lastRoom;
-          fixes.push(`monster '${mon.name || "?"}' relocated → ${mon.location}`);
-        }
-      }
-
-      // 2. key_items missing from item_locations → place at chain step's location, else firstRoom.
-      const itemLocs = wb.item_locations = (wb.item_locations && typeof wb.item_locations === "object") ? wb.item_locations : {};
-      const itemLocsLower = new Map(Object.keys(itemLocs).map(k => [k.toLowerCase(), k]));
-      for (const k of (wb.key_items || [])) {
-        if (!k || typeof k.name !== "string" || !k.name) continue;
-        const nameLower = k.name.toLowerCase();
-        if (itemLocsLower.has(nameLower)) continue;
-        // Find a chain step that gives this item; use its location, else lastRoom for the final treasure.
-        let placedAt = null;
-        for (const step of (wb.puzzle_chain || [])) {
-          if (step && step.gives && String(step.gives).toLowerCase() === nameLower && step.location && roomSet.has(step.location)) {
-            placedAt = step.location;
-            break;
-          }
-        }
-        if (!placedAt) placedAt = (k.name === (wb.win_condition && wb.win_condition.required_items && wb.win_condition.required_items[0])) ? lastRoom : firstRoom;
-        itemLocs[k.name] = placedAt;
-        fixes.push(`item '${k.name}' placed → ${placedAt}`);
-      }
-
-      // 3. Drop puzzle_chain steps whose location isn't a real room (otherwise the chain
-      //    references nowhere and the player can never satisfy them).
-      if (Array.isArray(wb.puzzle_chain)) {
-        const before = wb.puzzle_chain.length;
-        wb.puzzle_chain = wb.puzzle_chain.filter(s => s && (!s.location || roomSet.has(s.location)));
-        const after = wb.puzzle_chain.length;
-        if (before !== after) fixes.push(`puzzle_chain: dropped ${before - after} step(s) with invalid location`);
-      }
-
-      // 3b. Synthetic chain fallback — if Gemma's chain is empty/too short, build one
-      //     mechanically from available items + rooms. This guarantees a playable game
-      //     (collect items in order through the rooms, end at lastRoom with the treasure)
-      //     even if Pass 2e completely failed. Only triggers when chain.length < 3.
-      if (!Array.isArray(wb.puzzle_chain) || wb.puzzle_chain.length < 3) {
-        const items = (wb.key_items || []).map(k => k && k.name).filter(Boolean);
-        if (items.length >= 2 && rooms.length >= 2) {
-          const synth = [];
-          // Distribute items across rooms (early items in early rooms; final item in lastRoom).
-          const itemsForRooms = items.slice(); // copy
-          const finalItem = itemsForRooms.pop(); // last item is the treasure
-          // Spread the remaining items across rooms[0..n-2]
-          const intermediateRooms = rooms.slice(0, Math.max(1, rooms.length - 1));
-          let stepNum = 1;
-          for (let i = 0; i < itemsForRooms.length; i++) {
-            const room = intermediateRooms[Math.min(i, intermediateRooms.length - 1)];
-            synth.push({
-              step: stepNum++,
-              action: `find and take the ${itemsForRooms[i]} in ${room}`,
-              gives: itemsForRooms[i],
-              unlocks: null,
-              location: room,
-            });
-          }
-          // Connecting movement step (if path is more than two rooms)
-          if (rooms.length > 2) {
-            synth.push({
-              step: stepNum++,
-              action: `travel deeper through the cavern toward ${lastRoom}`,
-              gives: null,
-              unlocks: lastRoom,
-              location: rooms[rooms.length - 2],
-            });
-          }
-          // Final step: claim the treasure and win.
-          synth.push({
-            step: stepNum++,
-            action: `claim the ${finalItem} in ${lastRoom}`,
-            gives: finalItem,
-            unlocks: "win",
-            location: lastRoom,
-          });
-          // Also pin item_locations to match the synthetic chain (guarantees solvability).
-          itemLocs[finalItem] = lastRoom;
-          for (let i = 0; i < itemsForRooms.length; i++) {
-            const room = intermediateRooms[Math.min(i, intermediateRooms.length - 1)];
-            itemLocs[itemsForRooms[i]] = room;
-          }
-          wb.puzzle_chain = synth;
-          fixes.push(`puzzle_chain: synthetic ${synth.length}-step chain built from ${items.length} items × ${rooms.length} rooms (Gemma's chain was empty/short)`);
-        }
-      }
-
-      // 4. Drop chain steps whose `gives` references a non-existent key_item.
-      const itemNamesLower = new Set((wb.key_items || []).map(k => k && k.name ? k.name.toLowerCase() : "").filter(Boolean));
-      if (Array.isArray(wb.puzzle_chain)) {
-        for (const step of wb.puzzle_chain) {
-          if (!step) continue;
-          if (step.gives && !itemNamesLower.has(String(step.gives).toLowerCase())) {
-            fixes.push(`chain step ${step.step}: cleared phantom gives='${step.gives}'`);
-            step.gives = null;
-          }
-        }
-      }
-
-      // 5. Ensure win_condition has structured shape (additive — don't break legacy strings).
-      if (typeof wb.win_condition === "string" || !wb.win_condition || typeof wb.win_condition !== "object") {
-        const oldText = typeof wb.win_condition === "string" ? wb.win_condition : "Complete the adventure";
-        const finalGives = (wb.puzzle_chain || []).slice().reverse().find(s => s && s.gives);
-        const finalItem = (finalGives && finalGives.gives) ||
-          ((wb.key_items || [])[((wb.key_items || []).length - 1)] || {}).name || null;
-        wb.win_condition = {
-          required_items: finalItem ? [finalItem] : [],
-          required_location: firstRoom,
-          description: oldText,
-        };
-        fixes.push(`win_condition upgraded to structured shape (item=${finalItem || "?"}, room=${firstRoom})`);
-      } else {
-        if (!Array.isArray(wb.win_condition.required_items)) wb.win_condition.required_items = [];
-        if (!wb.win_condition.required_location || !roomSet.has(wb.win_condition.required_location)) {
-          wb.win_condition.required_location = firstRoom;
-          fixes.push(`win_condition.required_location snapped → ${firstRoom}`);
-        }
-        if (typeof wb.win_condition.description !== "string" || !wb.win_condition.description.trim()) {
-          const item = wb.win_condition.required_items[0] || "the prize";
-          wb.win_condition.description = `Obtain ${item} and return to ${firstRoom}`;
-        }
-      }
-
-      return fixes;
-    }
-
-    /**
-     * BFS-based solvability validator. Returns {ok, gaps, report}. Currently logs the
-     * report but does NOT block — the engine ships the bible regardless and lets the player
-     * see the warnings. Future: trigger micro-repair when ok===false.
-     */
-    function validateWorldBibleSolvability(wb) {
-      const gaps = [];
-      if (!wb || !Array.isArray(wb.locations) || !wb.locations.length) {
-        return { ok: false, gaps: ["no locations"], report: "BLOCKED: no rooms" };
-      }
-      const rooms = wb.locations.map(l => l && l.name).filter(Boolean);
-      const roomSet = new Set(rooms);
-      const adj = {};
-      for (const loc of wb.locations) {
-        if (!loc || !loc.name) continue;
-        adj[loc.name] = (loc.exits || []).filter(e => roomSet.has(e));
-      }
-      // BFS from first room
-      const start = rooms[0];
-      const reachable = new Set([start]);
-      const queue = [start];
-      while (queue.length) {
-        const r = queue.shift();
-        for (const next of (adj[r] || [])) {
-          if (!reachable.has(next)) { reachable.add(next); queue.push(next); }
-        }
-      }
-      for (const r of rooms) {
-        if (!reachable.has(r)) gaps.push(`unreachable room: ${r}`);
-      }
-      // Win location reachable?
-      const winLoc = wb.win_condition && wb.win_condition.required_location;
-      if (winLoc && roomSet.has(winLoc) && !reachable.has(winLoc)) {
-        gaps.push(`win location not reachable: ${winLoc}`);
-      }
-      // Every key_item placed?
-      const itemLocs = wb.item_locations || {};
-      for (const k of (wb.key_items || [])) {
-        if (!k || !k.name) continue;
-        if (!itemLocs[k.name]) gaps.push(`key_item '${k.name}' has no placement`);
-      }
-      // Every chain step's location reachable?
-      for (const step of (wb.puzzle_chain || [])) {
-        if (!step || !step.location) continue;
-        if (!reachable.has(step.location)) gaps.push(`chain step ${step.step} at unreachable ${step.location}`);
-      }
-      // Win-required items present in chain `gives`?
-      const chainGives = new Set((wb.puzzle_chain || []).map(s => s && s.gives ? String(s.gives).toLowerCase() : "").filter(Boolean));
-      for (const it of ((wb.win_condition && wb.win_condition.required_items) || [])) {
-        if (it && !chainGives.has(String(it).toLowerCase())) {
-          gaps.push(`win item '${it}' is never given by any chain step`);
-        }
-      }
-
-      // Chain length sanity (a 1-step "chain" is not a game).
-      if ((wb.puzzle_chain || []).length < 2) {
-        gaps.push(`puzzle_chain has only ${(wb.puzzle_chain || []).length} step(s) — not a playable adventure`);
-      }
-
-      // Chain progression: the last step should be at lastRoom and unlock "win".
-      const chain = wb.puzzle_chain || [];
-      if (chain.length >= 2) {
-        const last = chain[chain.length - 1];
-        const lastRoom = rooms[rooms.length - 1];
-        if (last && last.location && last.location !== lastRoom) {
-          gaps.push(`final chain step is in '${last.location}' instead of last room '${lastRoom}'`);
-        }
-        if (last && last.unlocks !== "win") {
-          gaps.push(`final chain step does not unlock "win" (got '${last.unlocks}')`);
-        }
-      }
-
-      const report = gaps.length
-        ? `solvability: ${gaps.length} gap(s)\n  - ` + gaps.join("\n  - ")
-        : `solvability: OK (${rooms.length} rooms, ${(wb.key_items || []).length} items, ${(wb.puzzle_chain || []).length} chain steps, all reachable)`;
-      return { ok: gaps.length === 0, gaps, report };
     }
 
     async function generateWorldBible(theme, onStatus, genOpts) {
@@ -2254,6 +1864,23 @@
         }
       }
 
+      // Hard floor: chain/win gaps after auto-repair + micro-repair → force synthetic chain (code-only).
+      if (!sol.ok && hasChainSolvabilityGaps(sol.gaps)) {
+        slog(`hard-floor: ${sol.gaps.length} chain/win gap(s) remain — forcing synthetic puzzle_chain`);
+        const hardFixes = forceSyntheticChainHardFloor(plan);
+        if (hardFixes.length) {
+          slog(`hard-floor: ${hardFixes.length} fix(es) applied`);
+          for (const f of hardFixes) slog(`  hard-floor: ${f}`);
+          for (const loc of plan.locations) loc.items = [];
+          for (const [item, room] of Object.entries(plan.item_locations || {})) {
+            const target = plan.locations.find(l => l.name === room);
+            if (target && !target.items.includes(item)) target.items.push(item);
+          }
+          sol = validateWorldBibleSolvability(plan);
+          slog(`post-hard-floor ${sol.report}`);
+        }
+      }
+
       return plan;
     }
 
@@ -2520,57 +2147,8 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // AUTHOR WALKTHROUGH — solvability / hints (generated or synthesized)
+    // AUTHOR WALKTHROUGH — winConditionText/synthesizeAuthorWalkthrough in world_bible_logic.mjs
     // ═══════════════════════════════════════════════════════════════════════════
-
-    /** Render win_condition as printable text whether the bible uses the structured
-     *  {required_items, required_location, description} object or the legacy string. */
-    function winConditionText(wb) {
-      if (!wb || !wb.win_condition) return "";
-      const wc = wb.win_condition;
-      if (typeof wc === "string") return wc;
-      if (typeof wc === "object") {
-        if (wc.description && String(wc.description).trim()) return String(wc.description);
-        const item = (wc.required_items || [])[0];
-        const loc = wc.required_location;
-        if (item && loc) return `Obtain ${item} and return to ${loc}`;
-        if (loc) return `Reach ${loc}`;
-        return "Complete the adventure";
-      }
-      return String(wc);
-    }
-
-    /** Build a plain-text solution from structured bible fields (always available). */
-    function synthesizeAuthorWalkthrough(wb) {
-      if (!wb) return "";
-      const lines = [];
-      lines.push("=== How to win (auto-built from world bible) ===");
-      const wcText = winConditionText(wb);
-      if (wcText) lines.push(`Win: ${wcText}`);
-      if (wb.main_arc) lines.push(`Story: ${wb.main_arc}`);
-      if (Array.isArray(wb.objectives) && wb.objectives.length) {
-        lines.push("Goals:");
-        wb.objectives.forEach((o, i) => lines.push(`  ${i + 1}. ${o}`));
-      }
-      if (Array.isArray(wb.puzzle_chain) && wb.puzzle_chain.length) {
-        lines.push("Steps (in order):");
-        for (const s of wb.puzzle_chain) {
-          const g = s.gives ? ` → obtain: ${s.gives}` : "";
-          const u = s.unlocks != null && s.unlocks !== undefined && s.unlocks !== "" ? ` → unlocks: ${s.unlocks}` : "";
-          lines.push(`  ${s.step}. ${s.action}${g}${u}`);
-        }
-      }
-      if (Array.isArray(wb.key_items) && wb.key_items.length) {
-        lines.push("Key items:");
-        for (const k of wb.key_items) {
-          if (k && typeof k.name === "string" && k.name) lines.push(`  - ${k.name}: ${k.purpose || ""}`);
-        }
-      }
-      if (Array.isArray(wb.progression_hints) && wb.progression_hints.length) {
-        lines.push(`Hints: ${wb.progression_hints.join(" | ")}`);
-      }
-      return lines.join("\n");
-    }
 
     /** LLM-authored walkthrough from generation, else synthesis (never empty for a normal bible). */
     function getAuthorWalkthrough(wb) {
@@ -3180,6 +2758,11 @@
 
     function setImgStatus(text) { $("img-status").textContent = text || ""; }
 
+    function updateDebugCopyBtn() {
+      const btn = $("debug-copy-btn");
+      if (btn) btn.hidden = !$("debug-panel").textContent.trim();
+    }
+
     function setDebug(lines) {
       const panel = $("debug-panel");
       const block = document.createElement("div");
@@ -3189,8 +2772,12 @@
       block.textContent = lines.join("\n");
       panel.appendChild(block);
       panel.scrollTop = panel.scrollHeight;
+      updateDebugCopyBtn();
     }
-    function clearDebug() { $("debug-panel").innerHTML = ""; }
+    function clearDebug() {
+      $("debug-panel").innerHTML = "";
+      updateDebugCopyBtn();
+    }
 
     function worldSourceLabel() {
       switch (lastWorldBibleSource) {
@@ -3224,6 +2811,15 @@
       const chain = wb.puzzle_chain?.length || 0;
       summary.textContent = `${worldSourceLabel()} — World Bible (${rooms} rooms, ${items} items, ${chain}-step chain)`;
       wrapper.appendChild(summary);
+
+      // Solvability badge (clone so we don't mutate activeWorldBible)
+      const solBadge = document.createElement("div");
+      solBadge.style.fontSize = "11px";
+      solBadge.style.marginTop = "4px";
+      const solCheck = validateWorldBibleSolvability(cloneWorldBible(wb));
+      solBadge.textContent = solCheck.report.split("\n")[0];
+      solBadge.style.color = solCheck.ok ? "var(--ok)" : "var(--warn)";
+      wrapper.appendChild(solBadge);
 
       const pre = document.createElement("pre");
       pre.style.margin = "4px 0 0 0";
@@ -3280,6 +2876,7 @@
       wrapper.appendChild(wtDetails);
 
       panel.appendChild(wrapper);
+      updateDebugCopyBtn();
     }
 
     function setInputEnabled(enabled) {
@@ -3698,11 +3295,52 @@
       }
     });
 
-    // ── Debug toggle ──
+    // ── Debug toggle + copy + unit tests ──
     $("debug-toggle").addEventListener("click", () => {
       const panel = $("debug-panel");
       const open = panel.classList.toggle("open");
       $("debug-toggle").innerHTML = (open ? "&#9660;" : "&#9654;") + " Debug";
+    });
+
+    $("debug-copy-btn").addEventListener("click", async () => {
+      const btn = $("debug-copy-btn");
+      const text = $("debug-panel").innerText.trim();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        const prev = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = prev; }, 1500);
+      } catch {
+        const prev = btn.textContent;
+        btn.textContent = "Copy failed";
+        setTimeout(() => { btn.textContent = prev; }, 1500);
+      }
+    });
+
+    $("debug-run-tests-btn").addEventListener("click", async () => {
+      const btn = $("debug-run-tests-btn");
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = "Running…";
+      try {
+        const results = await runWorldBibleTests({
+          getActiveBible: () => activeWorldBible,
+          fetchFixture: (path) => fetch(path).then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status} for ${path}`);
+            return r.json();
+          }),
+          sourceLabel: worldSourceLabel(),
+        });
+        setDebug(formatTestResults(results));
+        $("debug-panel").classList.add("open");
+        $("debug-toggle").innerHTML = "&#9660; Debug";
+      } catch (e) {
+        setDebug(["── Unit tests ──", `ERROR: ${e.message || e}`]);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+      }
     });
 
     // ── Send button / Enter key ──

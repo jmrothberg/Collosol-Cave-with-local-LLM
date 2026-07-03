@@ -352,6 +352,27 @@ The live setting is **`activeWorldBible`** (starts as **`DEFAULT_WORLD_BIBLE`** 
 
 **Export World** includes **`author_walkthrough`** in the JSON for offline reading or editing.
 
+## Running tests
+
+Deterministic world-bible logic (validation, auto-repair, solvability, JSON extraction) lives in [`world_bible_logic.mjs`](world_bible_logic.mjs). Tests are in [`world_bible_tests.mjs`](world_bible_tests.mjs).
+
+**In the game (GitHub Pages or local):** expand **Debug**, click **Run tests**. This runs:
+
+1. **Regression** — golden fixture [`default_cave.json`](default_cave.json) plus inline edge cases (empty chain, bad JSON, orphan rooms).
+2. **Live** — `validateWorldBible` + `validateWorldBibleSolvability` on the **current** `activeWorldBible` (the adventure you just generated or loaded).
+
+Results append to the debug panel. Use **Copy debug** to paste the full log when reporting issues.
+
+**From the repo (contributors / CI):**
+
+```bash
+node --test browser_adventure/tests/world_bible_logic.test.mjs
+```
+
+No npm install, GPU, or Ollama required. These tests do **not** re-run LLM generation—they only exercise the code that makes generated adventures winnable.
+
+---
+
 ## What the Python game has that the browser build does not
 
 The browser page is intentionally smaller in a few areas:
