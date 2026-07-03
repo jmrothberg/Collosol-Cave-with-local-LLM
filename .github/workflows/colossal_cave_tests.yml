@@ -1,0 +1,29 @@
+name: colossal_cave tests
+
+on:
+  push:
+    paths:
+      - 'colossal_cave/**'
+      - '.github/workflows/colossal_cave_tests.yml'
+  pull_request:
+    paths:
+      - 'colossal_cave/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-mock fuzzywuzzy python-Levenshtein Pillow numpy
+
+      - name: Run CI-safe tests
+        working-directory: colossal_cave
+        run: pytest -m "not gpu and not ollama" --tb=short -q
