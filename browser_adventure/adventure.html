@@ -273,6 +273,7 @@
   <!-- ═══ Loading overlay / Adventure picker ═══ -->
   <div id="loading-overlay">
     <h2>JMR's LLM Adventure</h2>
+    <p id="load-version" style="font-size:0.75rem;color:var(--accent-dim);margin-bottom:8px">v1.1 — debug panel: Copy debug + Run tests</p>
     <p>A fully LLM-driven text adventure running entirely in your browser.
        Gemma 4B generates the story; Stable Diffusion 1.5 paints the scenes.</p>
     <p style="font-size:0.8rem;color:var(--text-muted)">
@@ -332,7 +333,7 @@
   <header>
     <div>
       <h1>JMR's LLM Adventure</h1>
-      <div class="subtitle">Gemma 4B + SD 1.5 — all in browser &nbsp;|&nbsp; v1.0 Jonathan Rothberg 2026</div>
+      <div class="subtitle" id="game-version">Gemma 4B + SD 1.5 — all in browser &nbsp;|&nbsp; v1.1 Jonathan Rothberg 2026</div>
     </div>
     <div class="header-actions">
       <button id="btn-save" title="Save world bible and current progress to this browser (localStorage)">Save game</button>
@@ -398,6 +399,8 @@
     // ═══════════════════════════════════════════════════════════════════════════
     // CONFIGURATION
     // ═══════════════════════════════════════════════════════════════════════════
+    /** Bump when shipping UI/engine changes — visible on load screen + header. */
+    const GAME_VERSION = "1.1";
     const LLM_MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
     const IMG_MODEL_ID = "sd-1.5";
     const LLM_MAX_TOKENS = 512;
