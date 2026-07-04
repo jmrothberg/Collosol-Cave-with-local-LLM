@@ -16,7 +16,7 @@ Two text-adventure games inspired by the classic "Colossal Cave Adventure," each
 
 ### [`colossal_cave/`](colossal_cave/) — Code-Driven Adventure
 
-A traditional text adventure where **the code drives the gameplay**. The game has 25+ hand-designed rooms, monsters, treasures, riddles, and NPCs loaded from a JSON data file. LLMs play a supporting role: Ollama parses natural-language commands and generates NPC dialogue, while Diffusers (FLUX, Stable Diffusion 3.5, SDXL) create artwork and Pyramid Flow generates room videos.
+A traditional text adventure where **the code drives the gameplay**. The game has 25+ hand-designed rooms, monsters, treasures, riddles, and NPCs loaded from a JSON data file. Ollama parses commands and generates NPC dialogue; **local Diffusers models** (FLUX, Z-Image, etc.) create artwork; **Pyramid Flow** generates optional room videos.
 
 - Structured, predictable gameplay with rich pre-built content
 - Works on Apple Silicon Mac (MPS) or Linux with NVIDIA GPU (CUDA)

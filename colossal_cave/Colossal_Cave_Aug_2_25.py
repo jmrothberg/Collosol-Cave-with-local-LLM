@@ -191,7 +191,7 @@ from sentence_transformers import SentenceTransformer  # For vector embeddings (
 from fuzzywuzzy import fuzz  # For fuzzy string matching in item names
 
 # === DIFFUSION/IMAGE GENERATION IMPORTS ===
-from diffusers import DiffusionPipeline, FluxPipeline, StableDiffusion3Pipeline
+from diffusers import DiffusionPipeline, FluxPipeline, StableDiffusion3Pipeline, ZImagePipeline
 from huggingface_hub import login
 
 # === GAME-SPECIFIC IMPORTS ===
@@ -215,17 +215,15 @@ from engine.llm_commands import (
 from engine.session import get_session, sync_session_from_globals
 
 # === HUGGING FACE AUTHENTICATION ===
-# Try to login to Hugging Face, but don't fail if offline
-try:
-    hf_token = os.environ.get("HF_TOKEN", "")
-    if hf_token:
+# Only login when HF_TOKEN is set; skip interactive prompt (local Diffusion_Models work without it)
+hf_token = os.environ.get("HF_TOKEN", "")
+if hf_token:
+    try:
         login(hf_token)
-    else:
-        login()  # uses cached token from huggingface-cli login
-    print("Successfully logged in to Hugging Face")
-except Exception as e:
-    print(f"Warning: Could not login to Hugging Face: {e}")
-    print("This is okay - you can still use local models and the game will work fine.")
+        print("Successfully logged in to Hugging Face")
+    except Exception as e:
+        print(f"Warning: Could not login to Hugging Face: {e}")
+        print("This is okay - you can still use local models and the game will work fine.")
 
 # === DEVICE SETUP FOR MULTI-MODEL DEPLOYMENT ===
 print("Platform.machine: ", platform.machine())
@@ -462,9 +460,12 @@ def ask_for_folder():
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 default_data_path = _SCRIPT_DIR
 if platform.system() == 'Darwin':  # macOS
-    default_model_path = "/Users/jonathanrothberg"
+    mac_model_path_candidates = [
+        "/Users/jonathanrothberg",
+        "/Users/jonathanrothberg_1",
+    ]
 else:  # Linux
-    default_model_path = "/data"
+    mac_model_path_candidates = ["/data"]
 
 # Check if paths exist, if not, ask user to select
 if not os.path.exists(default_data_path):
@@ -473,11 +474,20 @@ if not os.path.exists(default_data_path):
 else:
     data_path = default_data_path
 
-if not os.path.exists(default_model_path):
+# Prefer a candidate that has Diffusion_Models (local FLUX etc.); keeps /Users/jonathanrothberg first on other Macs
+model_path = None
+for candidate in mac_model_path_candidates:
+    if os.path.isdir(os.path.join(candidate, "Diffusion_Models")):
+        model_path = candidate
+        break
+if model_path is None:
+    for candidate in mac_model_path_candidates:
+        if os.path.exists(candidate):
+            model_path = candidate
+            break
+if model_path is None:
     print("Please select the path for LLM & DIFF folders:")
     model_path = ask_for_folder()
-else:
-    model_path = default_model_path
 
 # Load the SentenceTransformer model
 vector_model = SentenceTransformer('all-mpnet-base-v2', cache_folder=model_path)
@@ -624,47 +634,17 @@ def saved_llms():
 
 
 def saved_diffusers():
-    # Check if CUDA is available before trying to get device properties
-    if torch.cuda.is_available():
-        total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # bytes to GB
-    else:
-        # For Mac or CPU, assume we have limited memory
-        total_memory = 8  # Conservative estimate for non-CUDA systems
-    
     diffuser_names = []
-    
-    # First, try to get local models from diff_dir if it exists
+
+    # Local models from diff_dir only (no remote Hugging Face IDs in dropdown)
     if os.path.exists(diff_dir):
-        local_models = [name for name in os.listdir(diff_dir) 
+        local_models = [name for name in os.listdir(diff_dir)
                        if os.path.isdir(os.path.join(diff_dir, name)) and not name.startswith('.')]
         if local_models:
             print(f"Found local diffusion models: {local_models}")
             diffuser_names.extend(local_models)
-    
-    # Simplified diffuser list - just FLUX (best quality) and SDXL-Turbo (smallest/fastest)
-    hf_models = [
-        "black-forest-labs/FLUX.1-schnell",  # Fast FLUX variant
-        "stabilityai/sdxl-turbo",            # Smallest/fastest alternative
-    ]
-    
-    # Add models based on device capability  
-    if str(diffuser_device) == "mps":  # Mac systems with MPS
-        print("Added FLUX models optimized for Mac MPS")
-    elif total_memory >= 26: # High memory CUDA systems
-        print("Added FLUX models for high-memory CUDA")
-    
-    # Add HF models to the list
-    diffuser_names.extend(hf_models)
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_names = []
-    for name in diffuser_names:
-        if name not in seen:
-            seen.add(name)
-            unique_names.append(name)
-     
-    return unique_names if unique_names else ["No diffusion models found"]
+
+    return diffuser_names if diffuser_names else ["No diffusion models found"]
 
 ###############################################################################
 # ═══════════════════════ SAVE / LOAD ════════════════════════════════════ #
@@ -973,11 +953,15 @@ class AdventureGame:
         print(f"Pipeline type: {type(pipe).__name__}")
         
         num_inf_steps = 25
-        # Check if it's a FLUX pipeline by checking the class name or config
+        # FLUX / mflux: 4 steps; Z-Image-Turbo: 9 steps (8 DiT forwards), guidance 0
         if isinstance(pipe, FluxPipeline) or isinstance(pipe, _MfluxPipelineAdapter):
             num_inf_steps = 4
             guidance_scale = 0.0
             print("Using FLUX-specific settings: 4 steps, 0.0 guidance")
+        elif isinstance(pipe, ZImagePipeline):
+            num_inf_steps = 9
+            guidance_scale = 0.0
+            print("Using Z-Image-Turbo settings: 9 steps, 0.0 guidance")
         else:
             num_inf_steps = 25
             guidance_scale = 7
@@ -3619,6 +3603,15 @@ def set_up_llm_diffuser(diff_name, llm_name):
             print(f"Loading MLX/MFLUX model from: {model_path}")
             ensure_mflux_installed()
             pipe = _MfluxPipelineAdapter(model_path, diff_name)
+        elif "z-image" in diff_name.lower():
+            # Z-Image-Turbo: no device_map on MPS (Turbo uses 9 steps / guidance 0 at inference)
+            print(f"Loading Z-Image-Turbo from: {model_path}")
+            pipe = ZImagePipeline.from_pretrained(
+                model_path,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=False,
+            )
+            pipe = pipe.to(diffuser_device)
         else:
             print(f"Loading local diffusion model from: {model_path}")
             pipe = DiffusionPipeline.from_pretrained(
