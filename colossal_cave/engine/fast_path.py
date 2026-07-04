@@ -21,18 +21,21 @@ def normalize_direction(text: str) -> Optional[str]:
     return _DIRECTION_WORDS.get(token)
 
 
-def movement_blocked_by_monster(current_room: Any, direction: str) -> Optional[str]:
-    """Return a warning string if destination has live monsters, else None."""
+def movement_monsters_in_direction(current_room: Any, direction: str) -> List[Any]:
+    """Return live monsters in the destination room for a direction (debug/ambient use)."""
     if direction not in getattr(current_room, "connected_rooms", {}):
-        return None
+        return []
     dest = current_room.connected_rooms[direction]
-    monsters = getattr(dest, "monsters", None) or []
+    return list(getattr(dest, "monsters", None) or [])
+
+
+def movement_blocked_by_monster(current_room: Any, direction: str) -> Optional[str]:
+    """Legacy helper — reports monsters ahead without blocking (used in tests/logging)."""
+    monsters = movement_monsters_in_direction(current_room, direction)
     if monsters:
         names = ", ".join(m.name for m in monsters)
-        return (
-            f"You hesitate — {names} lurk to the {direction}. "
-            f"Try: attack {monsters[0].name}\n"
-        )
+        dest_num = current_room.connected_rooms[direction].number
+        return f"Monsters in room {dest_num} ({direction}): {names}"
     return None
 
 
@@ -103,9 +106,7 @@ def try_local_command(
     # --- Movement ---
     direction = parse_movement_command(cmd_expanded)
     if direction is not None:
-        block_msg = movement_blocked_by_monster(room, direction)
-        if block_msg:
-            return block_msg
+        # CHANGE (movement): allow entering monster rooms — fight after you arrive
         move_fn = helpers.get("move")
         if move_fn:
             return move_fn(direction)

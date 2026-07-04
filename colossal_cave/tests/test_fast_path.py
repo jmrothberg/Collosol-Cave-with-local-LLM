@@ -24,6 +24,21 @@ def test_movement_blocked_by_monster():
     msg = movement_blocked_by_monster(r1, "east")
     assert msg is not None
     assert "Dragon" in msg
+    assert "room 2" in msg
+
+
+def test_go_east_not_blocked_by_monsters_in_dest(minimal_game_world):
+    """Player can enter a room with monsters and fight them there."""
+    world = minimal_game_world
+    player = world["player"]
+    room = world["r1"]
+    dest = world["r2"]
+    dest.monsters.append(type("M", (), {"name": "Dragon", "health": 50})())
+    helpers = {"move": player.move}
+    result = try_local_command("go east", player, room, helpers)
+    assert "moved east" in result.lower()
+    assert player.current_room.number == 2
+    assert "Dragon" in result
 
 
 def test_try_local_inventory_skips_llm(minimal_game_world):

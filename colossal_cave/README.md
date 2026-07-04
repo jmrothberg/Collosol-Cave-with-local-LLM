@@ -147,6 +147,8 @@ MB (Master Beast) in Room 1 knows the full game state — ask her anything.
 
 **Video fails on Mac** — PyTorch 2.9.1+ stable, FFmpeg installed, `pyramid-flow-miniflux` present, see pyramid README.
 
+**Movement / combat looks wrong** — each game writes a play debug log under `Adventure_Game_Saved/Debug_Logs/<save_name>_play_debug.log` with room exits, monsters per direction, command routing (fast-path vs LLM), and responses. Attach that file when reporting bugs.
+
 ---
 
 ## License

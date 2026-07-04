@@ -231,6 +231,13 @@ from engine.ux_helpers import (
     riddle_eligibility_text,
     progress_summary,
 )
+from engine.debug_log import (
+    consume_command_meta,
+    log_game_event,
+    log_play_turn,
+    set_command_meta,
+    start_debug_session,
+)
 
 # === HUGGING FACE AUTHENTICATION ===
 # Only login when HF_TOKEN is set; skip interactive prompt (local Diffusion_Models work without it)
@@ -1483,6 +1490,11 @@ class LivingThing(AdventureGame):
             if direction in self.current_room.connected_rooms:
                 self.current_room = self.current_room.connected_rooms[direction]
                 console = (f"{self.name} moved {direction}.\n")
+                # CHANGE (movement): warn when entering a room with monsters (can fight here)
+                dest_monsters = getattr(self.current_room, "monsters", None) or []
+                if dest_monsters:
+                    names = ", ".join(m.name for m in dest_monsters)
+                    console += f"⚠️ {names} are here! Try: attack {dest_monsters[0].name}\n"
             else:
                 console = (f"{self.name} can't go that way.\n")
         return console
@@ -2339,7 +2351,7 @@ class NPC(LivingThing):
         """Get comprehensive game knowledge for NPC"""
         knowledge = {
             "complete_instructions": get_complete_instructions(),
-            "riddles": riddles_and_magic(),
+            "riddles": riddles_and_magic(quiet=True),
             "total_rooms": len(rooms),
             "player_location": playerOne.current_room.number if playerOne else "unknown",
             "nearby_dangers": self._check_nearby_dangers(),
@@ -3193,7 +3205,7 @@ class MasterBeast(NPC):
         memory_context = self._get_memory_context()
         
         # Prepare detailed game info for MB
-        all_riddles_info = riddles_and_magic()
+        all_riddles_info = riddles_and_magic(quiet=True)
         all_items_locations = self._get_all_item_locations()
         monster_locations = self._get_all_monster_locations()
         complete_instructions = game_knowledge.get('complete_instructions', '')
@@ -3678,6 +3690,18 @@ def initialize_game_variables():
 # ═══════════════════════ LLM INTEGRATION ═══════════════════════════════ #
 ###############################################################################
 
+_llm_diffuser_ready = False  # CHANGE (load): defer heavy model load until first play turn
+
+
+def _ensure_llm_diffuser_ready(diff_name, llm_name):
+    """Load LLM/diffuser once — skipped on Load-Game until the player acts."""
+    global _llm_diffuser_ready
+    if _llm_diffuser_ready:
+        return
+    set_up_llm_diffuser(diff_name=diff_name, llm_name=llm_name)
+    _llm_diffuser_ready = True
+
+
 def set_up_llm_diffuser(diff_name, llm_name):
     global pipe, model
     print(f"Setting up LLM and Diffuser for {llm_name} and {diff_name}")
@@ -3991,6 +4015,7 @@ def process_command(command, player, current_room):
     if cmd_lower in ["clear", "reset", "stop talking", "nevermind", "forget it"]:
         if current_room.npc and current_room.npc.has_pending_action():
             current_room.npc.clear_pending_action()
+            set_command_meta(path="conversation_clear", preprocessed=cmd_lower)
             return "Conversation cleared.\n"
     
     # Check for active NPC conversation awaiting response
@@ -4007,12 +4032,14 @@ def process_command(command, player, current_room):
             # Handle as response to pending conversation
             result = handle_pending_conversation(command, current_room.npc)
             if result is not None:  # If conversation was handled
+                set_command_meta(path="npc_pending", preprocessed=cmd_lower)
                 return result
             # If None returned, process as regular command (conversation was cleared)
     
     # Check for direct NPC addressing (e.g., "MB tell me about riddles")
     npc_response = check_npc_addressing(command, current_room.npc)
     if npc_response:
+        set_command_meta(path="npc_direct", preprocessed=cmd_lower)
         return npc_response
     
     # Process as regular game command via LLM
@@ -4056,6 +4083,7 @@ def check_npc_addressing(command, npc):
                 is_trade = any(t in cmd_lower for t in ['trade', 'exchange', 'swap', ' for '])
                 
                 if is_question and not is_trade:
+                    set_command_meta(path="npc_mb", preprocessed=cmd_lower)
                     return playerOne.talk_to_npc(command)
     
     # General NPC addressing
@@ -4065,12 +4093,24 @@ def check_npc_addressing(command, npc):
         is_trade = any(t in cmd_lower for t in ['trade', 'exchange', 'swap', ' for '])
         
         if is_question and not is_trade:
+            set_command_meta(path="npc_named", preprocessed=cmd_lower)
             return playerOne.talk_to_npc(command)
+
+    # CHANGE (NPC): questions about someone present (e.g. "ask the lady what we should do")
+    is_question = (
+        '?' in command
+        or any(q in cmd_lower for q in ['what', 'where', 'how', 'why', 'when', 'which', 'who', 'tell', 'ask', 'should'])
+    )
+    room_person_phrases = ['lady', 'woman', 'person', 'someone', 'in the room', 'here']
+    if is_question and any(p in cmd_lower for p in room_person_phrases):
+        set_command_meta(path="npc_room_person", preprocessed=cmd_lower)
+        return playerOne.talk_to_npc(command)
     
     return None
 
 def process_game_command(command, player, current_room):
     """Process regular game commands using LLM"""
+    preprocessed = preprocess_command(command)
     try:
         # CHANGE (fast-path): deterministic verbs skip Ollama when unambiguous
         fast_helpers = {
@@ -4091,16 +4131,25 @@ def process_game_command(command, player, current_room):
         }
         local_result = try_local_command(command, player, current_room, fast_helpers)
         if local_result is not None:
+            set_command_meta(path="fast_path", preprocessed=preprocessed, action="local")
             return local_result
 
         llm_result = llm_process_command(command, player, current_room)
         chosen_action = llm_result["chosen_action"]
         entities_by_type = llm_result["entities"]
         confidence = llm_result.get("confidence", 0.5)
+        set_command_meta(
+            path="llm",
+            preprocessed=preprocessed,
+            action=chosen_action,
+            confidence=confidence,
+            entities=entities_by_type,
+        )
         
         return execute_action(chosen_action, entities_by_type, command, confidence)
     except Exception as e:
         print(f"Error in command processing: {e}")
+        set_command_meta(path="error", preprocessed=preprocessed, error=str(e))
         return get_llm_error_recovery(command, "unknown", str(e))
 
 
@@ -4448,12 +4497,14 @@ Player command: "{command}"
 # ═══════════════════════ TROPHY & WIN CONDITIONS ═══════════════════════ #
 ###############################################################################
 
-def riddles_and_magic(): 
+def riddles_and_magic(quiet=False):
     room_riddles = ""
-    for room_i in rooms.values(): 
-        if room_i.riddles:  
+    for room_i in rooms.values():
+        if room_i.riddles:
             room_riddles += generate_riddle_info(room_i)
-    print (room_riddles)
+    # CHANGE (load): MB knowledge helper — don't spam terminal on restore
+    if not quiet:
+        print(room_riddles)
     return room_riddles
 
 def generate_riddle_info(room_i):
@@ -4577,9 +4628,10 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     if not command:
         command = " "
     difficulty = difficulty.lower()
-    difficulty_g = difficulty # global variable for difficulty 
-    
-    if  game_state == "New-Game" or game_state == "Load-Game":
+    difficulty_g = difficulty # global variable for difficulty
+    restore_only = False  # CHANGE (load): passive UI refresh after pickle restore
+
+    if game_state == "New-Game":
         # Check if Ollama is running
         if not check_ollama_running():
             console = "Error: Ollama is not running. Please start Ollama with 'ollama serve' in a terminal."
@@ -4587,10 +4639,32 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 room_riddles, room_contents, console, your_status,
                 rooms_visited, inventory1, room_long_description,
                 game_state_selector, room_video)
-        
+
         initialize_game_variables()
         load_adventure_data()
-        set_up_llm_diffuser(diff_name=name_of_diffuser, llm_name=name_of_llm)
+        _ensure_llm_diffuser_ready(diff_name=name_of_diffuser, llm_name=name_of_llm)
+
+    elif game_state == "Load-Game":
+        # CHANGE (load): restore pickle only — no model load, no turn simulation
+        load_adventure_data()
+        rooms, playerOne, old_room = load_game_state(name_of_game)
+        if rooms is None or playerOne is None:
+            console = (f"Failed to load game: {name_of_game}. Please try a different save file or create a new game.\n")
+            active_game = False
+            game_state_selector = gr.Radio(value="Load-Game")
+            return _make_output_tuple(room_image, map_image, room_description,
+                room_riddles, room_contents, console, your_status,
+                rooms_visited, inventory1, room_long_description,
+                game_state_selector, room_video)
+        console = (f"Loaded game: {name_of_game}.\n")
+        active_game = True
+        npc_introduced = True  # CHANGE (load): skip MB re-introduction LLM call
+        restore_only = True
+        if difficulty_g:
+            difficulty = difficulty_g
+        game_state_selector = gr.Radio(value="Play-Game")
+        start_debug_session(game_dir, name_of_game, resumed=True)
+        log_game_event("LOAD_GAME", f"room={playerOne.current_room.number}")
 
     if game_state == "New-Game":
         console = new_game(num_rooms=number_of_rooms, runllm_diff=llm_diff, runllm_mon=llm_mon, 
@@ -4602,18 +4676,9 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         append_adventure_log_system(console)
         active_game = True
         game_state_selector = gr.Radio(value="Play-Game")
+        start_debug_session(game_dir, new_game_name or "new_game")
+        log_game_event("NEW_GAME", f"rooms={number_of_rooms} difficulty={difficulty}")
 
-    elif game_state == "Load-Game":
-        rooms, playerOne, old_room=load_game_state(name_of_game)
-        if rooms is None or playerOne is None:
-            console = (f"Failed to load game: {name_of_game}. Please try a different save file or create a new game.\n")
-            active_game = False
-            game_state_selector = gr.Radio(value="Load-Game")
-        else:
-            console = (f"Loaded game: {name_of_game}.\n")
-            active_game = True
-            game_state_selector = gr.Radio(value ="Play-Game")
-        
     elif game_state == "Save-Game":
         name_of_game = save_game_state(new_game_name)
         console = (f"Saved game: {name_of_game}. Select Play-Game to continue playing.\n")
@@ -4621,6 +4686,8 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         list_of_saved_games = saved_files()
 
     elif game_state == "Play-Game" and active_game:
+        # CHANGE (load): models load on first play turn, not on restore
+        _ensure_llm_diffuser_ready(diff_name=name_of_diffuser, llm_name=name_of_llm)
         room_before_command = playerOne.current_room if playerOne else None
         if old_room != playerOne.current_room:
             you_started_it = False
@@ -4652,6 +4719,19 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
             console = console + (result or "")
             item_images = []
 
+        # CHANGE (debug): persistent per-game log with room exits, monsters, routing
+        meta = consume_command_meta()
+        log_play_turn(
+            command=command,
+            preprocessed=meta.get("preprocessed", command),
+            path=meta.get("path", "unknown"),
+            room_before=room_before_command,
+            room_after=playerOne.current_room,
+            player=playerOne,
+            result=result,
+            extra={k: v for k, v in meta.items() if k not in ("preprocessed", "path")},
+        )
+
         # CHANGE (UX): safety net when Ollama or parser returns nothing useful
         if is_empty_game_response(result):
             console = console + "\n(no response — try: look · inventory · go <direction>)\n"
@@ -4675,7 +4755,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 print(f"Quicksave skipped: {e}")
 
         # return if no active game
-    else:
+    elif not restore_only:
         print("Returning from talk_to_functions early", room_image, map_image)
         return _make_output_tuple(room_image, map_image, room_description,
             room_riddles, room_contents, console, your_status,
@@ -4700,63 +4780,86 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     elif playerOne.current_room.full_description != playerOne.current_room.description: 
         room_contents = room_contents + playerOne.current_room.full_description # so you figure out contents yourself
         room_long_description = gr.Textbox(visible=False)
-    # Update action of monsters
-    if playerOne.current_room.monsters:
-        monsters = playerOne.current_room.monsters
-        monster_content = ""
-        for monster in monsters:
-            # CHANGE (combat): difficulty-tier attack rate, not player wealth
-            attack_roll = random.randint(0, DIFFICULTY_ATTACK_FREQ.get(difficulty, 2))
-            if attack_roll == 0 or you_started_it:
-                console = console + monster.monster_attack(playerOne)
-            monster_content = monster_content + monster.inventory_living()
-            if monster.image:
-                monster_image.append(monster.image)
-        if difficulty in ["cheat", "easy"] and monsters:
-            room_contents = room_contents + "Monster posessions: " + monster_content
-    
-    # Update action of NPC using NPC class
-    if playerOne.current_room.npc: 
-        npc = playerOne.current_room.npc
-        
-        # Use enhanced NPC decision making
-        npc_action = npc.decide_action(player_in_room=True)
-        
-        if npc_action and npc_action[0] == "move":
-            direction = npc_action[1]
-            console = console + npc.move(direction)
-        elif not npc_introduced:
-            # More dynamic introduction based on NPC personality
-            # Special introduction for MB
-            if hasattr(npc, 'is_master_beast') and npc.is_master_beast:
-                console += "\n🌟 A stunningly beautiful, woman with glowing eyes turns to greet you: 🌟\n"
-                console += npc.llM_generate_self_dialogue("Welcome, young adventurer! I am MB, the Master Beast. *flexes impressively* I know all the secrets of this cave and I'm here to help you succeed! Ask me anything - about riddles, items, monsters, or game strategy. I want you to win! And if you're curious about me... well, I have many talents beyond just helping with your quest. *winks*")
-                npc_introduced = True
-            elif random.randint(0, 3) == 0 or npc.personality_traits['mood'] in ['friendly', 'cheerful']:
-                intro_dialogue = _get_npc_intro_dialogue(npc)
-                console = console + npc.llM_generate_self_dialogue(intro_dialogue)
-                npc_introduced = True
-        else:
-            # NPCs may occasionally offer information or comments
-            if random.randint(0, 15) == 0 and npc.personality_traits['helpfulness'] in ['very helpful', 'eager to help']:
-                # Helpful NPCs might give unsolicited advice
-                if playerOne.health < 150:
-                    console = console + f"{npc.name} notices your injuries and says: 'You look hurt! You should find some healing items.'\n"
-                elif len([i for i in playerOne.items if isinstance(i, Magic)]) > 0:
-                    console = console + f"{npc.name} eyes your magic items and says: 'Those might be useful for solving riddles...'\n"
-                
-            # NPCs may offer quest suggestions
-            if random.randint(0, 20) == 0:
-                quest_suggestion = playerOne.get_npc_quest_suggestion()
-                if quest_suggestion:
-                    console = console + quest_suggestion
-                
-        if difficulty in ["cheat", "easy"]: #NPC Inventory to help
-            room_contents = room_contents + (f'NPC Inventory: {npc.inventory_living()}')
-            room_contents = room_contents + (f'\nNPC Personality: {npc.personality_traits["mood"]}, {npc.personality_traits["helpfulness"]}\n')
-        if npc.image:
-            npc_image.append(npc.image)
-            
+    # CHANGE (load): skip turn simulation — monsters, NPC LLM, trophies wait for first command
+    if not restore_only:
+        # Update action of monsters
+        if playerOne.current_room.monsters:
+            monsters = playerOne.current_room.monsters
+            monster_content = ""
+            for monster in monsters:
+                # CHANGE (combat): difficulty-tier attack rate, not player wealth
+                attack_roll = random.randint(0, DIFFICULTY_ATTACK_FREQ.get(difficulty, 2))
+                if attack_roll == 0 or you_started_it:
+                    console = console + monster.monster_attack(playerOne)
+                monster_content = monster_content + monster.inventory_living()
+                if monster.image:
+                    monster_image.append(monster.image)
+            if difficulty in ["cheat", "easy"] and monsters:
+                room_contents = room_contents + "Monster posessions: " + monster_content
+
+        # Update action of NPC using NPC class
+        if playerOne.current_room.npc:
+            npc = playerOne.current_room.npc
+
+            # Use enhanced NPC decision making
+            npc_action = npc.decide_action(player_in_room=True)
+
+            if npc_action and npc_action[0] == "move":
+                direction = npc_action[1]
+                console = console + npc.move(direction)
+            elif not npc_introduced:
+                # More dynamic introduction based on NPC personality
+                # Special introduction for MB
+                if hasattr(npc, 'is_master_beast') and npc.is_master_beast:
+                    console += "\n🌟 A stunningly beautiful, woman with glowing eyes turns to greet you: 🌟\n"
+                    console += npc.llM_generate_self_dialogue("Welcome, young adventurer! I am MB, the Master Beast. *flexes impressively* I know all the secrets of this cave and I'm here to help you succeed! Ask me anything - about riddles, items, monsters, or game strategy. I want you to win! And if you're curious about me... well, I have many talents beyond just helping with your quest. *winks*")
+                    npc_introduced = True
+                elif random.randint(0, 3) == 0 or npc.personality_traits['mood'] in ['friendly', 'cheerful']:
+                    intro_dialogue = _get_npc_intro_dialogue(npc)
+                    console = console + npc.llM_generate_self_dialogue(intro_dialogue)
+                    npc_introduced = True
+            else:
+                # NPCs may occasionally offer information or comments
+                if random.randint(0, 15) == 0 and npc.personality_traits['helpfulness'] in ['very helpful', 'eager to help']:
+                    # Helpful NPCs might give unsolicited advice
+                    if playerOne.health < 150:
+                        console = console + f"{npc.name} notices your injuries and says: 'You look hurt! You should find some healing items.'\n"
+                    elif len([i for i in playerOne.items if isinstance(i, Magic)]) > 0:
+                        console = console + f"{npc.name} eyes your magic items and says: 'Those might be useful for solving riddles...'\n"
+
+                # NPCs may offer quest suggestions
+                if random.randint(0, 20) == 0:
+                    quest_suggestion = playerOne.get_npc_quest_suggestion()
+                    if quest_suggestion:
+                        console = console + quest_suggestion
+
+            if difficulty in ["cheat", "easy"]: #NPC Inventory to help
+                room_contents = room_contents + (f'NPC Inventory: {npc.inventory_living()}')
+                room_contents = room_contents + (f'\nNPC Personality: {npc.personality_traits["mood"]}, {npc.personality_traits["helpfulness"]}\n')
+            if npc.image:
+                npc_image.append(npc.image)
+
+        # Check for winning the game or death
+        console_temp, player_image_temp, item_images_temp = check_trophy("treasure", lambda room: room.items and any(isinstance(item, Treasure) for item in room.items), "you got all the treasures", "celebrating finding treasure")
+        console += console_temp
+        player_image += player_image_temp
+        item_images += item_images_temp
+
+        console_temp, player_image_temp, item_images_temp = check_trophy("monster", lambda room: room.monsters, "you killed all the monsters", "celebrating killing monsters")
+        console += console_temp
+        player_image += player_image_temp
+        item_images += item_images_temp
+
+        console_temp, player_image_temp, item_images_temp = check_trophy("riddle", lambda room: room.riddles and not room.riddle_solved, "you won the game all the riddles solved", "Celebration solving riddles")
+        console += console_temp
+        player_image += player_image_temp
+        item_images += item_images_temp
+
+        console_temp, player_image_temp, item_images_temp = check_trophy("explorer", lambda room: not room.explored, "you explored all the rooms", "Celebration succesfully exploring")
+        console += console_temp
+        player_image += player_image_temp
+        item_images += item_images_temp
+
     #Riddles
     if playerOne.current_room.riddles and playerOne.current_room.riddle_solved == False:
         # CHANGE (riddle UX): auto-surface eligibility every turn in this room
@@ -4781,30 +4884,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 room_riddles = room_riddles + "\n⚠️  You need magic items to solve this riddle. Find them in other rooms or defeat monsters!\n"
         if cheat_mode and difficulty == "cheat":
             room_riddles = "Cheat: " + generate_riddle_info(playerOne.current_room)
-   
-    # Check for winning the game or death 
-    # The lambda functions are passed as arguments to the check_trophy function.
-    # They are not executed here, but inside the check_trophy function.
-    # Return trophy images and player images as lists so don't have to check if None.
-    console_temp, player_image_temp, item_images_temp = check_trophy("treasure", lambda room: room.items and any(isinstance(item, Treasure) for item in room.items), "you got all the treasures", "celebrating finding treasure")
-    console += console_temp
-    player_image += player_image_temp
-    item_images += item_images_temp
 
-    console_temp, player_image_temp, item_images_temp = check_trophy("monster", lambda room: room.monsters, "you killed all the monsters", "celebrating killing monsters")
-    console += console_temp
-    player_image += player_image_temp
-    item_images += item_images_temp
-
-    console_temp, player_image_temp, item_images_temp = check_trophy("riddle", lambda room: room.riddles and not room.riddle_solved, "you won the game all the riddles solved", "Celebration solving riddles")
-    console += console_temp
-    player_image += player_image_temp
-    item_images += item_images_temp
-
-    console_temp, player_image_temp, item_images_temp = check_trophy("explorer", lambda room: not room.explored, "you explored all the rooms", "Celebration succesfully exploring")
-    console += console_temp
-    player_image += player_image_temp
-    item_images += item_images_temp 
     print (console)
 
     if playerOne.health <= 0:
@@ -4847,7 +4927,9 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     room_description =  room_description +(f'Room {playerOne.current_room.number}: {playerOne.current_room.description}\n')
     if not playerOne.current_room.explored:
             room_description = room_description + "You haven't been in this room before.\n"
-            playerOne.current_room.explored = True # must set before draw_map or seeing if all rooms explored. 
+            # CHANGE (load): don't mutate explored state when restoring a save
+            if not restore_only:
+                playerOne.current_room.explored = True # must set before draw_map or seeing if all rooms explored.
             
     # Special message when entering MB's room
     if playerOne.current_room.number == 1 and playerOne.current_room.npc and hasattr(playerOne.current_room.npc, 'is_master_beast'):

@@ -30,16 +30,34 @@ def build_and_launch_ui(
     if game_dir and os.path.isdir(game_dir):
         has_quicksave = any("quicksave" in f.lower() for f in os.listdir(game_dir) if f.endswith(".pkl"))
 
-    with gr.Blocks(theme=gr.themes.Default(font=[gr.themes.GoogleFont("IBM Plex Mono")])) as web_interface:
+    # CHANGE (UX): fixed-height scrollable adventure log below image/video, above command prompt
+    adventure_log_css = """
+    #adventure-log-scroll textarea {
+        height: 220px !important;
+        max-height: 220px !important;
+        overflow-y: auto !important;
+        resize: none !important;
+    }
+    """
+
+    with gr.Blocks(
+        theme=gr.themes.Default(font=[gr.themes.GoogleFont("IBM Plex Mono")]),
+        css=adventure_log_css,
+    ) as web_interface:
         with gr.Row():
             gr.Markdown("<h1 style='text-align: center;'>JMR's Colossal Cave Adventure</h1>")
         with gr.Row():
             with gr.Column():
-                # CHANGE (UX): status header + adventure log above gallery
                 status_header_output = gr.Markdown(label="Status")
-                adventure_log_output = gr.Markdown(label="Adventure Log")
                 image_output = gr.Gallery(label="Room Image")
                 video_output = gr.Video(label="Room Video", format="mp4")
+                adventure_log_output = gr.Textbox(
+                    label="Adventure Log",
+                    lines=10,
+                    max_lines=10,
+                    interactive=False,
+                    elem_id="adventure-log-scroll",
+                )
                 text_input = gr.Textbox(autofocus=True, label="What do you want to do>", placeholder="Press Enter to act")
                 difficulty_selector = gr.Radio(["Cheat", "Easy", "Medium", "Hard"], value="Easy", label="Difficulty")
                 game_state_selector = gr.Radio(["Play-Game", "Load-Game", "New-Game", "Save-Game"], label="Game State")
