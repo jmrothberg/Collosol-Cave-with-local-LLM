@@ -22,7 +22,7 @@ import pytest
 
 
 def pytest_configure(config):
-    """Earliest hook — mock diffusers before any test module imports the game."""
+    """Earliest hook — mock diffusers/ollama paths before any test module imports the game."""
     if "diffusers" not in sys.modules or not isinstance(sys.modules.get("diffusers"), MagicMock):
         _mock_diff = MagicMock()
         _mock_diff.DiffusionPipeline = MagicMock
