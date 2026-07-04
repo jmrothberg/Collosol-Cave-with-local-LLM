@@ -48,8 +48,9 @@ def build_and_launch_ui(
             gr.Markdown("<h1 style='text-align: center;'>JMR's Colossal Cave Adventure</h1>")
         with gr.Row():
             with gr.Column():
-                status_header_output = gr.Markdown(label="Status")
                 image_output = gr.Gallery(label="Room Image")
+                # CHANGE (UX): status summary below gallery, above adventure log
+                status_header_output = gr.Markdown(label="Status")
                 adventure_log_output = gr.Textbox(
                     label="Adventure Log",
                     lines=10,
@@ -80,15 +81,16 @@ def build_and_launch_ui(
             with gr.Column():
                 # CHANGE (UX): room video at top of right column
                 video_output = gr.Video(label="Room Video", format="mp4")
-                room_desc_output = gr.Textbox(label="Room Description")
-                contents_output = gr.Textbox(label="Room Contents")
-                console_output = gr.Textbox(label="Console")
-                status_output = gr.Textbox(label="Health, Wealth, Points, Killed")
+                # CHANGE (UX): map + rooms explored + inventory above room description
                 with gr.Row():
                     map_image_output = gr.Image(label=" ")
                     with gr.Column():
                         rooms_explored = gr.Textbox(label="Rooms Explored")
                         inventory_out = gr.Textbox(label="Inventory")
+                room_desc_output = gr.Textbox(label="Room Description")
+                contents_output = gr.Textbox(label="Room Contents")
+                console_output = gr.Textbox(label="Console")
+                status_output = gr.Textbox(label="Health, Wealth, Points, Killed")
                 long_description_output = gr.Textbox(label="Room Long Description")
 
         def update_game_selector(game_state):
