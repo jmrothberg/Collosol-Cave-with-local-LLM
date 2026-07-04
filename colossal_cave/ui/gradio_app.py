@@ -30,7 +30,7 @@ def build_and_launch_ui(
     if game_dir and os.path.isdir(game_dir):
         has_quicksave = any("quicksave" in f.lower() for f in os.listdir(game_dir) if f.endswith(".pkl"))
 
-    # CHANGE (UX): fixed-height scrollable adventure log below image/video, above command prompt
+    # CHANGE (UX): fixed-height scrollable adventure log below gallery, above command prompt
     adventure_log_css = """
     #adventure-log-scroll textarea {
         height: 220px !important;
@@ -50,7 +50,6 @@ def build_and_launch_ui(
             with gr.Column():
                 status_header_output = gr.Markdown(label="Status")
                 image_output = gr.Gallery(label="Room Image")
-                video_output = gr.Video(label="Room Video", format="mp4")
                 adventure_log_output = gr.Textbox(
                     label="Adventure Log",
                     lines=10,
@@ -79,6 +78,8 @@ def build_and_launch_ui(
                 submit_button = gr.Button("Submit", visible=True)
                 resume_button = gr.Button("Resume last run", visible=has_quicksave, interactive=has_quicksave)
             with gr.Column():
+                # CHANGE (UX): room video at top of right column
+                video_output = gr.Video(label="Room Video", format="mp4")
                 room_desc_output = gr.Textbox(label="Room Description")
                 contents_output = gr.Textbox(label="Room Contents")
                 console_output = gr.Textbox(label="Console")
