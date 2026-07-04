@@ -3195,6 +3195,29 @@ class MasterBeast(NPC):
     def _generate_personality(self):
         """MB has fixed personality traits"""
         return self.personality_traits
+
+    def _mb_offline_guidance(self, dialogue: str) -> str:
+        """Instant MB advice when Ollama returns empty (no long wait for nothing)."""
+        lines = ["🌟 MB says:\n"]
+        lines.append(self._provide_contextual_help().strip())
+        lines.append(progress_summary(playerOne, rooms).strip())
+        room = playerOne.current_room if playerOne else None
+        if room and room.connected_rooms:
+            exits = []
+            for direction, neighbor in room.connected_rooms.items():
+                note = f"go {direction} (room {neighbor.number})"
+                if neighbor.monsters:
+                    note += f" — {', '.join(m.name for m in neighbor.monsters)}"
+                elif neighbor.riddles and not neighbor.riddle_solved:
+                    note += " — unsolved riddle"
+                exits.append(note)
+            if exits:
+                lines.append("Exits from here: " + "; ".join(exits))
+        lines.append(
+            "Try: explore · take items · solve riddles with magic items · "
+            "attack monsters · trade with NPCs."
+        )
+        return "\n".join(line for line in lines if line) + "\n"
     
     def llM_generate_self_dialogue(self, dialogue="what do you have to trade", my_stuff=None):
         """Override dialogue generation for MB to be more helpful"""
@@ -3208,7 +3231,6 @@ class MasterBeast(NPC):
         all_riddles_info = riddles_and_magic(quiet=True)
         all_items_locations = self._get_all_item_locations()
         monster_locations = self._get_all_monster_locations()
-        complete_instructions = game_knowledge.get('complete_instructions', '')
         
         # Get complete treasure information
         all_treasures = "\n".join(game_knowledge.get('all_treasures', []))
@@ -3217,6 +3239,18 @@ class MasterBeast(NPC):
         
         # Build contextual help based on player's current situation
         contextual_advice = self._provide_contextual_help()
+
+        # CHANGE (MB perf): full HELP only for mechanics questions — keeps Qwen prompts small
+        dlg_lower = dialogue.lower()
+        wants_full_help = any(
+            w in dlg_lower
+            for w in ["command", "cheat", "how do i", "how to", "help me play", "instructions"]
+        )
+        mb_command_summary = (
+            "Commands: go <dir>, take/get <item>, attack <monster>, solve <magic item>, "
+            "use <item>, trade X for Y, look, inventory, magic, map, help."
+        )
+        instructions_block = get_complete_instructions() if wants_full_help else mb_command_summary
         
         system_prompt = f"""You are MB (Master Beast), a stunningly beautiful and remarkably woman with glowing eyes who knows ALL the secrets of this cave adventure game.
 You have ancient knowledge and are EXTREMELY helpful and patient with adventurers.
@@ -3225,8 +3259,8 @@ About yourself: You are a powerful, athletic woman with an impressive physique. 
 You have some mysterious qualities and secrets that you playfully hint at but keep appropriately vague, especially around younger adventurers (*wink*).
 You might tease that you have "other talents" beyond helping with the game, but always keep it tasteful and fun.
 
-COMPLETE GAME INSTRUCTIONS (your ultimate knowledge source):
-{complete_instructions}
+GAME REFERENCE (do not repeat verbatim — give actionable next steps):
+{instructions_block}
 
 CRITICAL: When players ask about GAME MECHANICS, COMMANDS, or CHEATS, prioritize that over in-world advice!
 
@@ -3309,28 +3343,13 @@ Share hints and next steps without listing every item location. Point the player
 
     """
         
-        response_text = ollama_generate(prompt, max_tokens=800, temperature=0.7)
-        
-        # Clean up response - remove thinking tags if present
-        if "<think>" in response_text:
-            # Extract only the actual response after thinking
-            parts = response_text.split("</think>")
-            if len(parts) > 1:
-                response_text = parts[-1].strip()
-            else:
-                # Remove just the opening think tag
-                response_text = response_text.replace("<think>", "").strip()
-        
-        # Also check for common thinking patterns
-        thinking_patterns = ["We are", "I need to", "Let me", "Actually,", "Wait,", "Note:"]
-        for pattern in thinking_patterns:
-            if response_text.startswith(pattern) and "\n\n" in response_text:
-                # Skip to the actual response after thinking
-                parts = response_text.split("\n\n", 1)
-                if len(parts) > 1 and not any(p in parts[1][:50] for p in thinking_patterns):
-                    response_text = parts[1].strip()
-                    break
-        
+        response_text = ollama_generate(prompt, max_tokens=400, temperature=0.7)
+
+        # CHANGE (MB): fallback when Qwen thinking models return empty after long wait
+        if not response_text or response_text == "Error generating response" or len(response_text.strip()) < 8:
+            log_game_event("MB_EMPTY_LLM", f"dialogue={dialogue!r} — using offline guidance")
+            return self._mb_offline_guidance(dialogue)
+
         formatted_response = f"MB says: {response_text}\n"
         
         # Remember this interaction
@@ -3820,6 +3839,20 @@ def set_up_llm_diffuser(diff_name, llm_name):
                 device_map="balanced"  # Keep balanced mapping for non-FLUX models
             )
 
+def _strip_llm_thinking(response_text: str) -> str:
+    """Remove thinking-model blocks (Qwen3, etc.) so the player sees the answer."""
+    text = (response_text or "").strip()
+    if not text or text == "Error generating response":
+        return text
+    # Qwen3 thinking tags: chr avoids editor stripping XML-like markers
+    close_tag = chr(60) + "/think" + chr(62)
+    open_tag = chr(60) + "think" + chr(62)
+    if close_tag.lower() in text.lower():
+        text = re.split(close_tag, text, flags=re.IGNORECASE)[-1].strip()
+    text = re.sub(open_tag + r".*?" + close_tag, "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+    return text
+
+
 def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None):
     """Helper function to call Ollama API"""
     global model
@@ -3841,8 +3874,13 @@ def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None):
         options = {
             'temperature': temperature,
             'num_predict': max_tokens,
-            'stop': ['<|eot_id|>', '<|end_of_text|>', '\nUser:', '\nSystem:']
         }
+        # CHANGE (qwen): \nUser: stop token can truncate thinking models to empty output
+        model_lower = (model or "").lower()
+        if "qwen" in model_lower or "thinking" in model_lower:
+            options['stop'] = ['<|eot_id|>', '<|end_of_text|>']
+        else:
+            options['stop'] = ['<|eot_id|>', '<|end_of_text|>', '\nUser:', '\nSystem:']
         
         # Add format if specified
         generate_params = {
@@ -3855,7 +3893,7 @@ def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None):
             generate_params['format'] = format
         
         response = ollama.generate(**generate_params)
-        return response['response'].strip()
+        return _strip_llm_thinking(response['response'].strip())
     except Exception as e:
         print(f"Error calling Ollama with model {model}: {e}")
         import traceback
