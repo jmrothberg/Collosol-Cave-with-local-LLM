@@ -1,5 +1,8 @@
 """Gradio web UI for Colossal Cave — separated from game engine for testability."""
 
+import glob
+import os
+
 import gradio as gr
 
 
@@ -9,6 +12,7 @@ def build_and_launch_ui(
     list_of_llms,
     list_of_diffusers,
     ensure_mflux_installed_fn,
+    game_dir=None,
 ):
     """
     Build Gradio Blocks and launch the web interface.
@@ -21,14 +25,22 @@ def build_and_launch_ui(
     if not list_of_diffusers:
         list_of_diffusers = ["No saved diffusers"]
 
+    # CHANGE (UX): detect quicksave for Resume button
+    has_quicksave = False
+    if game_dir and os.path.isdir(game_dir):
+        has_quicksave = any("quicksave" in f.lower() for f in os.listdir(game_dir) if f.endswith(".pkl"))
+
     with gr.Blocks(theme=gr.themes.Default(font=[gr.themes.GoogleFont("IBM Plex Mono")])) as web_interface:
         with gr.Row():
             gr.Markdown("<h1 style='text-align: center;'>JMR's Colossal Cave Adventure</h1>")
         with gr.Row():
             with gr.Column():
+                # CHANGE (UX): status header + adventure log above gallery
+                status_header_output = gr.Markdown(label="Status")
+                adventure_log_output = gr.Markdown(label="Adventure Log")
                 image_output = gr.Gallery(label="Room Image")
                 video_output = gr.Video(label="Room Video", format="mp4")
-                text_input = gr.Textbox(autofocus=True, label="What do you want to do>")
+                text_input = gr.Textbox(autofocus=True, label="What do you want to do>", placeholder="Press Enter to act")
                 difficulty_selector = gr.Radio(["Cheat", "Easy", "Medium", "Hard"], value="Easy", label="Difficulty")
                 game_state_selector = gr.Radio(["Play-Game", "Load-Game", "New-Game", "Save-Game"], label="Game State")
 
@@ -46,7 +58,8 @@ def build_and_launch_ui(
                     llm_select = gr.Dropdown(list_of_llms, visible=False, label="Select LLM", value=list_of_llms[0])
                     diff_select = gr.Dropdown(list_of_diffusers, visible=False, label="Select a Diffuser", value=list_of_diffusers[0])
 
-                submit_button = gr.Button("Submit", visible=False)
+                submit_button = gr.Button("Submit", visible=True)
+                resume_button = gr.Button("Resume last run", visible=has_quicksave, interactive=has_quicksave)
             with gr.Column():
                 room_desc_output = gr.Textbox(label="Room Description")
                 contents_output = gr.Textbox(label="Room Contents")
@@ -100,11 +113,31 @@ def build_and_launch_ui(
         submit_outputs = [
             image_output, map_image_output, room_desc_output, contents_output, console_output,
             status_output, rooms_explored, inventory_out, long_description_output,
-            game_state_selector, video_output,
+            game_state_selector, video_output, adventure_log_output, status_header_output,
         ]
+
+        def resume_last_run(difficulty, llm_name, diff_name, art_st, gen_vid):
+            """Load the most recent quicksave if present."""
+            if not game_dir or not os.path.isdir(game_dir):
+                return talk_to_functions("", "", difficulty, "Load-Game", "", "", False, False, False, llm_name, diff_name, art_st, gen_vid)
+            quicksaves = sorted(
+                [f for f in os.listdir(game_dir) if f.startswith("Adv_quicksave") and f.endswith(".pkl")],
+                key=lambda f: os.path.getmtime(os.path.join(game_dir, f)),
+                reverse=True,
+            )
+            if not quicksaves:
+                return talk_to_functions("", "", difficulty, "Load-Game", "", "", False, False, False, llm_name, diff_name, art_st, gen_vid)
+            # saved_files() strips Adv_ and .pkl — rebuild the name key
+            inner = quicksaves[0][4:-4]
+            return talk_to_functions("", inner, difficulty, "Load-Game", "", "", False, False, False, llm_name, diff_name, art_st, gen_vid)
 
         text_input.submit(fn=talk_to_functions, inputs=submit_inputs, outputs=submit_outputs)
         submit_button.click(fn=talk_to_functions, inputs=submit_inputs, outputs=submit_outputs)
+        resume_button.click(
+            fn=resume_last_run,
+            inputs=[difficulty_selector, llm_select, diff_select, art_style, generate_videos],
+            outputs=submit_outputs,
+        )
 
     ensure_mflux_installed_fn()
     try:

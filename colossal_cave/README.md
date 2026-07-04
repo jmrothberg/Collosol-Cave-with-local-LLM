@@ -95,8 +95,12 @@ Extracted packages: `engine/`, `ui/`, `media/`, `config/`, `tests/`
 
 ```bash
 cd colossal_cave
-pytest -m "not gpu and not ollama"
+COLOSSAL_CAVE_SKIP_VECTOR_MODEL=1 COLOSSAL_CAVE_HEADLESS=1 pytest -m "not gpu and not ollama"
 ```
+
+- **CI-safe suite:** engine helpers, fast-path, execute_action, save/load, walkthrough simulator (~65+ tests)
+- **Optional local:** `pytest -m ollama` (live Ollama), `pytest -m gpu` (CUDA/MPS smoke)
+- Env vars: `COLOSSAL_CAVE_SKIP_VECTOR_MODEL=1` skips unused SentenceTransformer load; `COLOSSAL_CAVE_HEADLESS=1` skips interactive video prompts on load
 
 CI runs on push via `.github/workflows/colossal_cave_tests.yml`.
 

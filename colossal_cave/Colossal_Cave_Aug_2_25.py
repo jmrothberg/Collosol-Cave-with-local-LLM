@@ -187,7 +187,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # === ML/AI IMPORTS ===
 import ollama  # Local LLM interface
-from sentence_transformers import SentenceTransformer  # For vector embeddings (simplified)
+# CHANGE (perf): SentenceTransformer optional — unused in live path; skip import in tests
+try:
+    from sentence_transformers import SentenceTransformer  # For vector embeddings (simplified)
+except ImportError:
+    SentenceTransformer = None  # type: ignore
 from fuzzywuzzy import fuzz  # For fuzzy string matching in item names
 
 # === DIFFUSION/IMAGE GENERATION IMPORTS ===
@@ -213,6 +217,20 @@ from engine.llm_commands import (
     needs_clarification,
 )
 from engine.session import get_session, sync_session_from_globals
+# CHANGE (UX): fast-path commands and adventure-log helpers
+from engine.fast_path import try_local_command
+from engine.ux_helpers import (
+    append_adventure_log,
+    append_adventure_log_system,
+    adjacent_cues,
+    build_status_header,
+    format_session_postmortem,
+    get_adventure_log_text,
+    is_empty_game_response,
+    reset_adventure_log,
+    riddle_eligibility_text,
+    progress_summary,
+)
 
 # === HUGGING FACE AUTHENTICATION ===
 # Only login when HF_TOKEN is set; skip interactive prompt (local Diffusion_Models work without it)
@@ -489,8 +507,12 @@ if model_path is None:
     print("Please select the path for LLM & DIFF folders:")
     model_path = ask_for_folder()
 
-# Load the SentenceTransformer model
-vector_model = SentenceTransformer('all-mpnet-base-v2', cache_folder=model_path)
+# CHANGE (perf): skip unused SentenceTransformer unless explicitly enabled
+if os.environ.get("COLOSSAL_CAVE_SKIP_VECTOR_MODEL") == "1" or SentenceTransformer is None:
+    vector_model = None
+    print("Skipping SentenceTransformer load (COLOSSAL_CAVE_SKIP_VECTOR_MODEL=1 or package missing)")
+else:
+    vector_model = SentenceTransformer('all-mpnet-base-v2', cache_folder=model_path)
 
 ###############################################################################
 # ═══════════════════════ DATA LOADING ═══════════════════════════════════ #
@@ -655,8 +677,19 @@ def save_game_state(name_of_game = None):
         name_of_game = (f"{datetime.now().strftime('%d-%H%M')}")
     try:
         file_name = (f'Adv_{name_of_game}_{len(rooms)}_{art_style_g}.pkl')
+        # CHANGE (save): persist trophies, cheat flags, difficulty, and adventure log
+        save_payload = {
+            "rooms": rooms,
+            "playerOne": playerOne,
+            "old_room": old_room,
+            "trophies": trophies,
+            "cheat_mode": cheat_mode,
+            "magicword": magicword,
+            "difficulty_g": difficulty_g,
+            "adventure_log": get_adventure_log_text(),
+        }
         with open(os.path.join(game_dir, file_name), 'wb') as f:
-            pickle.dump((rooms, playerOne, old_room), f)
+            pickle.dump(save_payload, f)
             print (f"Game state saved as {file_name}")
     except Exception as e:
         name_of_game = "Error saving game state", e
@@ -681,6 +714,10 @@ def _migrate_legacy_videos(rooms):
             needs_video = True
 
     if not needs_video:
+        return
+    # CHANGE (headless): skip interactive video regen in CI/tests
+    if os.environ.get("COLOSSAL_CAVE_HEADLESS") == "1":
+        print("Skipping video regeneration (COLOSSAL_CAVE_HEADLESS=1).")
         return
     user_input = input("Some rooms don't have videos. Generate videos for all rooms? (y/n): ").lower()
     if user_input != 'y':
@@ -740,10 +777,26 @@ def _patch_all_npcs(rooms):
 
 
 def load_game_state(name):
+    global trophies, cheat_mode, magicword, difficulty_g
     path_fullname = os.path.join(game_dir, f'Adv_{name}.pkl')
     try:
         with open(path_fullname, 'rb') as f:
-            rooms, playerOne, old_room = pickle.load(f)
+            loaded = pickle.load(f)
+        # CHANGE (save): support legacy 3-tuple and new dict payload
+        if isinstance(loaded, dict):
+            rooms = loaded["rooms"]
+            playerOne = loaded["playerOne"]
+            old_room = loaded.get("old_room")
+            trophies = loaded.get("trophies", [])
+            cheat_mode = loaded.get("cheat_mode", False)
+            magicword = loaded.get("magicword", magicword if 'magicword' in globals() else "xyzzy")
+            difficulty_g = loaded.get("difficulty_g", "easy")
+            from engine import ux_helpers as _ux
+            _ux._adventure_log_lines = [loaded["adventure_log"]] if loaded.get("adventure_log") else []
+        else:
+            rooms, playerOne, old_room = loaded
+            trophies = []
+            cheat_mode = False
         _migrate_legacy_videos(rooms)
         _ensure_master_beast(rooms)
         _patch_all_npcs(rooms)
@@ -1462,6 +1515,30 @@ class LivingThing(AdventureGame):
 # ═══════════════════════ PLAYER ═════════════════════════════════════════ #
 ###############################################################################
 
+# CHANGE (fun): cache one-line combat flavor so repeats are instant
+_combat_flavor_cache = {}
+
+
+def _add_combat_flavor(base_text, weapon_name, monster_name, was_kill):
+    """Append one short LLM color line to a resolved combat result (cached)."""
+    key = (weapon_name or "fists", monster_name or "foe", was_kill)
+    if key in _combat_flavor_cache:
+        return base_text + _combat_flavor_cache[key]
+    prompt = (
+        f"One vivid sentence: adventurer hit {monster_name} with {weapon_name}. "
+        f"{'The monster fell.' if was_kill else 'It still fights.'}"
+    )
+    try:
+        flavor = ollama_generate(prompt, max_tokens=60, temperature=0.4)
+        if flavor and "Error generating" not in flavor:
+            line = f"\n🗡️ {flavor.strip()}\n"
+            _combat_flavor_cache[key] = line
+            return base_text + line
+    except Exception:
+        pass
+    return base_text
+
+
 class Player(LivingThing):
     """
     PLAYER CLASS represents the human player character.
@@ -1554,13 +1631,18 @@ class Player(LivingThing):
         return console
     
 
-    def study(self, item_name, command=None):
-        """Simplified: Let LLM handle the intelligence, just execute the action"""
+    def study(self, item_name, command=None, redraw=True):
+        """Describe room or item. CHANGE (perf): redraw=False skips diffusion on repeat look."""
         
         # Check room first
         if item_name.lower() in ["room", "area", "place", "cave", "chamber", "dungeon", "passage", "tunnel", "corridor", "hallway", "around", "location"]:
-            console = self.llm_describe_room()
-            console = console + self.diff_draw_room()
+            console = self.llm_describe_room() if redraw else (f"{self.current_room.description}\n")
+            if redraw:
+                console = console + self.diff_draw_room()
+            elif self.current_room.image:
+                console = console + "You look around the room.\n"
+            else:
+                console = console + "You look around the room.\n"
             return console, []
             
         # Check room items
@@ -2102,12 +2184,14 @@ Provide a helpful hint.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
                     self.current_room.monsters.remove(monster)
                     self.kills += 1
                     self.points += 10
+                    console = _add_combat_flavor(console, weapon.name, monster.name, True)
                     
                     # Check for special drops
                     if any(isinstance(item, Magic) for item in monster.items):
                         console += "💎 The monster dropped magic items! These can solve riddles!\n"
                 else:
                     console = (f"!! You hit the {monster.name} with {weapon.name} for {damage} damage! Monster health: {monster.health}\n")
+                    console = _add_combat_flavor(console, weapon.name, monster.name, False)
                     
                     # Provide combat tips
                     if monster.health > 100:
@@ -3166,46 +3250,36 @@ Remember: You are the ultimate helper - interpret their needs and give them exac
         
         user_prompt = f"""Player says: {dialogue}
 
-YOUR COMPLETE KNOWLEDGE BASE:
+CONTEXTUAL ADVICE FOR THIS PLAYER:
+{contextual_advice}
+
+Based on what the player said, provide the most helpful response. 
+Give progressive hints — do NOT dump full item location atlases unless the player explicitly asks for spoilers or cheat-level help.
+"""
+        # CHANGE (MB hints): full spoiler atlas only in cheat mode or explicit spoiler request
+        wants_spoilers = (
+            difficulty_g == "cheat"
+            or any(w in dialogue.lower() for w in ["spoiler", "cheat", "exact location", "where is every"])
+        )
+        if wants_spoilers:
+            user_prompt += f"""
+
+YOUR COMPLETE KNOWLEDGE BASE (spoiler mode):
 
 RIDDLE INFORMATION:
 {all_riddles_info}
-
-ALL TREASURES IN THE GAME:
-{all_treasures}
-
-ALL MAGIC ITEMS IN THE GAME:
-{all_magic_items}
-
-ALL WEAPONS IN THE GAME:
-{all_weapons}
 
 ITEM LOCATIONS (DETAILED):
 {all_items_locations}
 
 MONSTER LOCATIONS:
 {monster_locations}
+"""
+        else:
+            user_prompt += """
 
-PLAYER'S CURRENT INVENTORY:
-{my_stuff if my_stuff else "Nothing yet"}
-
-CONTEXTUAL ADVICE FOR THIS PLAYER:
-{contextual_advice}
-
-Based on what the player said, provide the most helpful response. 
-
-ANALYTICAL QUESTIONS - When they ask for "the best", "most powerful", "highest", "strongest":
-- ANALYZE the data to find the actual maximum/minimum
-- Give a DIRECT answer first: "Room X has the most powerful weapon: [Item Name] with [damage] damage"
-- Then provide additional context if helpful
-
-SPECIFIC QUESTIONS - When they ask about locations or items:
-- If they're asking about treasures, tell them EXACTLY where the most valuable ones are
-- If they're asking about locations, give exact details
-- If they're asking for help, explain things clearly
-- If they're confused about game mechanics, teach them
-
-Always be specific and actionable in your advice."""
+Share hints and next steps without listing every item location. Point the player toward rooms and strategies instead.
+"""
         
         prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
@@ -3462,12 +3536,20 @@ def get_help():
 
 def get_contextual_help(command):
     """Simplified help - let LLM handle the intelligence via handle_question_with_llm"""
+    # CHANGE (UX): prepend situational stuck-detector when player seems lost
+    stuck_hint = ""
+    if playerOne and rooms:
+        item_count = len(playerOne.items)
+        in_riddle = (playerOne.current_room.riddles and not playerOne.current_room.riddle_solved)
+        magic_here = [i for i in playerOne.items if isinstance(i, Magic)]
+        if item_count < 2 or (in_riddle and not magic_here):
+            stuck_hint = progress_summary(playerOne, rooms) + "\n\n"
     # For specific questions, use the LLM-powered system
     if "?" in command or any(word in command.lower() for word in ["how", "what", "where", "why", "when"]):
-        return handle_question_with_llm(command)
+        return stuck_hint + handle_question_with_llm(command)
     
     # For general help, return the complete instructions
-    return get_help()
+    return stuck_hint + get_help()
 
 def show_magic_items():
     """Simplified: Let LLM handle contextual magic item advice"""
@@ -3582,6 +3664,7 @@ def initialize_game_variables():
     # Game configuration
     art_style_g = ""         # Global art style for image generation
     magicword = random.choice(["abbracadabra", "alakazam", "hocuspocus", "opensesame", "shazam", "presto", "ivy", "blackjack","titi", "nikki", "versace"])  # Random cheat code
+    reset_adventure_log()    # CHANGE (UX): fresh adventure log on new/load setup
 
 ###############################################################################
 # ═══════════════════════ LLM INTEGRATION ═══════════════════════════════ #
@@ -3981,6 +4064,27 @@ def check_npc_addressing(command, npc):
 def process_game_command(command, player, current_room):
     """Process regular game commands using LLM"""
     try:
+        # CHANGE (fast-path): deterministic verbs skip Ollama when unambiguous
+        fast_helpers = {
+            "move": lambda d: player.move(d),
+            "take": lambda names: player.take(names),
+            "leave": lambda names: player.leave(names),
+            "study": lambda item, cmd, redraw=True: player.study(item, cmd, redraw=redraw),
+            "solve_puzzle": lambda i1, i2=None: player.solve_puzzle(i1, i2),
+            "attack": lambda m, w=None: player.attack(m, w),
+            "inventory": lambda: player.inventory_living(),
+            "help": lambda c: get_contextual_help(c),
+            "magic": lambda: show_magic_items(),
+            "riddle_status": lambda: check_riddle_status(),
+            "map": lambda c: f"You are in Room {player.current_room.number}.\n\n💡 Check the visual map on the right side of the screen!\n",
+            "status": lambda c: f'Health: {int(player.health)}  Wealth: {player.wealth}  Points: {player.points}  Kills: {player.kills}\n',
+            "cheat": lambda c: cheat_code(cheat_code=magicword) if magicword in c.lower() or "xyzzy" in c.lower() else "Invalid cheat attempt.",
+            "hint": lambda c: player.get_trading_hints() if current_room.npc else "No one here to ask for hints.",
+        }
+        local_result = try_local_command(command, player, current_room, fast_helpers)
+        if local_result is not None:
+            return local_result
+
         llm_result = llm_process_command(command, player, current_room)
         chosen_action = llm_result["chosen_action"]
         entities_by_type = llm_result["entities"]
@@ -4020,6 +4124,8 @@ def llm_process_command(command, player, current_room):
     """
     
     # Apply shortcuts for common single-letter commands
+    # CHANGE (accuracy): fix typos before shortcuts
+    command = preprocess_command(command)
     command = apply_command_shortcuts(command)
     
     # Build context directly inline - no need for separate function
@@ -4212,7 +4318,7 @@ def execute_action(chosen_action, entities_by_type, command, confidence=0.5):
         "use": lambda: playerOne.use(entities_by_type.get("my_magic") or entities_by_type.get("my_items")) if (entities_by_type.get("my_magic") is not None or entities_by_type.get("my_items") is not None) else "Magic items not specified.",
         "wear": lambda: playerOne.put_on_armor(entities_by_type.get("my_armor")) if entities_by_type.get("my_armor") is not None else \
              playerOne.put_on_armor(entities_by_type.get("my_items")) if entities_by_type.get("my_items") is not None else "Armor not specified.",
-        "remove": lambda: playerOne.take_off_armor(entities_by_type.get("wear_armor")) if entities_by_type.get("wear_armor") is not None else "Armor not on.",
+        "remove": lambda: playerOne.take_off_armor(entities_by_type.get("worn_armor")) if entities_by_type.get("worn_armor") is not None else "Armor not on.",
         "take": lambda: playerOne.take(list_entities_by_type.get("room_items")) if list_entities_by_type.get("room_items") is not None else "Room items not specified.",
         "leave": lambda: playerOne.leave(list_entities_by_type.get("my_items")) if list_entities_by_type.get("my_items") is not None else "My items not specified.",
         "solve": lambda: playerOne.solve_puzzle(entities_by_type.get("my_magic"),entities_by_type_2nd.get("my_magic")) if entities_by_type.get("my_magic") is not None else "My magic items not specified.", #also 2nd item 
@@ -4395,14 +4501,26 @@ def _get_npc_intro_dialogue(npc):
         return "Greetings, adventurer. What brings you to this place?"
 
 
+_last_map_room = None  # CHANGE (perf): only redraw map when room changes
+
+
+def _hud_outputs(player, room, difficulty):
+    """Adventure log + status header for Gradio."""
+    ambient = adjacent_cues(room, difficulty) if room else ""
+    header = build_status_header(player, room, ambient, difficulty) if player and room else ""
+    return get_adventure_log_text(), header
+
+
 def _make_output_tuple(images, map_img, room_desc, riddles, contents, console,
-                       status, visited, inventory, long_desc, state, video):
-    """Build the standard 11-value Gradio output tuple."""
+                       status, visited, inventory, long_desc, state, video,
+                       adventure_log="", status_header=""):
+    """Build the standard Gradio output tuple."""
     return (images, map_img,
             (room_desc.strip() + "\n" + riddles.strip()).strip(),
             contents.strip(), console.strip(), status,
             visited.strip(), inventory.strip(),
-            long_desc, state, video)
+            long_desc, state, video,
+            adventure_log, status_header)
 
 
 def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_name, number_of_rooms, llm_diff, llm_mon,
@@ -4425,7 +4543,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     - "Save-Game": Save current game state
     - "Play-Game": Process player command and update world
     """
-    global playerOne, rooms, active_game, list_of_saved_games, trophies, difficulty_g, cheat_mode, npc_introduced, you_started_it,  old_room, art_style_g
+    global playerOne, rooms, active_game, list_of_saved_games, trophies, difficulty_g, cheat_mode, npc_introduced, you_started_it, old_room, art_style_g, _last_map_room
 
     room_image = []
     
@@ -4470,6 +4588,10 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         console = new_game(num_rooms=number_of_rooms, runllm_diff=llm_diff, runllm_mon=llm_mon, 
                            runllm_item=llm_item, name_of_game=new_game_name, generate_videos=generate_videos)
         console = (f"New game: {console}.\n")
+        # CHANGE (onboarding): starter commands instead of dumping full HELP_TEXT
+        console += "\n🌟 Welcome! MB (Master Beast) is in Room 1 to help you.\n"
+        console += "Try: look · magic · MB what should I do?\n"
+        append_adventure_log_system(console)
         active_game = True
         game_state_selector = gr.Radio(value="Play-Game")
 
@@ -4491,6 +4613,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         list_of_saved_games = saved_files()
 
     elif game_state == "Play-Game" and active_game:
+        room_before_command = playerOne.current_room if playerOne else None
         if old_room != playerOne.current_room:
             you_started_it = False
             npc_introduced = False
@@ -4508,17 +4631,40 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 console = console + f"DEBUG: Pending action: {state['pending_action']}, Offer: {state['last_offer']}\n"
             else:
                 console = console + "DEBUG: No pending conversation.\n"
+            log_text, header = _hud_outputs(playerOne, playerOne.current_room, difficulty)
             return _make_output_tuple([], None, "", "", "", console,
-                "", "", "", "", game_state_selector, None)
+                "", "", "", "", game_state_selector, None, log_text, header)
         
         # Use the streamlined command processor
         result = process_command(command, playerOne, playerOne.current_room)
         if isinstance(result, tuple) and len(result) == 2:
             result, item_images = result
-            console = console + result
+            console = console + (result or "")
         else:
-            console = console + result
+            console = console + (result or "")
             item_images = []
+
+        # CHANGE (UX): safety net when Ollama or parser returns nothing useful
+        if is_empty_game_response(result):
+            console = console + "\n(no response — try: look · inventory · go <direction>)\n"
+
+        # --- Adventure Log append ---
+        append_adventure_log(command, console)
+
+        # CHANGE (UX): ambient cues + riddle eligibility on room entry
+        if room_before_command and playerOne.current_room != room_before_command:
+            cue = adjacent_cues(playerOne.current_room, difficulty)
+            if cue:
+                console = cue + "\n" + console
+                append_adventure_log_system(cue)
+            riddle_hint = riddle_eligibility_text(playerOne.current_room, playerOne.items)
+            if riddle_hint:
+                console = riddle_hint + console
+            # CHANGE (save): auto quick-save after successful room change
+            try:
+                save_game_state("quicksave")
+            except Exception as e:
+                print(f"Quicksave skipped: {e}")
 
         # return if no active game
     else:
@@ -4551,8 +4697,9 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         monsters = playerOne.current_room.monsters
         monster_content = ""
         for monster in monsters:
-            attack_probability = random.randint(0, int(9000/diff_dict[difficulty])) # like difficulty dynamic
-            if attack_probability < playerOne.wealth or you_started_it: #if you attack anything it wakes monsterup 
+            # CHANGE (combat): difficulty-tier attack rate, not player wealth
+            attack_roll = random.randint(0, DIFFICULTY_ATTACK_FREQ.get(difficulty, 2))
+            if attack_roll == 0 or you_started_it:
                 console = console + monster.monster_attack(playerOne)
             monster_content = monster_content + monster.inventory_living()
             if monster.image:
@@ -4604,10 +4751,14 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
             
     #Riddles
     if playerOne.current_room.riddles and playerOne.current_room.riddle_solved == False:
+        # CHANGE (riddle UX): auto-surface eligibility every turn in this room
+        auto_hint = riddle_eligibility_text(playerOne.current_room, playerOne.items)
         room_riddles = "\n" + "="*50 + "\n"
         room_riddles += "🧩 RIDDLE IN THIS ROOM:\n"
         room_riddles += f"{playerOne.current_room.riddles[0]}\n"
         room_riddles += "\n💡 TO SOLVE: You must bring a MAGIC ITEM that represents the answer!\n"
+        if auto_hint:
+            room_riddles += auto_hint
         room_riddles += "="*50 + "\n"
         if difficulty in ["cheat", "easy"]:
             room_riddles = room_riddles + (f"Hint: {playerOne.current_room.hints[0]} \n")
@@ -4651,12 +4802,18 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     if playerOne.health <= 0:
         console = console + (f'Health: {int(playerOne.health)}  Wealth: {playerOne.wealth}  Points: {playerOne.points}  Kills: {playerOne.kills}\n')
         console = console + ("You died. Game over.\n")
+        # CHANGE (post-mortem): end-of-run stats on death
+        from engine.ux_helpers import get_session_turns
+        console += format_session_postmortem(playerOne, rooms, trophies, get_session_turns(), "DEFEAT")
         victory = ("Died, killed by a monsters")
         playerOne.drawing_self(victory)
         if playerOne.image:
             player_image.append(playerOne.image)
         console = console + (f"Your trophies: {', '.join(trophies)}\n")
         game_state_selector = gr.Radio(value="Load-Game")
+    elif "Congratulations" in console:
+        from engine.ux_helpers import get_session_turns
+        console += format_session_postmortem(playerOne, rooms, trophies, get_session_turns(), "VICTORY")
 
     try:
         if playerOne.current_room.image:
@@ -4689,7 +4846,10 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         room_description += "\n✨ A gorgeous, woman stands here - it's MASTER BEAST (MB)! ✨\n"
         room_description += "Just say: 'MB help' or 'Beast, tell me about yourself' or address her naturally!\n"
             
-    map_image = draw_map_png(cheat_mode and difficulty == "cheat")
+    # CHANGE (perf): regenerate map only when player changes rooms
+    if map_image is None or _last_map_room != playerOne.current_room.number:
+        map_image = draw_map_png(cheat_mode and difficulty == "cheat")
+        _last_map_room = playerOne.current_room.number
     #Rooms Explored
     visited = [room.number for room in rooms.values() if room.explored]
     not_visited = [room.number for room in rooms.values() if not room.explored]
@@ -4705,10 +4865,11 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
 
     image_gallery = (player_image or []) + (npc_image or []) + (room_image or []) + (monster_image or []) + (item_images or [])
 
+    log_text, status_header = _hud_outputs(playerOne, playerOne.current_room, difficulty)
     return _make_output_tuple(image_gallery, map_image, room_description,
         room_riddles, room_contents, console, your_status,
         rooms_visited, inventory1, room_long_description,
-        game_state_selector, room_video)
+        game_state_selector, room_video, log_text, status_header)
 
 
 ###############################################################################
@@ -4881,6 +5042,7 @@ def main():
         list_of_llms=list_of_llms,
         list_of_diffusers=list_of_diffusers,
         ensure_mflux_installed_fn=ensure_mflux_installed,
+        game_dir=game_dir,
     )
 
 

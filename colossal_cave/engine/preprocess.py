@@ -1,5 +1,7 @@
 """Command preprocessing — typo correction before LLM parsing."""
 
+import re
+
 
 def preprocess_command(command: str) -> str:
     """Preprocess command for better LLM understanding."""
@@ -14,11 +16,9 @@ def preprocess_command(command: str) -> str:
         'trdae': 'trade', 'traed': 'trade', 'talkk': 'talk'
     }
 
-    cmd_lower = command.lower()
+    # CHANGE (accuracy): whole-word replacement only — 'tak' must not corrupt 'take'
+    result = command
     for typo, correct in common_typos.items():
-        if typo in cmd_lower:
-            command = command.replace(typo, correct)
-            command = command.replace(typo.upper(), correct.upper())
-            command = command.replace(typo.capitalize(), correct.capitalize())
+        result = re.sub(rf'\b{re.escape(typo)}\b', correct, result, flags=re.IGNORECASE)
 
-    return command.strip()
+    return result.strip()
