@@ -4659,6 +4659,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         console = (f"Loaded game: {name_of_game}.\n")
         active_game = True
         npc_introduced = True  # CHANGE (load): skip MB re-introduction LLM call
+        you_started_it = False  # CHANGE (load): combat flag must exist after restore
         restore_only = True
         if difficulty_g:
             difficulty = difficulty_g
@@ -5084,6 +5085,8 @@ QUICK START:
 """
 
 active_game = False
+you_started_it = False  # CHANGE (load): module default — Load-Game skips initialize_game_variables
+npc_introduced = False
 diff_dict = DIFFICULTY_ATTACK_FREQ
 
 playerOne = None
