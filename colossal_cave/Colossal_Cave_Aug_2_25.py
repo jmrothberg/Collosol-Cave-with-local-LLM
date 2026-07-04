@@ -487,8 +487,11 @@ else:  # Linux
 
 # Check if paths exist, if not, ask user to select
 if not os.path.exists(default_data_path):
-    print("Please select the path for saved games, art, and game data .")
-    data_path = ask_for_folder()
+    if os.environ.get("COLOSSAL_CAVE_HEADLESS") == "1":
+        data_path = _SCRIPT_DIR
+    else:
+        print("Please select the path for saved games, art, and game data .")
+        data_path = ask_for_folder()
 else:
     data_path = default_data_path
 
@@ -504,8 +507,13 @@ if model_path is None:
             model_path = candidate
             break
 if model_path is None:
-    print("Please select the path for LLM & DIFF folders:")
-    model_path = ask_for_folder()
+    # CHANGE (CI/headless): never open Tk folder dialog without a display
+    if os.environ.get("COLOSSAL_CAVE_HEADLESS") == "1":
+        model_path = _SCRIPT_DIR
+        print(f"Headless mode: using model_path={model_path}")
+    else:
+        print("Please select the path for LLM & DIFF folders:")
+        model_path = ask_for_folder()
 
 # CHANGE (perf): skip unused SentenceTransformer unless explicitly enabled
 if os.environ.get("COLOSSAL_CAVE_SKIP_VECTOR_MODEL") == "1" or SentenceTransformer is None:

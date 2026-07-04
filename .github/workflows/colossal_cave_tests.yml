@@ -27,4 +27,7 @@ jobs:
 
       - name: Run CI-safe tests
         working-directory: colossal_cave
+        env:
+          COLOSSAL_CAVE_SKIP_VECTOR_MODEL: "1"
+          COLOSSAL_CAVE_HEADLESS: "1"
         run: pytest -m "not gpu and not ollama" --tb=short -q
