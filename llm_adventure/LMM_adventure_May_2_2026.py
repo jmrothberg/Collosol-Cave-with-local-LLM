@@ -34,8 +34,11 @@ import gradio as gr
 from mlx_lm import load as mlx_load, generate as mlx_generate
 from mlx_lm.sample_utils import make_sampler
 
-# MLX model discovery
-MLX_MODELS_DIR = "/Users/jonathanrothberg/MLX_Models"
+# MLX model discovery (override via MLX_MODELS_DIR env if needed)
+MLX_MODELS_DIR = os.environ.get(
+    "MLX_MODELS_DIR",
+    os.path.expanduser("~/MLX_Models"),
+)
 
 # Ollama: dropdown values use this prefix so tags like "qwen3.6:27b-coding-mxfp8" never collide with MLX folder names.
 OLLAMA_CHOICE_PREFIX = "ollama:"
