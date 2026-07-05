@@ -50,3 +50,22 @@ def test_cheat_mode_does_not_crash(three_room_world, tmp_path):
     out = tmp_path / "cheat_map.png"
     img = draw_map_png(three_room_world, cheat_mode=True, output_path=str(out))
     assert img.size[0] > 0
+
+
+def test_current_room_shows_when_unexplored(three_room_world, tmp_path):
+    """After load, current room must appear even if explored flag was false."""
+    from engine.graph_map import relayout_rooms
+
+    relayout_rooms(three_room_world)
+    for room in three_room_world.values():
+        room.explored = False
+    out = tmp_path / "current_map.png"
+    img = draw_map_png(
+        three_room_world,
+        cheat_mode=False,
+        output_path=str(out),
+        current_room_number=2,
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    assert len(buf.getvalue()) > 500

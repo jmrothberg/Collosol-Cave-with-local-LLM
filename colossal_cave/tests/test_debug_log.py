@@ -43,3 +43,16 @@ def test_debug_log_writes_turn_context(tmp_path, minimal_game_world):
     assert "exit east" in text
     assert "room_before" in text
     assert "room_after" in text
+
+
+def test_log_game_event_writes_timestamped_line(tmp_path):
+    game_dir = str(tmp_path / "games")
+    os.makedirs(game_dir, exist_ok=True)
+    start_debug_session(game_dir, "llm_log_test")
+    from engine.debug_log import log_game_event
+
+    log_game_event("LLM_SETUP", "play='gemma' play_ok=False")
+    with open(get_debug_log_path(), encoding="utf-8") as f:
+        text = f.read()
+    assert "LLM_SETUP" in text
+    assert "play_ok=False" in text

@@ -35,6 +35,7 @@ def test_mlx_model_in_saved_llms(game_module):
 
 @pytest.mark.mlx
 def test_ollama_serves_mlx_gemma():
+    """Optional: only if you registered gemma with Ollama (not required for MLX direct load)."""
     import ollama
     try:
         ollama.list()
@@ -45,4 +46,4 @@ def test_ollama_serves_mlx_gemma():
         r = ollama.generate(model=play, prompt="hi", options={"num_predict": 3})
         assert "response" in r
     except Exception as e:
-        pytest.skip(f"Cannot generate with {play}: {e}")
+        pytest.skip(f"Cannot generate with {play} via Ollama: {e}")

@@ -65,6 +65,8 @@ def adjacent_cues(room: Any, difficulty: str = "easy") -> str:
 
     lines = []
     for direction, neighbor in room.connected_rooms.items():
+        if neighbor is None:
+            continue
         if getattr(neighbor, "monsters", None):
             if difficulty == "cheat":
                 names = ", ".join(m.name for m in neighbor.monsters)
@@ -99,6 +101,8 @@ def format_room_exits(room: Any, difficulty: str = "easy") -> str:
         return ""
     parts = []
     for direction, neighbor in sorted(room.connected_rooms.items()):
+        if neighbor is None:
+            continue
         note = f"go {direction} (room {neighbor.number})"
         if getattr(neighbor, "monsters", None):
             if difficulty == "cheat":

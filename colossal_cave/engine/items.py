@@ -8,6 +8,14 @@ except ImportError:
     fuzz = None  # type: ignore
 
 
+def safe_items(entity) -> list:
+    """Return item list; None or missing .items becomes []."""
+    if entity is None:
+        return []
+    items = getattr(entity, "items", None)
+    return items if isinstance(items, list) else []
+
+
 def find_item_smart(item_name: Optional[str], items: List[Any]) -> Optional[Any]:
     """Find item using intelligent partial matching prioritizing substring matches."""
     if not item_name or not items:

@@ -41,6 +41,20 @@ def test_parse_invalid_json_low_confidence():
     assert result["chosen_action"] == []
 
 
+def test_parse_null_entity_categories():
+    """LLM JSON mode can return entity_categories: null — must not crash."""
+    raw = '{"chosen_action":["talk"],"entity_categories":null,"confidence":0.9}'
+    result = parse_llm_json_response(raw)
+    assert result["chosen_action"] == ["talk"]
+    assert result["entities"]["room_items"] == []
+
+
+def test_parse_scalar_entity_coerced_to_list():
+    raw = '{"chosen_action":["take"],"entity_categories":{"room_items":"sword"},"confidence":0.9}'
+    result = parse_llm_json_response(raw)
+    assert result["entities"]["room_items"] == ["sword"]
+
+
 def test_filter_entities_for_room():
     result = parse_llm_json_response(
         '{"chosen_action":["take"],"entity_categories":{"room_items":["sword","shield","all"]},"confidence":0.9}'

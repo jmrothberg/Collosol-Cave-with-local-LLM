@@ -107,6 +107,8 @@ def _collect_edges(rooms: Dict[int, Any]) -> Set[Tuple[int, int]]:
     edges: Set[Tuple[int, int]] = set()
     for num, room in rooms.items():
         for nb in room.connected_rooms.values():
+            if nb is None:
+                continue
             edges.add(tuple(sorted((num, nb.number))))
     return edges
 
@@ -144,7 +146,11 @@ def draw_map_png(
     # Tunnels between connected rooms (center to center)
     for a, b in _collect_edges(rooms):
         ra, rb = rooms[a], rooms[b]
-        if not cheat_mode and not (ra.explored or rb.explored):
+        touches_current = (
+            current_room_number is not None
+            and (a == current_room_number or b == current_room_number)
+        )
+        if not cheat_mode and not (ra.explored or rb.explored or touches_current):
             continue
         c1, c2 = centers[a], centers[b]
         draw.line([c1, c2], fill=_TUNNEL_COLOR, width=7)
@@ -152,15 +158,14 @@ def draw_map_png(
     # Direction labels on tunnels from current room (all exits, even unexplored)
     if current_room_number and current_room_number in rooms:
         cur = rooms[current_room_number]
-        if cur.explored or cheat_mode:
-            for direction, nb in cur.connected_rooms.items():
-                if nb.number not in centers:
-                    continue
-                c1, c2 = centers[current_room_number], centers[nb.number]
-                mx, my = (c1[0] + c2[0]) / 2, (c1[1] + c2[1]) / 2
-                abbrev = _DIR_ABBREV.get(direction, direction[:1].upper())
-                label_color = _DIR_LABEL if (nb.explored or cheat_mode) else _DIR_LABEL_UNEXPLORED
-                draw.text((mx - 4, my - 5), abbrev, fill=label_color, font=font)
+        for direction, nb in cur.connected_rooms.items():
+            if nb is None or nb.number not in centers:
+                continue
+            c1, c2 = centers[current_room_number], centers[nb.number]
+            mx, my = (c1[0] + c2[0]) / 2, (c1[1] + c2[1]) / 2
+            abbrev = _DIR_ABBREV.get(direction, direction[:1].upper())
+            label_color = _DIR_LABEL if (nb.explored or cheat_mode) else _DIR_LABEL_UNEXPLORED
+            draw.text((mx - 4, my - 5), abbrev, fill=label_color, font=font)
 
     # Room chambers
     for number, room in rooms.items():
@@ -168,7 +173,8 @@ def draw_map_png(
         x += padding
         y += padding
         cx, cy = centers[number]
-        show = room.explored or cheat_mode
+        is_current = current_room_number is not None and number == current_room_number
+        show = room.explored or cheat_mode or is_current
 
         if show:
             inset = (room_size - chamber_size) // 2

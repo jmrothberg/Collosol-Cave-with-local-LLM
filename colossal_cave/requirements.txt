@@ -23,6 +23,10 @@ python-Levenshtein>=0.25.0
 # Optional: video utilities used by Pyramid-Flow submodule
 opencv-python>=4.8.0
 
+# Optional: direct MLX text LLMs from ~/MLX_Models (VLM + text-only)
+mlx-lm>=0.19.0
+mlx-vlm>=0.6.1
+
 # Test / dev (pytest -m "not gpu and not ollama")
 pytest>=8.0
 pytest-mock>=3.12

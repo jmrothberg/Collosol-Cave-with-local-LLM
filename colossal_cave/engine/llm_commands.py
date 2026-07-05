@@ -46,11 +46,18 @@ def parse_llm_json_response(response_text: str) -> Dict[str, Any]:
 
         result["chosen_action"] = parsed.get("chosen_action", [])
         if not isinstance(result["chosen_action"], list):
-            result["chosen_action"] = [result["chosen_action"]]
+            result["chosen_action"] = [result["chosen_action"]] if result["chosen_action"] else []
 
-        entity_categories = parsed.get("entity_categories", {})
+        # CHANGE (LLM): models sometimes return entity_categories: null
+        entity_categories = parsed.get("entity_categories") or {}
+        if not isinstance(entity_categories, dict):
+            entity_categories = {}
         for category, entities in entity_categories.items():
             if category in result["entities"]:
+                if entities is None:
+                    entities = []
+                elif not isinstance(entities, list):
+                    entities = [entities]
                 result["entities"][category] = entities
 
         result["confidence"] = parsed.get("confidence", 0.8)

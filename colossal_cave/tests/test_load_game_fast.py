@@ -88,3 +88,29 @@ def test_monster_combat_after_load_without_initialize(game_module, minimal_game_
                                    "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit")
     assert hasattr(gm, "you_started_it")
     assert "moved north" in outputs[4].lower() or "Goblin" in outputs[4]
+
+
+def test_load_marks_current_room_explored(game_module, minimal_game_world, tmp_path, monkeypatch):
+    """Loaded save must show player's current room on map even if explored was false."""
+    gm = game_module
+    player = minimal_game_world["player"]
+    rooms = minimal_game_world["rooms"]
+    rooms[2].explored = False
+    player.current_room = rooms[2]
+    save_dir = str(tmp_path / "saves")
+    os.makedirs(save_dir, exist_ok=True)
+    monkeypatch.setattr(gm, "game_dir", save_dir)
+    with open(os.path.join(save_dir, "Adv_explored_load.pkl"), "wb") as f:
+        pickle.dump({"rooms": rooms, "playerOne": player, "old_room": rooms[2],
+                     "trophies": [], "cheat_mode": False, "magicword": "xyzzy",
+                     "difficulty_g": "easy", "adventure_log": ""}, f)
+
+    monkeypatch.setattr(gm, "_migrate_legacy_videos", lambda r: None)
+    monkeypatch.setattr(gm, "_ensure_master_beast", lambda r: None)
+    monkeypatch.setattr(gm, "_patch_all_npcs", lambda r: None)
+    monkeypatch.setattr(gm, "draw_map_png", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "check_trophy", lambda *a, **k: ("", [], []))
+
+    gm.talk_to_functions(" ", "explored_load", "Easy", "Load-Game", "", "", False, False, False,
+                         "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit")
+    assert gm.playerOne.current_room.explored is True

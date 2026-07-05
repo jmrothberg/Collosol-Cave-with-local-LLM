@@ -71,6 +71,8 @@ def _nearest_exit_for_angle(room: Any, target_angle: float) -> Optional[str]:
     best_dir = None
     best_diff = math.pi * 2
     for direction, nb in conns.items():
+        if nb is None:
+            continue
         angle = _exit_bearing(room, nb)
         diff = abs((angle - target_angle + math.pi) % (2 * math.pi) - math.pi)
         if diff < best_diff:
@@ -142,7 +144,7 @@ def parse_category_keyword(text: str) -> Optional[str]:
 
 
 def _is_take_all_phrase(remainder: str) -> bool:
-    """True for take all / take all the items / take everything (not category)."""
+    """True for take all / take all the items / take everything in the room (not category)."""
     r = remainder.lower().strip()
     if r in ("all", "everything"):
         return True
@@ -153,16 +155,26 @@ def _is_take_all_phrase(remainder: str) -> bool:
         return True
     if tail.startswith("the ") and tail[4:].strip() in ("items", "item", "things", "stuff"):
         return True
+    # "all the items in the room", "all items in this room", etc.
+    if "in the room" in tail or "in this room" in tail:
+        if any(w in tail for w in ("item", "things", "stuff", "everything")):
+            return True
     return False
+
+
+def _split_item_names(text: str) -> List[str]:
+    """Split 'dirk, crown and flute' into separate item names."""
+    parts = re.split(r",|\s+and\s+", text)
+    return [p.strip() for p in parts if p.strip()]
 
 
 def parse_take_items(command: str) -> Optional[Union[List[str], Tuple[str, str]]]:
     """
-    Extract item name(s) from take/get/grab/collect commands.
+    Extract item name(s) from take/get/grab/collect/gather/pick up commands.
     Returns list of names, or ('category', 'weapon') for take all weapons.
     """
     cmd = command.lower().strip()
-    for prefix in ("take ", "get ", "grab ", "pick up ", "collect "):
+    for prefix in ("take ", "get ", "grab ", "pick up ", "collect ", "gather "):
         if cmd.startswith(prefix):
             remainder = cmd[len(prefix):].strip()
             if remainder.startswith("all ") or remainder == "all":
@@ -173,6 +185,10 @@ def parse_take_items(command: str) -> Optional[Union[List[str], Tuple[str, str]]
                     return ["all"]
             if remainder in ("all", "everything"):
                 return [remainder]
+            # Multi-item: "get the dirk, crown and flute"
+            names = _split_item_names(remainder)
+            if len(names) > 1:
+                return names
             return [remainder]
     return None
 

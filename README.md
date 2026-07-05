@@ -16,9 +16,10 @@ Two text-adventure games inspired by the classic "Colossal Cave Adventure," each
 
 ### [`colossal_cave/`](colossal_cave/) — Code-Driven Adventure
 
-A traditional text adventure where **the code drives the gameplay**. The game has 25+ hand-designed rooms, monsters, treasures, riddles, and NPCs loaded from a JSON data file. Ollama parses commands and generates NPC dialogue; **local Diffusers models** (FLUX, Z-Image, etc.) create artwork; **Pyramid Flow** generates optional room videos.
+A traditional text adventure where **the code drives the gameplay**. The game has 25+ hand-designed rooms, monsters, treasures, riddles, and NPCs loaded from a JSON data file. **MLX folders under `~/MLX_Models`** (or optional **Ollama**) parse commands and drive NPC/MB chat; **local Diffusers models** (FLUX, Z-Image, etc.) create artwork; **Pyramid Flow** generates optional room videos.
 
 - Structured, predictable gameplay with rich pre-built content
+- **Apple Silicon Mac:** load any `~/MLX_Models/<folder>` directly via `mlx-vlm` / `mlx-lm` — Ollama not required
 - Works on Apple Silicon Mac (MPS) or Linux with NVIDIA GPU (CUDA)
 - Multi-GPU support for distributing LLM, diffusion, and video across GPUs
 - See [`colossal_cave/README.md`](colossal_cave/README.md) for setup and details
@@ -39,18 +40,24 @@ A procedural adventure where **the LLM is the game master**. Instead of pre-defi
 ```bash
 git clone https://github.com/jmrothberg/Collosol-Cave-with-local-LLM.git
 cd Collosol-Cave-with-local-LLM
-python3 -m venv .venv
-source .venv/bin/activate
+chmod +x scripts/startup.sh
+./scripts/startup.sh --setup    # install deps (creates .venv, mlx-vlm on Apple Silicon)
+./scripts/startup.sh            # install + launch Colossal Cave
 ```
+
+**Apple Silicon (recommended):** put MLX weights in `~/MLX_Models/<folder-name>/` (must include `config.json`). Pick that folder name in the game UI — no Ollama needed. For `gemma-4-12B-it-8bit`, use **mlx-vlm ≥ 0.6.1**.
+
+**Optional Ollama:** `ollama serve` in another terminal; pick `ollama:<tag>` in the dropdown.
 
 Then follow the README in whichever game folder you want to play.
 
 ### Tests (Colossal Cave)
 
 ```bash
+./scripts/startup.sh --test
+# or manually:
 source .venv/bin/activate
-pip install -r colossal_cave/requirements.txt
-cd colossal_cave && pytest -m "not gpu and not ollama"
+cd colossal_cave && COLOSSAL_CAVE_SKIP_VECTOR_MODEL=1 COLOSSAL_CAVE_HEADLESS=1 pytest -m "not gpu and not ollama and not mlx"
 ```
 
 See [`colossal_cave/README.md`](colossal_cave/README.md) for architecture and full test docs. GitHub Actions runs the same CI-safe suite on push.
@@ -62,9 +69,11 @@ See [`colossal_cave/README.md`](colossal_cave/README.md) for architecture and fu
 ```
 .
 ├── README.md                          # This file
+├── scripts/
+│   └── startup.sh                     # macOS/Linux setup + launch
 ├── colossal_cave/                     # Game 1: code-driven + LLM support
 │   ├── README.md
-│   ├── colossal_cave_July_5_26.py      # Main game (Ollama + Diffusers + Pyramid Flow)
+│   ├── colossal_cave_July_5_26.py      # Main game (MLX/Ollama + Diffusers + Pyramid Flow)
 │   ├── adventure_dataRA.json          # 25+ rooms, NPCs, monsters, riddles
 │   ├── diffusion_manager.py           # Image generation interface
 │   ├── complete_instruction.py        # Help system
@@ -91,7 +100,7 @@ MIT License
 ## Acknowledgments
 
 - Inspired by the original "Colossal Cave Adventure" by Will Crowther and Don Woods
-- [MLX-LM](https://github.com/ml-explore/mlx-lm), [MFLUX](https://github.com/filipstrand/mflux), [Ollama](https://ollama.com), [Diffusers](https://github.com/huggingface/diffusers), [Pyramid Flow](https://github.com/jy0205/Pyramid-Flow), [Gradio](https://gradio.app)
+- [MLX-LM](https://github.com/ml-explore/mlx-lm), [MLX-VLM](https://github.com/Blaizzy/mlx-vlm), [MFLUX](https://github.com/filipstrand/mflux), [Ollama](https://ollama.com), [Diffusers](https://github.com/huggingface/diffusers), [Pyramid Flow](https://github.com/jy0205/Pyramid-Flow), [Gradio](https://gradio.app)
 
 ---
 

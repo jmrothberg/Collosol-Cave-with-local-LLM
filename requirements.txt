@@ -24,3 +24,7 @@ pytest-mock>=3.12
 
 # Optional: video utilities used by Pyramid-Flow submodule
 opencv-python>=4.8.0
+
+# Optional: direct MLX text LLMs from ~/MLX_Models (Apple Silicon; gemma4 needs >=0.6.1)
+mlx-lm>=0.19.0
+mlx-vlm>=0.6.1

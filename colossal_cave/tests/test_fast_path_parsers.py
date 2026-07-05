@@ -69,6 +69,18 @@ def test_parse_take_all_the_items():
     assert parse_take_items("take all the items") == ["all"]
 
 
+def test_parse_take_all_items_in_room():
+    assert parse_take_items("take all the items in the room") == ["all"]
+    assert parse_take_items("get all items in the room") == ["all"]
+    assert parse_take_items("gather all the items in the room") == ["all"]
+
+
+def test_parse_take_multi_item_list():
+    assert parse_take_items("get the dirk, crown and flute") == [
+        "the dirk", "crown", "flute",
+    ]
+
+
 def test_is_movement_phrase_diagonal():
     assert is_movement_phrase("go southeast")
     assert is_movement_phrase("go south-east")

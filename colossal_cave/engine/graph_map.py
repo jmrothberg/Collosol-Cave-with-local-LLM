@@ -70,6 +70,8 @@ def layout_from_graph(rooms: Dict[int, Any], spacing: float = 0.85) -> None:
         neighbors = list(rooms[cur].connected_rooms.items())
         slot = 0
         for _direction, nb in neighbors:
+            if nb is None:
+                continue
             nnum = nb.number
             if nnum in visited:
                 continue
@@ -112,6 +114,8 @@ def _collect_undirected_edges(rooms: Dict[int, Any]) -> Set[Tuple[int, int]]:
     edges: Set[Tuple[int, int]] = set()
     for num, room in rooms.items():
         for nb in room.connected_rooms.values():
+            if nb is None:
+                continue
             edges.add(tuple(sorted((num, nb.number))))
     return edges
 
@@ -124,6 +128,8 @@ def directions_are_bidirectional(rooms: Dict[int, Any]) -> bool:
     """True when every exit has a matching opposite on the neighbor room."""
     for num, room in rooms.items():
         for direction, nb in room.connected_rooms.items():
+            if nb is None:
+                continue
             if str(direction).startswith("_"):
                 continue
             opp = OPPOSITES.get(direction)
@@ -219,6 +225,7 @@ def apply_cave_connections(rooms: Dict[int, Any], seed: int = None) -> None:
 
 def relayout_rooms(rooms: Dict[int, Any], preserve_coords: bool = False) -> None:
     """Recompute map positions and sync direction keys to match visual layout."""
+    sanitize_connected_rooms(rooms)
     has_coords = bool(rooms) and all(
         getattr(r, "map_x", None) is not None and getattr(r, "map_y", None) is not None
         for r in rooms.values()
@@ -226,14 +233,27 @@ def relayout_rooms(rooms: Dict[int, Any], preserve_coords: bool = False) -> None
     if preserve_coords and has_coords:
         # CHANGE (load): keep positions, relabel to 8-way from geometry
         assign_directions_from_layout(rooms)
+        sanitize_connected_rooms(rooms)
         return
     if preserve_coords and directions_are_bidirectional(rooms):
         # CHANGE (load): place rooms for map, then relabel keys to match screen N/E/S/W
         layout_from_graph(rooms)
         assign_directions_from_layout(rooms)
+        sanitize_connected_rooms(rooms)
         return
     layout_from_graph(rooms)
     assign_directions_from_layout(rooms)
+    sanitize_connected_rooms(rooms)
+
+
+def sanitize_connected_rooms(rooms: Dict[int, Any]) -> None:
+    """Drop None neighbors from connected_rooms (prevents .number / .items crashes)."""
+    for room in rooms.values():
+        conns = getattr(room, "connected_rooms", None)
+        if not isinstance(conns, dict):
+            room.connected_rooms = {}
+            continue
+        room.connected_rooms = {d: nb for d, nb in conns.items() if nb is not None}
 
 
 def spiral_layout(num_rooms: int) -> Dict[int, Tuple[int, int]]:

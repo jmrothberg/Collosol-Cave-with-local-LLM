@@ -40,18 +40,22 @@ def test_pending_conversation_cleared_on_movement(game_module, test_player):
     mock_pgc.assert_called_once()
 
 
-def test_mb_addressing_routes_to_talk(game_module, minimal_game_world):
+def test_ask_mb_skips_game_json_parser(game_module, minimal_game_world):
+    """MB-addressed chat must not go through game-action JSON (entity_categories: null crash)."""
     player = minimal_game_world["player"]
     room = minimal_game_world["r1"]
     mb = game_module.MasterBeast(current_room=1, llm_npc=False)
     room.npc = mb
     player.current_room = room
     game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
 
-    fast_mock, llm_mock = _mock_unparsed_game_path(game_module)
-    with fast_mock, llm_mock, patch.object(player, "talk_to_npc", return_value="MB says hi") as mock_talk:
-        result = game_module.process_command("MB what should I do?", player, room)
-    mock_talk.assert_called_once_with("MB what should I do?")
+    with patch.object(game_module, "try_local_command", return_value=None):
+        with patch.object(game_module, "llm_process_command") as mock_llm:
+            with patch.object(game_module, "_talk_to_master_beast", return_value="MB says hi") as mock_mb:
+                result = game_module.process_command("ask MB for help", player, room)
+    mock_llm.assert_not_called()
+    mock_mb.assert_called_once_with(player, "ask MB for help")
     assert "MB" in result
 
 
@@ -62,6 +66,29 @@ def test_mb_addressing_routes_to_talk(game_module, minimal_game_world):
         "MB help me figure out this game",
         "Master Beast, guide me",
         "beast hello",
+    ],
+)
+def test_mb_addressed_routes_to_talk(game_module, minimal_game_world, command):
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r1"]
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    room.npc = mb
+    player.current_room = room
+    game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
+
+    with patch.object(game_module, "try_local_command", return_value=None):
+        with patch.object(game_module, "llm_process_command") as mock_llm:
+            with patch.object(game_module, "_talk_to_master_beast", return_value="MB says: Sure.") as mock_mb:
+                result = game_module.process_command(command, player, room)
+    mock_llm.assert_not_called()
+    mock_mb.assert_called_once_with(player, command)
+    assert "MB" in result
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "help me figure out this game",
         "what should I do next",
     ],
@@ -73,11 +100,32 @@ def test_unparsed_command_falls_back_to_npc_talk(game_module, minimal_game_world
     room.npc = mb
     player.current_room = room
     game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
 
     fast_mock, llm_mock = _mock_unparsed_game_path(game_module)
-    with fast_mock, llm_mock, patch.object(player, "talk_to_npc", return_value="MB says: Sure, I can help.") as mock_talk:
+    with fast_mock, llm_mock, patch.object(game_module, "_talk_to_master_beast", return_value="MB says: Sure, I can help.") as mock_mb:
         result = game_module.process_command(command, player, room)
-    mock_talk.assert_called_once_with(command)
+    mock_mb.assert_called_once_with(player, command)
+    assert "MB" in result
+
+
+def test_help_with_riddle_reaches_mb_from_other_room(game_module, minimal_game_world):
+    """MB in room 1 answers help/riddle questions even when player is elsewhere."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r2"]
+    room.npc = None
+    player.current_room = room
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    minimal_game_world["r1"].npc = mb
+    game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
+
+    with patch.object(game_module, "try_local_command", return_value=None):
+        with patch.object(game_module, "llm_process_command") as mock_llm:
+            with patch.object(game_module, "_talk_to_master_beast", return_value="MB says: riddle hint") as mock_mb:
+                result = game_module.process_command("help me with the riddle", player, room)
+    mock_llm.assert_not_called()
+    mock_mb.assert_called_once_with(player, "help me with the riddle")
     assert "MB" in result
 
 
@@ -87,11 +135,12 @@ def test_unparsed_command_without_npc_stays_error(game_module, minimal_game_worl
     room.npc = None
     player.current_room = room
     game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
+    minimal_game_world["r1"].npc = None
 
     fast_mock, llm_mock = _mock_unparsed_game_path(game_module)
-    with fast_mock, llm_mock, patch.object(player, "talk_to_npc") as mock_talk:
+    with fast_mock, llm_mock, patch.object(game_module, "_get_master_beast_npc", return_value=None):
         result = game_module.process_command("help me figure out this game", player, room)
-    mock_talk.assert_not_called()
     assert "don't understand" in result.lower()
 
 
@@ -110,3 +159,84 @@ def test_attack_beast_stays_game_command(game_module, minimal_game_world):
     mock_fast.assert_called_once()
     mock_talk.assert_not_called()
     assert "swing" in result
+
+
+def test_mb_talk_survives_dialogue_error(game_module, minimal_game_world):
+    """MB dialogue errors must fall back to offline guidance, not a hard crash."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r1"]
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    room.npc = mb
+    player.current_room = room
+    game_module.playerOne = player
+
+    with patch.object(game_module, "try_local_command", return_value=None):
+        with patch.object(
+            mb,
+            "_llM_generate_self_dialogue_inner",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = game_module.process_command("ask MB for help", player, room)
+    assert "MB" in result
+    assert "don't understand" not in result.lower()
+
+
+def test_llm_null_entity_categories_does_not_crash(game_module, minimal_game_world):
+    """Regression: entity_categories:null must not crash execute_action path."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r1"]
+    room.npc = None
+    player.current_room = room
+    game_module.playerOne = player
+
+    null_entities_llm = {
+        "chosen_action": ["inventory"],
+        "entities": {
+            "location": [], "room_items": [], "monsters": [], "npcs": [], "npc_items": [],
+            "my_items": [], "my_magic": [], "weapons": [], "my_armor": [], "worn_armor": [],
+            "directions": [], "values": [],
+        },
+        "confidence": 0.95,
+    }
+    with patch.object(game_module, "try_local_command", return_value=None):
+        with patch.object(game_module, "llm_process_command", return_value=null_entities_llm):
+            result = game_module.process_game_command("inventory", player, room)
+    assert isinstance(result, str)
+    assert "nothing" in result.lower() or "carrying" in result.lower() or "items" in result.lower()
+
+
+def test_gather_all_items_uses_fast_path_not_mb(game_module, minimal_game_world):
+    """'gather all items' is a take command, not MB chat."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r2"]
+    sword = minimal_game_world["sword"]
+    room.items.append(sword)
+    player.current_room = room
+    game_module.playerOne = player
+
+    with patch.object(player, "talk_to_npc") as mock_talk:
+        result = game_module.process_command("gather all the items in the room", player, room)
+    mock_talk.assert_not_called()
+    console = result[0] if isinstance(result, tuple) else result
+    assert "Taking all items" in console or "Iron Sword" in console
+
+
+def test_mb_dialogue_survives_null_monster_items(game_module, minimal_game_world, monkeypatch):
+    """Legacy saves with monster.items=None must not crash MB knowledge gathering."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r1"]
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    room.npc = mb
+    player.current_room = room
+    game_module.playerOne = player
+    # Simulate corrupted save data
+    for r in minimal_game_world["rooms"].values():
+        r.items = None
+        for m in getattr(r, "monsters", None) or []:
+            m.items = None
+
+    monkeypatch.setattr(game_module, "ollama_generate", lambda *a, **k: "Win by solving all riddles and collecting trophies.")
+    with patch.object(game_module, "try_local_command", return_value=None):
+        result = game_module.process_command("ask MB how to win", player, room)
+    assert "MB" in result
+    assert "don't understand" not in result.lower()

@@ -206,7 +206,7 @@ _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
 from engine.preprocess import preprocess_command as _engine_preprocess_command
-from engine.items import find_item_smart
+from engine.items import find_item_smart, safe_items as _safe_items
 from engine.map_utils import draw_map_png as _engine_draw_map_png
 from engine.trophy import check_trophy as _engine_check_trophy
 from engine.data import load_adventure_data_file, validate_adventure_data, default_adventure_data_path
@@ -240,6 +240,16 @@ from engine.debug_log import (
     log_play_turn,
     set_command_meta,
     start_debug_session,
+)
+# CHANGE (MLX): load any ~/MLX_Models folder directly — Ollama optional (use ollama:<tag> for Ollama)
+from engine.mlx_llm import (
+    OLLAMA_CHOICE_PREFIX,
+    llm_choice_is_ollama,
+    mlx_generate_text,
+    mlx_model_label,
+    model_backend,
+    ollama_model_from_choice,
+    resolve_mlx_folder_path,
 )
 
 # === HUGGING FACE AUTHENTICATION ===
@@ -629,7 +639,7 @@ def mlx_models_dir():
 
 
 def list_mlx_model_folders():
-    """Local MLX weight folders (for dropdown; served via Ollama tag matching folder name)."""
+    """Local MLX weight folders under ~/MLX_Models (loaded directly by engine/mlx_llm.py)."""
     mlx_dir = mlx_models_dir()
     if not os.path.isdir(mlx_dir):
         return []
@@ -645,72 +655,116 @@ def list_mlx_model_folders():
 play_model = default_play_llm()
 creation_model = None
 model = play_model
+pipe = None  # CHANGE (load): set by set_up_llm_diffuser on first play turn
 
 
 def saved_llms():
+    """MLX folders first (direct load); optional Ollama models as ollama:<tag>."""
+    choices = list(list_mlx_model_folders())
+    play_default = default_play_llm()
+    if play_default in choices:
+        choices.remove(play_default)
+        choices.insert(0, play_default)
     try:
-        # Get list of models from Ollama
-        response = ollama.list()
-        
-        # Extract model names - response has a 'models' attribute
-        llm_names = []
-        if hasattr(response, 'models'):
-            # It's the new response format with Model objects
-            for model in response.models:
-                if hasattr(model, 'model'):
-                    llm_names.append(model.model)
-                else:
-                    llm_names.append(str(model))
-        elif isinstance(response, dict) and 'models' in response:
-            # Legacy dict format
-            for model in response['models']:
-                if isinstance(model, dict) and 'name' in model:
-                    llm_names.append(model['name'])
-                else:
-                    llm_names.append(str(model))
-        else:
-            # Unknown format, try to iterate
-            try:
-                for model in response:
-                    llm_names.append(str(model))
-            except Exception:
-                print(f"Unknown response format: {type(response)}")
-                    
-        # Sort models and put common ones first
-        common_models = ['llama3.1', 'llama3', 'llama2', 'mistral', 'phi4', 'phi3', 'gemma3', 'gemma2', 'qwen3', 'qwen2.5']
-        sorted_names = []
-        
-        # Add common models first if they exist
-        for common in common_models:
-            for name in llm_names:
-                if name.startswith(common):
-                    if name not in sorted_names:
-                        sorted_names.append(name)
-        
-        # Add any remaining models
-        for name in llm_names:
-            if name not in sorted_names:
-                sorted_names.append(name)
-
-        # CHANGE (speed): include local MLX folders for play-model selection
-        for mlx_name in list_mlx_model_folders():
-            if mlx_name not in sorted_names:
-                sorted_names.append(mlx_name)
-
-        # Prefer default play model near top when present
-        play_default = default_play_llm()
-        if play_default in sorted_names:
-            sorted_names.remove(play_default)
-            sorted_names.insert(0, play_default)
-                
-        return sorted_names if sorted_names else ["No Ollama models found"]
+        for name in _ollama_installed_model_names():
+            prefixed = f"{OLLAMA_CHOICE_PREFIX}{name}"
+            if prefixed not in choices:
+                choices.append(prefixed)
     except Exception as e:
-        print(f"Error getting Ollama models: {e}")
-        import traceback
-        traceback.print_exc()
-        return ["No Ollama models found"]
+        print(f"Error listing Ollama models (MLX folders still available): {e}")
+    return choices if choices else [play_default]
 
 
+def _ollama_installed_model_names():
+    """Raw model tags from Ollama (without dropdown sorting)."""
+    try:
+        response = ollama.list()
+        names = []
+        if hasattr(response, "models"):
+            for m in response.models:
+                names.append(getattr(m, "model", str(m)))
+        elif isinstance(response, dict) and "models" in response:
+            for m in response["models"]:
+                if isinstance(m, dict) and "name" in m:
+                    names.append(m["name"])
+                else:
+                    names.append(str(m))
+        return names
+    except Exception:
+        return []
+
+
+def _ollama_has_model(requested: str) -> bool:
+    """True if requested tag is installed in Ollama (ignores :latest suffix)."""
+    if not requested or requested == "No Ollama models found":
+        return False
+    tag = ollama_model_from_choice(requested) if llm_choice_is_ollama(requested) else requested
+    req_base = tag.split(":")[0].lower()
+    for name in _ollama_installed_model_names():
+        if name.lower() == tag.lower():
+            return True
+        if name.split(":")[0].lower() == req_base:
+            return True
+    return False
+
+
+def _llm_model_available(model_name: str) -> bool:
+    """True if model can run via MLX folder on disk or via Ollama."""
+    if not model_name:
+        return False
+    if resolve_mlx_folder_path(model_name):
+        return True
+    if llm_choice_is_ollama(model_name):
+        return check_ollama_running() and _ollama_has_model(model_name)
+    return check_ollama_running() and _ollama_has_model(model_name)
+
+
+def _log_llm_inventory(context="", creation=None, play=None, diffuser=None, llm_diff=None):
+    """Write LLM/diffuser availability to the per-game debug log."""
+    play_m = play or play_model
+    creat_m = creation or creation_model or model
+    diff_m = diffuser if diffuser is not None else "(unset)"
+    play_ok = _llm_model_available(play_m)
+    creat_ok = _llm_model_available(creat_m) if creat_m else True
+    play_backend = model_backend(play_m) or "missing"
+    creat_backend = model_backend(creat_m) if creat_m else "none"
+    ollama_up = check_ollama_running()
+    installed = _ollama_installed_model_names()
+    mlx_folders = list_mlx_model_folders()
+    avail = ", ".join(installed[:15]) + ("..." if len(installed) > 15 else "")
+    mlx_list = ", ".join(mlx_folders[:10]) + ("..." if len(mlx_folders) > 10 else "")
+    log_game_event(
+        "LLM_SETUP",
+        f"context={context} ollama_up={ollama_up} "
+        f"play={play_m!r} play_ok={play_ok} play_backend={play_backend} "
+        f"creation={creat_m!r} creation_ok={creat_ok} creation_backend={creat_backend} "
+        f"diffuser={diff_m!r} pipe_loaded={pipe is not None} "
+        f"llm_room_desc={llm_diff} "
+        f"ollama_installed=[{avail}] "
+        f"mlx_folders_on_disk=[{mlx_list}]",
+    )
+    if not ollama_up and not mlx_folders:
+        log_game_event(
+            "OLLAMA_DOWN",
+            "Ollama not reachable and no MLX folders under ~/MLX_Models — LLM will fail",
+        )
+    elif not play_ok:
+        hint = (
+            f"add folder under {mlx_models_dir()}/{play_m} or pick ollama:<tag> from dropdown"
+            if not resolve_mlx_folder_path(play_m)
+            else f"install mlx-vlm or mlx-lm for {mlx_model_label(play_m)}"
+        )
+        log_game_event("LLM_MISSING", f"play model {play_m!r} unavailable — {hint}")
+    if creat_m and not creat_ok:
+        hint = (
+            f"add folder under {mlx_models_dir()}/{creat_m} or use ollama:{creat_m.split(':')[0]}"
+            if not resolve_mlx_folder_path(creat_m)
+            else f"install mlx-vlm or mlx-lm for {mlx_model_label(creat_m)}"
+        )
+        log_game_event(
+            "LLM_MISSING",
+            f"creation model {creat_m!r} unavailable — {hint}; room long descriptions will use short text",
+        )
 
 def saved_diffusers():
     diffuser_names = []
@@ -823,6 +877,41 @@ def _ensure_master_beast(rooms):
     print("Master Beast (MB) added to Room 1!")
 
 
+def _get_master_beast_npc():
+    """MB always lives in room 1 — reachable even when the player is elsewhere."""
+    try:
+        if rooms and 1 in rooms:
+            npc = getattr(rooms[1], "npc", None)
+            if npc and getattr(npc, "is_master_beast", False):
+                return npc
+    except NameError:
+        pass
+    return None
+
+
+def _should_route_to_remote_mb(command: str) -> bool:
+    """True for help/riddle/chat phrasing that should reach MB without saying 'MB'."""
+    if _is_direct_game_command(command):
+        return False
+    cmd = command.lower()
+    if any(t in cmd for t in ("mb", "master beast", "beast", "master")):
+        return True
+    help_phrases = (
+        "help me", "help with", "i need help", "need help", "stuck",
+        "what should i", "how do i", "how to", "confused",
+        "riddle", "hint me", "give me a hint",
+    )
+    return any(p in cmd for p in help_phrases)
+
+
+def _talk_to_master_beast(player, command: str):
+    """Route dialogue to MB in room 1; returns None if MB is missing."""
+    mb = _get_master_beast_npc()
+    if not mb:
+        return None
+    my_stuff = player.get_item_names()
+    return mb.llM_generate_self_dialogue(dialogue=command, my_stuff=my_stuff)
+
 def _patch_all_npcs(rooms):
     """Call _ensure_attributes() on every NPC once after loading a saved game.
 
@@ -832,6 +921,41 @@ def _patch_all_npcs(rooms):
     for room in rooms.values():
         if room.npc:
             room.npc._ensure_attributes()
+
+
+def _normalize_loaded_game_state(rooms, player):
+    """Ensure .items / .monsters lists exist after pickle restore."""
+    if player is not None:
+        if not isinstance(getattr(player, "items", None), list):
+            player.items = []
+        if not isinstance(getattr(player, "armors", None), list):
+            player.armors = []
+    for room in rooms.values():
+        if not isinstance(getattr(room, "items", None), list):
+            room.items = []
+        if not isinstance(getattr(room, "monsters", None), list):
+            room.monsters = []
+        else:
+            room.monsters = [m for m in room.monsters if m is not None]
+        for monster in room.monsters:
+            if not isinstance(getattr(monster, "items", None), list):
+                monster.items = []
+        if room.npc is not None:
+            if not isinstance(getattr(room.npc, "items", None), list):
+                room.npc.items = []
+    from engine.graph_map import sanitize_connected_rooms
+    sanitize_connected_rooms(rooms)
+
+
+def _room_still_has_treasures(room) -> bool:
+    """Trophy check: None items must not count as 'all treasures collected'."""
+    return any(isinstance(i, Treasure) for i in _safe_items(room))
+
+
+def _room_still_has_monsters(room) -> bool:
+    """Trophy check: None monsters must not count as 'all monsters killed'."""
+    monsters = getattr(room, "monsters", None)
+    return isinstance(monsters, list) and len(monsters) > 0
 
 
 def load_game_state(name):
@@ -871,9 +995,13 @@ def load_game_state(name):
         _migrate_legacy_videos(rooms)
         _ensure_master_beast(rooms)
         _patch_all_npcs(rooms)
+        _normalize_loaded_game_state(rooms, playerOne)
         # CHANGE (organic map): relayout from saved connections; keep saved map_x/map_y
         from engine.graph_map import relayout_rooms
         relayout_rooms(rooms, preserve_coords=True)
+        # CHANGE (load): player is standing here — ensure current room shows on map
+        if playerOne and playerOne.current_room:
+            playerOne.current_room.explored = True
     except Exception as e:
         print("Error loading game state:", e)
         import traceback
@@ -978,9 +1106,18 @@ def distributing_riddle_magic_items(runllm_items): # adding riddle_magic_items t
 def generating_room_disc_llm(): # actually to console since it is game set up
     print ("Generating room descriptions by llm")
     num_rooms = len(rooms)
+    active_model = creation_model or model or play_model
+    failed = 0
     for number in range(1, num_rooms + 1):
+        before = rooms[number].full_description
         rooms[number].llM_generate_self_description()
-    return 
+        if rooms[number].full_description == rooms[number].description and before == rooms[number].description:
+            failed += 1
+    log_game_event(
+        "LLM_ROOM_DESC_DONE",
+        f"rooms={num_rooms} model={active_model!r} failed={failed} expanded={num_rooms - failed}",
+    )
+    return
 
 def drawing_rooms_Diff(): # actually to console since it is game set up
     print ("Drawing rooms")
@@ -1061,7 +1198,11 @@ class AdventureGame:
         return  ', '.join([item.name for item in self.items])
     
     def draw_and_save(self, prompt):
+        global pipe
         print(f"Generating image with prompt: {prompt}")
+        if pipe is None:
+            print("⚠ Diffusion pipeline not loaded — skipping image generation")
+            return ""
         print(f"Pipeline type: {type(pipe).__name__}")
         
         num_inf_steps = 25
@@ -1209,11 +1350,28 @@ class AdventureGame:
         generated_text = ollama_generate(formatted_prompt, max_tokens=max_tokens, temperature=0.3)
         
         if isinstance(self, Room):
-            self.full_description = generated_text
+            # CHANGE (long-desc): keep short blurb when Ollama fails — don't store error text
+            if (
+                generated_text
+                and generated_text != "Error generating response"
+                and len(generated_text.strip()) >= 8
+            ):
+                self.full_description = generated_text
+            else:
+                self.full_description = self.description
+                log_game_event(
+                    "LLM_ROOM_DESC_FAIL",
+                    f"room={self.number} model={model or play_model} used_short_description",
+                )
             print(self.full_description)
             return self.full_description
         else:
-            self.description = generated_text
+            if (
+                generated_text
+                and generated_text != "Error generating response"
+                and len(generated_text.strip()) >= 8
+            ):
+                self.description = generated_text
             print(self.description)
             return self.description
 
@@ -1539,13 +1697,17 @@ class LivingThing(AdventureGame):
                 print (console)
         else: # player current_room is a room class
             if direction in self.current_room.connected_rooms:
-                self.current_room = self.current_room.connected_rooms[direction]
-                console = (f"{self.name} moved {direction}.\n")
-                # CHANGE (movement): warn when entering a room with monsters (can fight here)
-                dest_monsters = getattr(self.current_room, "monsters", None) or []
-                if dest_monsters:
-                    names = ", ".join(m.name for m in dest_monsters)
-                    console += f"⚠️ {names} are here! Try: attack {dest_monsters[0].name}\n"
+                dest = self.current_room.connected_rooms[direction]
+                if dest is None:
+                    console = (f"{self.name} can't go that way.\n")
+                else:
+                    self.current_room = dest
+                    console = (f"{self.name} moved {direction}.\n")
+                    # CHANGE (movement): warn when entering a room with monsters (can fight here)
+                    dest_monsters = getattr(self.current_room, "monsters", None) or []
+                    if dest_monsters:
+                        names = ", ".join(m.name for m in dest_monsters)
+                        console += f"⚠️ {names} are here! Try: attack {dest_monsters[0].name}\n"
             else:
                 console = (f"{self.name} can't go that way.\n")
         return console
@@ -2200,7 +2362,7 @@ Provide a helpful hint.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
         # Check various game states and provide relevant quests
         unsolved_riddles = [r for r in rooms.values() if r.riddles and not r.riddle_solved]
-        remaining_treasures = [r for r in rooms.values() if any(isinstance(i, Treasure) for i in r.items)]
+        remaining_treasures = [r for r in rooms.values() if any(isinstance(i, Treasure) for i in _safe_items(r))]
         remaining_monsters = [r for r in rooms.values() if r.monsters]
         
         if unsolved_riddles and npc.personality_traits['knowledge'] in ['knows everything', 'knows riddles well']:
@@ -2504,26 +2666,30 @@ class NPC(LivingThing):
         current_room = rooms.get(self.current_room)
         if current_room:
             for direction, connected_room in current_room.connected_rooms.items():
-                if connected_room.monsters:
-                    monster_names = [m.name for m in connected_room.monsters]
-                    dangers.append(f"{direction}: {', '.join(monster_names)}")
+                if connected_room is None:
+                    continue
+                monsters = getattr(connected_room, "monsters", None) or []
+                if monsters:
+                    monster_names = [m.name for m in monsters if m is not None]
+                    if monster_names:
+                        dangers.append(f"{direction}: {', '.join(monster_names)}")
         return dangers
 
     def _identify_valuable_items(self):
         """Identify valuable items the NPC knows about"""
         valuable = []
         # Check own inventory
-        for item in self.items:
+        for item in _safe_items(self):
             if isinstance(item, Magic) or (isinstance(item, Treasure) and item.value > 500):
                 valuable.append(f"I have {item.name}")
-        
+
         # Check current room
         current_room = rooms.get(self.current_room)
         if current_room:
-            for item in current_room.items:
+            for item in _safe_items(current_room):
                 if isinstance(item, Magic):
                     valuable.append(f"This room has {item.name}")
-        
+
         return valuable
 
     def _assess_player_progress(self):
@@ -2544,93 +2710,90 @@ class NPC(LivingThing):
         treasures_info = []
         for room in rooms.values():
             # Room treasures
-            room_treasures = [i for i in room.items if isinstance(i, Treasure)]
-            for treasure in room_treasures:
+            for treasure in [i for i in _safe_items(room) if isinstance(i, Treasure)]:
                 treasures_info.append(f"Room {room.number}: {treasure.name} (value: {treasure.value})")
-            
+
             # NPC treasures
             if room.npc:
-                npc_treasures = [i for i in room.npc.items if isinstance(i, Treasure)]
-                for treasure in npc_treasures:
+                for treasure in [i for i in _safe_items(room.npc) if isinstance(i, Treasure)]:
                     treasures_info.append(f"Room {room.number} - {room.npc.name} has: {treasure.name} (value: {treasure.value})")
-            
+
             # Monster treasures
-            for monster in room.monsters:
-                monster_treasures = [i for i in monster.items if isinstance(i, Treasure)]
-                for treasure in monster_treasures:
+            for monster in getattr(room, "monsters", None) or []:
+                if monster is None:
+                    continue
+                for treasure in [i for i in _safe_items(monster) if isinstance(i, Treasure)]:
                     treasures_info.append(f"Room {room.number} - {monster.name} has: {treasure.name} (value: {treasure.value})")
-        
+
         return treasures_info
-    
+
     def _get_all_magic_items(self):
         """Get locations of all magic items in the game"""
         magic_info = []
         for room in rooms.values():
-            # Room magic items
-            room_magic = [i for i in room.items if isinstance(i, Magic)]
-            for item in room_magic:
+            for item in [i for i in _safe_items(room) if isinstance(i, Magic)]:
                 magic_info.append(f"Room {room.number}: {item.name} (healing: {item.healing})")
-            
-            # NPC magic items
+
             if room.npc:
-                npc_magic = [i for i in room.npc.items if isinstance(i, Magic)]
-                for item in npc_magic:
+                for item in [i for i in _safe_items(room.npc) if isinstance(i, Magic)]:
                     magic_info.append(f"Room {room.number} - {room.npc.name} has: {item.name} (healing: {item.healing})")
-            
-            # Monster magic items
-            for monster in room.monsters:
-                monster_magic = [i for i in monster.items if isinstance(i, Magic)]
-                for item in monster_magic:
+
+            for monster in getattr(room, "monsters", None) or []:
+                if monster is None:
+                    continue
+                for item in [i for i in _safe_items(monster) if isinstance(i, Magic)]:
                     magic_info.append(f"Room {room.number} - {monster.name} has: {item.name} (healing: {item.healing})")
-        
+
         return magic_info
-    
+
     def _get_all_weapons(self):
         """Get locations of all weapons in the game"""
         weapons_info = []
         for room in rooms.values():
-            # Room weapons
-            room_weapons = [i for i in room.items if isinstance(i, Weapon)]
-            for weapon in room_weapons:
+            for weapon in [i for i in _safe_items(room) if isinstance(i, Weapon)]:
                 weapons_info.append(f"Room {room.number}: {weapon.name} (damage: {weapon.damage})")
-            
-            # NPC weapons
+
             if room.npc:
-                npc_weapons = [i for i in room.npc.items if isinstance(i, Weapon)]
-                for weapon in npc_weapons:
+                for weapon in [i for i in _safe_items(room.npc) if isinstance(i, Weapon)]:
                     weapons_info.append(f"Room {room.number} - {room.npc.name} has: {weapon.name} (damage: {weapon.damage})")
-            
-            # Monster weapons
-            for monster in room.monsters:
-                monster_weapons = [i for i in monster.items if isinstance(i, Weapon)]
-                for weapon in monster_weapons:
+
+            for monster in getattr(room, "monsters", None) or []:
+                if monster is None:
+                    continue
+                for weapon in [i for i in _safe_items(monster) if isinstance(i, Weapon)]:
                     weapons_info.append(f"Room {room.number} - {monster.name} has: {weapon.name} (damage: {weapon.damage})")
-        
+
         return weapons_info
-    
+
     def _get_all_monsters_info(self):
         """Get information about all monsters in the game"""
         monsters_info = []
         for room in rooms.values():
-            for monster in room.monsters:
-                items_str = ", ".join([i.name for i in monster.items]) if monster.items else "nothing"
+            for monster in getattr(room, "monsters", None) or []:
+                if monster is None:
+                    continue
+                items_str = ", ".join([i.name for i in _safe_items(monster)]) or "nothing"
                 monsters_info.append(f"Room {room.number}: {monster.name} (health: {monster.health}, damage: {monster.damage}, carrying: {items_str})")
         return monsters_info
-    
+
     def _get_all_npcs_info(self):
         """Get information about all NPCs in the game"""
         npcs_info = []
         for room in rooms.values():
             if room.npc:
-                items_str = ", ".join([i.name for i in room.npc.items]) if room.npc.items else "nothing"
+                items_str = ", ".join([i.name for i in _safe_items(room.npc)]) or "nothing"
                 npcs_info.append(f"Room {room.number}: {room.npc.name} (carrying: {items_str})")
         return npcs_info
-    
+
     def _get_room_connections(self):
         """Get all room connections in the game"""
         connections_info = []
         for room in rooms.values():
-            connected = ", ".join([f"{dir}: Room {r.number}" for dir, r in room.connected_rooms.items()])
+            connected = ", ".join(
+                f"{dir}: Room {r.number}"
+                for dir, r in room.connected_rooms.items()
+                if r is not None
+            )
             if connected:
                 connections_info.append(f"Room {room.number} connects to: {connected}")
             else:
@@ -2653,6 +2816,8 @@ class NPC(LivingThing):
                 "last_offer": None,
                 "context": {}
             }
+        if not isinstance(getattr(self, "items", None), list):
+            self.items = []
 
     def set_pending_action(self, action_type, offer_details, context=None):
         """Set a pending action that awaits player confirmation"""
@@ -3337,10 +3502,13 @@ class MasterBeast(NPC):
         if room and room.connected_rooms:
             exits = []
             for direction, neighbor in room.connected_rooms.items():
+                if neighbor is None:
+                    continue
                 note = f"go {direction} (room {neighbor.number})"
-                if neighbor.monsters:
-                    note += f" — {', '.join(m.name for m in neighbor.monsters)}"
-                elif neighbor.riddles and not neighbor.riddle_solved:
+                monsters = getattr(neighbor, "monsters", None) or []
+                if monsters:
+                    note += f" — {', '.join(m.name for m in monsters if m is not None)}"
+                elif getattr(neighbor, "riddles", None) and not getattr(neighbor, "riddle_solved", False):
                     note += " — unsolved riddle"
                 exits.append(note)
             if exits:
@@ -3354,7 +3522,14 @@ class MasterBeast(NPC):
     def llM_generate_self_dialogue(self, dialogue="what do you have to trade", my_stuff=None):
         """Override dialogue generation for MB to be more helpful"""
         self.times_talked += 1
-        
+        try:
+            return self._llM_generate_self_dialogue_inner(dialogue, my_stuff)
+        except Exception as e:
+            log_game_event("MB_DIALOGUE_ERROR", f"dialogue={dialogue!r} err={e}")
+            return self._mb_offline_guidance(dialogue)
+
+    def _llM_generate_self_dialogue_inner(self, dialogue="what do you have to trade", my_stuff=None):
+        """MB dialogue body — separated so errors fall back to offline guidance."""
         # Get comprehensive context
         game_knowledge = self._get_game_knowledge()
         memory_context = self._get_memory_context()
@@ -3497,41 +3672,43 @@ Share hints and next steps without listing every item location. Point the player
         locations = "COMPLETE ITEM GUIDE:\n"
         for room in rooms.values():
             valuable_items = []
-            
-            # Room items
-            for item in room.items:
+
+            for item in _safe_items(room):
                 if isinstance(item, Magic):
                     valuable_items.append(f"Magic: {item.name}")
                 elif isinstance(item, Weapon) and item.damage > 30:
                     valuable_items.append(f"Weapon: {item.name} (damage: {item.damage})")
                 elif isinstance(item, Treasure) and item.value > 500:
                     valuable_items.append(f"Treasure: {item.name} (value: {item.value})")
-            
-            # NPC items
-            if room.npc and room.npc.items:
-                for item in room.npc.items:
+
+            if room.npc:
+                for item in _safe_items(room.npc):
                     if isinstance(item, Magic):
                         valuable_items.append(f"NPC {room.npc.name} has: {item.name}")
-            
-            # Monster items
-            for monster in room.monsters:
-                for item in monster.items:
+
+            for monster in getattr(room, "monsters", None) or []:
+                if monster is None:
+                    continue
+                for item in _safe_items(monster):
                     if isinstance(item, Magic):
                         valuable_items.append(f"Monster {monster.name} has: {item.name}")
-            
+
             if valuable_items:
                 locations += f"\nRoom {room.number}: {', '.join(valuable_items)}\n"
-        
+
         return locations
-    
+
     def _get_all_monster_locations(self):
         """Get locations of all monsters"""
         locations = "MONSTER LOCATIONS:\n"
         for room in rooms.values():
-            if room.monsters:
+            monsters = getattr(room, "monsters", None) or []
+            if monsters:
                 monster_info = []
-                for monster in room.monsters:
-                    items = [i.name for i in monster.items if isinstance(i, Magic)]
+                for monster in monsters:
+                    if monster is None:
+                        continue
+                    items = [i.name for i in _safe_items(monster) if isinstance(i, Magic)]
                     if items:
                         monster_info.append(f"{monster.name} (has magic: {', '.join(items)})")
                     else:
@@ -3563,15 +3740,14 @@ Share hints and next steps without listing every item location. Point the player
                     # Find where missing items are
                     for item in missing:
                         for room in rooms.values():
-                            # Check room
-                            if any(i.name == item for i in room.items):
+                            if any(i.name == item for i in _safe_items(room)):
                                 help_text += f"   - {item} is in room {room.number}\n"
-                            # Check monsters
-                            for monster in room.monsters:
-                                if any(i.name == item for i in monster.items):
+                            for monster in getattr(room, "monsters", None) or []:
+                                if monster is None:
+                                    continue
+                                if any(i.name == item for i in _safe_items(monster)):
                                     help_text += f"   - {item} is carried by {monster.name} in room {room.number}\n"
-                            # Check NPCs
-                            if room.npc and any(i.name == item for i in room.npc.items):
+                            if room.npc and any(i.name == item for i in _safe_items(room.npc)):
                                 help_text += f"   - {item} is held by {room.npc.name} in room {room.number}\n"
             
             # No weapons warning
@@ -3852,6 +4028,7 @@ _llm_diffuser_ready = False  # CHANGE (load): defer heavy model load until first
 def _ensure_llm_diffuser_ready(diff_name, llm_name, play_llm_name=None):
     """Load LLM/diffuser once — skipped on Load-Game until the player acts."""
     global _llm_diffuser_ready, play_model, model
+    was_ready = _llm_diffuser_ready
     if play_llm_name:
         play_model = play_llm_name
     model = play_model
@@ -3859,6 +4036,8 @@ def _ensure_llm_diffuser_ready(diff_name, llm_name, play_llm_name=None):
         return
     set_up_llm_diffuser(diff_name=diff_name, llm_name=llm_name, play_llm_name=play_llm_name)
     _llm_diffuser_ready = True
+    if not was_ready:
+        _log_llm_inventory(context="ensure_ready", creation=llm_name, play=play_llm_name, diffuser=diff_name)
 
 
 def set_up_llm_diffuser(diff_name, llm_name, play_llm_name=None):
@@ -3978,6 +4157,8 @@ def set_up_llm_diffuser(diff_name, llm_name, play_llm_name=None):
                 torch_dtype=dtype,
                 device_map="balanced"  # Keep balanced mapping for non-FLUX models
             )
+    log_game_event("DIFFUSER_SETUP", f"name={diff_name!r} pipe_loaded={pipe is not None}")
+
 
 def _strip_llm_thinking(response_text: str) -> str:
     """Remove thinking-model blocks (Qwen3, etc.) so the player sees the answer."""
@@ -3994,14 +4175,35 @@ def _strip_llm_thinking(response_text: str) -> str:
 
 
 def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None, llm_model=None):
-    """Helper function to call Ollama API. CHANGE (speed): llm_model=None uses play_model."""
+    """Generate text via MLX folder (~/MLX_Models) or Ollama (ollama:<tag>)."""
     global model, play_model
     active_model = llm_model or model or play_model
+    json_mode = format == "json"
+
+    # CHANGE (MLX): any folder under ~/MLX_Models loads directly — no Ollama
+    if not llm_choice_is_ollama(active_model) and resolve_mlx_folder_path(active_model):
+        try:
+            text = mlx_generate_text(
+                active_model,
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_mode=json_mode,
+            )
+            return _strip_llm_thinking(text)
+        except Exception as e:
+            print(f"Error calling MLX with model {active_model}: {e}")
+            import traceback
+            traceback.print_exc()
+            log_game_event("MLX_ERROR", f"model={active_model!r} path={resolve_mlx_folder_path(active_model)!r} err={e}")
+            return "Error generating response"
+
+    ollama_tag = ollama_model_from_choice(active_model)
     try:
         # Clean up the prompt format for models that don't use the Llama format
         # Check if model uses Llama-style formatting
         llama_models = ['llama3', 'llama2', 'llama-3', 'llama-2']
-        uses_llama_format = any(active_model.lower().startswith(m) for m in llama_models)
+        uses_llama_format = any(ollama_tag.lower().startswith(m) for m in llama_models)
         
         if not uses_llama_format:
             # For non-Llama models (phi, gemma, qwen, etc.), simplify the prompt format
@@ -4017,7 +4219,7 @@ def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None, llm_mo
             'num_predict': max_tokens,
         }
         # CHANGE (qwen): \nUser: stop token can truncate thinking models to empty output
-        model_lower = (active_model or "").lower()
+        model_lower = (ollama_tag or "").lower()
         if "qwen" in model_lower or "thinking" in model_lower:
             options['stop'] = ['<|eot_id|>', '<|end_of_text|>']
         else:
@@ -4025,7 +4227,7 @@ def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None, llm_mo
         
         # Add format if specified
         generate_params = {
-            'model': active_model,
+            'model': ollama_tag,
             'prompt': prompt,
             'options': options
         }
@@ -4036,16 +4238,17 @@ def ollama_generate(prompt, max_tokens=256, temperature=0.3, format=None, llm_mo
         response = ollama.generate(**generate_params)
         return _strip_llm_thinking(response['response'].strip())
     except Exception as e:
-        print(f"Error calling Ollama with model {active_model}: {e}")
+        print(f"Error calling Ollama with model {ollama_tag}: {e}")
         import traceback
         traceback.print_exc()
+        log_game_event("OLLAMA_ERROR", f"model={ollama_tag!r} err={e}")
         return "Error generating response"
+
 
 def check_ollama_running():
     """Check if Ollama is running and accessible"""
     try:
-        response = ollama.list()
-        # Just check if we got any response
+        ollama.list()
         return True
     except Exception as e:
         print(f"Error: Ollama is not running or not accessible: {e}")
@@ -4243,7 +4446,8 @@ def _is_direct_game_command(command: str) -> bool:
     """True when the player clearly issued a movement/combat/inventory verb."""
     cmd_lower = command.lower().strip()
     game_starters = (
-        'go ', 'take ', 'attack ', 'use ', 'solve ', 'leave ', 'wear ', 'remove ',
+        'go ', 'take ', 'get ', 'gather ', 'grab ', 'pick up ', 'collect ',
+        'attack ', 'use ', 'solve ', 'leave ', 'wear ', 'remove ',
         'look', 'inventory', 'drop ', 'fight ', 'kill ', 'hit ',
     )
     movement_commands = [
@@ -4306,6 +4510,17 @@ def process_game_command(command, player, current_room):
             set_command_meta(path="fast_path", preprocessed=preprocessed, action="local")
             return local_result
 
+        # CHANGE (MB): help/riddle questions reach MB in room 1 even from other rooms
+        if _should_route_to_remote_mb(command):
+            mb_reply = _talk_to_master_beast(player, command)
+            if mb_reply:
+                mb_here = current_room.npc and getattr(current_room.npc, "is_master_beast", False)
+                set_command_meta(
+                    path="npc_mb" if mb_here else "npc_mb_remote",
+                    preprocessed=preprocessed,
+                )
+                return mb_reply
+
         llm_result = llm_process_command(command, player, current_room)
         chosen_action = llm_result["chosen_action"]
         entities_by_type = llm_result["entities"]
@@ -4325,9 +4540,22 @@ def process_game_command(command, player, current_room):
             set_command_meta(path="npc_fallback", preprocessed=preprocessed)
             return player.talk_to_npc(command)
 
+        # CHANGE (MB): game LLM failed — still try MB for help-style phrasing
+        if (not chosen_action or confidence < 0.4) and _should_route_to_remote_mb(command):
+            mb_reply = _talk_to_master_beast(player, command)
+            if mb_reply:
+                set_command_meta(path="npc_mb_llm_fail", preprocessed=preprocessed, confidence=confidence)
+                return mb_reply
+
         return result
     except Exception as e:
         print(f"Error in command processing: {e}")
+        # CHANGE (NPC): MB talk should not die on legacy save data or LLM hiccups
+        if current_room.npc and hasattr(current_room.npc, "is_master_beast"):
+            cmd_l = command.lower()
+            if any(t in cmd_l for t in ("mb", "master beast", "beast", "ask", "talk", "tell", "help")):
+                set_command_meta(path="npc_mb_recovery", preprocessed=preprocessed, error=str(e))
+                return current_room.npc._mb_offline_guidance(command)
         set_command_meta(path="error", preprocessed=preprocessed, error=str(e))
         return get_llm_error_recovery(command, "unknown", str(e))
 
@@ -4378,10 +4606,11 @@ Available actions: {', '.join(all_actions)}
 """
     
     # Add categorized room contents directly
-    room_weapons = [i.name for i in current_room.items if isinstance(i, Weapon)]
-    room_magic = [i.name for i in current_room.items if isinstance(i, Magic)]
-    room_armor = [i.name for i in current_room.items if isinstance(i, Armor)]
-    room_treasure = [i.name for i in current_room.items if isinstance(i, Treasure)]
+    room_item_list = _safe_items(current_room)
+    room_weapons = [i.name for i in room_item_list if isinstance(i, Weapon)]
+    room_magic = [i.name for i in room_item_list if isinstance(i, Magic)]
+    room_armor = [i.name for i in room_item_list if isinstance(i, Armor)]
+    room_treasure = [i.name for i in room_item_list if isinstance(i, Treasure)]
     
     if any([room_weapons, room_magic, room_armor, room_treasure]):
         prompt += f"\nRoom contents:"
@@ -4397,15 +4626,16 @@ Available actions: {', '.join(all_actions)}
     if current_room.monsters:
         prompt += f"\nMonsters: {', '.join([m.name for m in current_room.monsters])}"
     
-    player_weapons = [i.name for i in player.items if isinstance(i, Weapon)]
+    player_item_list = _safe_items(player)
+    player_weapons = [i.name for i in player_item_list if isinstance(i, Weapon)]
     if player_weapons:
         prompt += f"\nYour weapons: {', '.join(player_weapons)}"
     
-    player_magic = [i.name for i in player.items if isinstance(i, Magic)]
+    player_magic = [i.name for i in player_item_list if isinstance(i, Magic)]
     if player_magic:
         prompt += f"\nYour magic items: {', '.join(player_magic)}"
     
-    player_armor = [i.name for i in player.items if isinstance(i, Armor)]
+    player_armor = [i.name for i in player_item_list if isinstance(i, Armor)]
     if player_armor:
         prompt += f"\nYour armor: {', '.join(player_armor)}"
     
@@ -4524,7 +4754,7 @@ def execute_action(chosen_action, entities_by_type, command, confidence=0.5):
     else:
         chosen_action = None
     
-    list_entities_by_type = entities_by_type
+    list_entities_by_type = entities_by_type or {}
     print (f"Entities by Type: {list_entities_by_type}")
     # For each item, it checks if the value (v) is not empty. If it's not empty, it adds an entry to the new dictionary.
     # The key of the new entry is the key from the original dictionary (k), and the value is the first element of the value from the original dictionary (v[0]).
@@ -4671,9 +4901,9 @@ def generate_riddle_info(room_i):
     if len(room_i.hints) > 1:
         room_riddles = room_riddles + (f"Hint 2: {room_i.hints[1]} \n")
 
-    which_room_is_it = [(room.number, item.name) for room in rooms.values() for item in room.items if item.name in room_i.riddle_magic_items]
-    which_npc_is_it = [(room.number, room.npc.name, item.name) for room in rooms.values() if room.npc for item in room.npc.items if item.name in room_i.riddle_magic_items]
-    which_monster_has_it = [(room.number, monster.name, item.name) for room in rooms.values() for monster in room.monsters for item in monster.items if item.name in room_i.riddle_magic_items]
+    which_room_is_it = [(room.number, item.name) for room in rooms.values() for item in _safe_items(room) if item.name in room_i.riddle_magic_items]
+    which_npc_is_it = [(room.number, room.npc.name, item.name) for room in rooms.values() if room.npc for item in _safe_items(room.npc) if item.name in room_i.riddle_magic_items]
+    which_monster_has_it = [(room.number, monster.name, item.name) for room in rooms.values() for monster in (room.monsters or []) if monster for item in _safe_items(monster) if item.name in room_i.riddle_magic_items]
     if which_room_is_it:
         for room_number, item_name in which_room_is_it:
             room_riddles += f'The item "{item_name}" can be found in Room Number {room_number}.\n'
@@ -4732,6 +4962,26 @@ def _is_movement_command(command: str) -> bool:
         return False
     cmd = apply_command_shortcuts(preprocess_command(command.strip()))
     return is_movement_phrase(cmd)
+
+
+def _sanitize_long_description(full_desc, short_desc=""):
+    """Fall back to short room blurb when LLM expansion failed."""
+    fd = (full_desc or short_desc or "").strip()
+    short = (short_desc or "").strip()
+    if not fd or fd == "Error generating response" or fd.startswith("Error generating"):
+        return short
+    return fd
+
+
+def _long_desc_for_ui(room, difficulty):
+    """Build gr.update for Room Long Description output."""
+    short = (getattr(room, "description", None) or "").strip()
+    fd = _sanitize_long_description(getattr(room, "full_description", None), short)
+    if difficulty in ["cheat", "easy", "medium"]:
+        return gr.update(visible=True, value=fd)
+    if fd and fd != short:
+        return gr.update(visible=False, value="")
+    return gr.update(visible=True, value=fd)
 
 
 def _make_output_tuple(images, map_img, room_desc, riddles, contents, console,
@@ -4797,20 +5047,44 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     restore_only = False  # CHANGE (load): passive UI refresh after pickle restore
 
     if game_state == "New-Game":
-        # Check if Ollama is running
-        if not check_ollama_running():
-            console = "Error: Ollama is not running. Please start Ollama with 'ollama serve' in a terminal."
+        start_debug_session(game_dir, new_game_name or "new_game")
+        play_m = play_llm_name or default_play_llm()
+        creat_m = name_of_llm
+        if not _llm_model_available(creat_m):
+            log_game_event("LLM_MISSING", f"creation model {creat_m!r} unavailable — cannot start New-Game")
+            console = (
+                f"Error: Creation LLM {creat_m!r} is not available. "
+                f"Add a folder under {mlx_models_dir()}/ or pick ollama:<tag> with Ollama running."
+            )
+            return _make_output_tuple(room_image, map_image, room_description,
+                room_riddles, room_contents, console, your_status,
+                rooms_visited, inventory1, room_long_description,
+                game_state_selector, room_video)
+        if not _llm_model_available(play_m):
+            log_game_event("LLM_MISSING", f"play model {play_m!r} unavailable — cannot start New-Game")
+            console = (
+                f"Error: Play LLM {play_m!r} is not available. "
+                f"Add a folder under {mlx_models_dir()}/ or pick ollama:<tag> with Ollama running."
+            )
             return _make_output_tuple(room_image, map_image, room_description,
                 room_riddles, room_contents, console, your_status,
                 rooms_visited, inventory1, room_long_description,
                 game_state_selector, room_video)
 
+        log_game_event("LLM_CHECK", f"play_backend={model_backend(play_m)} creation_backend={model_backend(creat_m)}")
         initialize_game_variables()
         load_adventure_data()
         # CHANGE (speed): creation LLM for world gen; play LLM for turns
         creation_model = name_of_llm
         play_model = play_llm_name or default_play_llm()
         model = creation_model
+        _log_llm_inventory(
+            context="new_game_pre",
+            creation=name_of_llm,
+            play=play_model,
+            diffuser=name_of_diffuser,
+            llm_diff=llm_diff,
+        )
         _ensure_llm_diffuser_ready(diff_name=name_of_diffuser, llm_name=name_of_llm, play_llm_name=play_model)
 
     elif game_state == "Load-Game":
@@ -4839,6 +5113,12 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         game_state_selector = gr.Radio(value="Play-Game")
         start_debug_session(game_dir, name_of_game, resumed=True)
         log_game_event("LOAD_GAME", f"room={playerOne.current_room.number}")
+        _log_llm_inventory(
+            context="load_game",
+            creation=name_of_llm,
+            play=play_llm_name or play_model,
+            diffuser=name_of_diffuser,
+        )
 
     if game_state == "New-Game":
         console = new_game(num_rooms=number_of_rooms, runllm_diff=llm_diff, runllm_mon=llm_mon, 
@@ -4853,8 +5133,17 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         append_adventure_log_system(console)
         active_game = True
         game_state_selector = gr.Radio(value="Play-Game")
-        start_debug_session(game_dir, new_game_name or "new_game")
-        log_game_event("NEW_GAME", f"rooms={number_of_rooms} difficulty={difficulty}")
+        log_game_event(
+            "NEW_GAME",
+            f"rooms={number_of_rooms} difficulty={difficulty} llm_diff={llm_diff} llm_mon={llm_mon} llm_item={llm_item}",
+        )
+        _log_llm_inventory(
+            context="new_game_done",
+            creation=name_of_llm,
+            play=play_model,
+            diffuser=name_of_diffuser,
+            llm_diff=llm_diff,
+        )
         model = play_model  # CHANGE (speed): switch to fast play LLM after setup
 
     elif game_state == "Save-Game":
@@ -4981,15 +5270,17 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
             game_state_selector, room_video)
 
     #Room content
-    room_long_description = playerOne.current_room.full_description    
-    room_long_description = room_long_description.strip() 
+    short_desc = (playerOne.current_room.description or "").strip()
+    fd = _sanitize_long_description(playerOne.current_room.full_description, short_desc)
     if difficulty in ["cheat", "easy", "medium"]:
         room_contents = room_contents + playerOne.current_room.inventory_room()
-        room_long_description = gr.Textbox(visible=True, value = room_long_description) # togle back on.
+        room_long_description = gr.update(visible=True, value=fd)
     #Hard mode they need to figure out content from description
-    elif playerOne.current_room.full_description != playerOne.current_room.description: 
-        room_contents = room_contents + playerOne.current_room.full_description # so you figure out contents yourself
-        room_long_description = gr.Textbox(visible=False)
+    elif fd and fd != short_desc:
+        room_contents = room_contents + fd
+        room_long_description = gr.update(visible=False, value="")
+    else:
+        room_long_description = gr.update(visible=True, value=fd)
     # CHANGE (load): skip turn simulation — monsters, NPC LLM, trophies wait for first command
     if not restore_only:
         # Update action of monsters
@@ -5050,12 +5341,12 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 npc_image.append(npc.image)
 
         # Check for winning the game or death
-        console_temp, player_image_temp, item_images_temp = check_trophy("treasure", lambda room: room.items and any(isinstance(item, Treasure) for item in room.items), "you got all the treasures", "celebrating finding treasure")
+        console_temp, player_image_temp, item_images_temp = check_trophy("treasure", _room_still_has_treasures, "you got all the treasures", "celebrating finding treasure")
         console += console_temp
         player_image += player_image_temp
         item_images += item_images_temp
 
-        console_temp, player_image_temp, item_images_temp = check_trophy("monster", lambda room: room.monsters, "you killed all the monsters", "celebrating killing monsters")
+        console_temp, player_image_temp, item_images_temp = check_trophy("monster", _room_still_has_monsters, "you killed all the monsters", "celebrating killing monsters")
         console += console_temp
         player_image += player_image_temp
         item_images += item_images_temp
@@ -5305,14 +5596,14 @@ playerOne = None
 rooms = {} # dictionary of rooms room number is they key, room objecters
 list_of_saved_games = saved_files()
 
-# Check if Ollama is running before getting models
-if check_ollama_running():
+# LLM dropdown: MLX folders work without Ollama; optional ollama:<tag> entries need ollama serve
+mlx_folders_at_startup = list_mlx_model_folders()
+if mlx_folders_at_startup or check_ollama_running():
     list_of_llms = saved_llms()
 else:
-    list_of_llms = ["Please start Ollama first with 'ollama serve'"]
-    print("\n*** WARNING: Ollama is not running! ***")
-    print("Please start Ollama in another terminal with: ollama serve")
-    print("Then refresh this page or restart the application.\n")
+    list_of_llms = [f"Add MLX folders under {mlx_models_dir()}"]
+    print(f"\n*** WARNING: No LLMs found under {mlx_models_dir()} and Ollama is not running ***")
+    print("Put MLX weight folders (config.json + safetensors) in ~/MLX_Models, or start: ollama serve\n")
 
 list_of_diffusers = saved_diffusers()
 
