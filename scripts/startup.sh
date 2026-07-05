@@ -55,7 +55,9 @@ pip install -r "$GAME_DIR/requirements.txt"
 # Apple Silicon: MLX text LLMs from ~/MLX_Models (primary path; Ollama optional)
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   echo "Apple Silicon detected — ensuring mlx-vlm>=0.6.1 (gemma4_unified) and mlx-lm..."
-  pip install --upgrade "mlx-vlm>=0.6.1" "mlx-lm>=0.19.0"
+  pip install --upgrade "mlx-vlm>=0.6.1" "mlx-lm>=0.31.3"
+  # mlx-lm 0.31.x breaks with transformers>=5.8 (NewlineTokenizer register error)
+  pip install "transformers>=5.5.0,<5.8.0"
   mkdir -p "$MLX_DIR"
   echo "MLX models dir: $MLX_DIR"
   echo "  Put converted weights here, e.g. $MLX_DIR/gemma-4-12B-it-8bit/"

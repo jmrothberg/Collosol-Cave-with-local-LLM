@@ -114,19 +114,6 @@ def _load_entry(model_path: str) -> Dict[str, Any]:
     if model_path in _CACHE:
         return _CACHE[model_path]
     if _is_vlm_model(model_path):
-        model_type = (_read_config(model_path).get("model_type") or "").lower()
-        if model_type == "gemma4_unified":
-            # CHANGE (MLX): gemma4_unified needs mlx-vlm>=0.6.1 (older builds lack the model module)
-            try:
-                import importlib.util
-
-                if importlib.util.find_spec("mlx_vlm.models.gemma4_unified") is None:
-                    raise ImportError("mlx_vlm.models.gemma4_unified missing")
-            except ImportError as e:
-                raise RuntimeError(
-                    "gemma4_unified requires mlx-vlm>=0.6.1. "
-                    "Run: pip install --upgrade 'mlx-vlm>=0.6.1'"
-                ) from e
         from mlx_vlm import load as vlm_load
         from mlx_vlm.utils import load_config
 

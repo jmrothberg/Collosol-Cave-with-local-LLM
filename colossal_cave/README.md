@@ -214,14 +214,14 @@ MB (Master Beast) knows full game state — ask for hints, item locations, or wh
 
 **Ollama empty / not responding** — only matters if you picked `ollama:<tag>` in the dropdown. MLX folders under `~/MLX_Models` work without Ollama.
 
-**`Error generating response` with `gemma-4-12B-it-8bit`** — that model uses `gemma4_unified`, which needs **mlx-vlm ≥ 0.6.1**:
+**`Error generating response` with `gemma-4-12B-it-8bit`** — needs **mlx-vlm ≥ 0.6.1** and **transformers 5.5–5.7** (mlx-lm breaks on transformers 5.8+):
 
 ```bash
-pip install --upgrade "mlx-vlm>=0.6.1"
+pip install --upgrade "mlx-vlm>=0.6.1" "mlx-lm>=0.31.3" "transformers>=5.5.0,<5.8.0"
 # or re-run: ./scripts/startup.sh --setup
 ```
 
-Until upgraded, MB still answers via offline guidance (no LLM prose), but game-command parsing will fail too.
+Until fixed, MB falls back to offline guidance (short hints, no LLM prose).
 
 **`Error generating response` with other MLX folders** — install `mlx-vlm` (VLM types) or `mlx-lm` (text-only). Check debug log for `MLX_ERROR`.
 

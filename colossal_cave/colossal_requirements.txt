@@ -3,11 +3,11 @@
 # Upgrade torch + torchvision together from PyPI stable (NOT --pre nightly)
 torch>=2.9.1
 torchvision>=0.24.1
-transformers>=4.53.3,<5.0
+transformers>=5.5.0,<5.8.0
 accelerate>=0.30.0
 diffusers>=0.36.0
 safetensors>=0.8.0
-huggingface-hub>=0.34.0,<1.0
+huggingface-hub>=1.5.0,<2.0
 
 # Image and video processing
 pillow
