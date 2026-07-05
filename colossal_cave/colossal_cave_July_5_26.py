@@ -211,6 +211,7 @@ from engine.map_utils import draw_map_png as _engine_draw_map_png
 from engine.trophy import check_trophy as _engine_check_trophy
 from engine.data import load_adventure_data_file, validate_adventure_data, default_adventure_data_path
 from engine.llm_commands import (
+    ALL_ACTIONS,
     apply_command_shortcuts,
     parse_llm_json_response,
     filter_entities_for_room,
@@ -4181,10 +4182,11 @@ def process_command(command, player, current_room):
     Processing hierarchy:
     1. Check for conversation management commands (clear, reset, etc.)
     2. Handle active NPC conversations awaiting player response
-    3. Detect direct NPC addressing (e.g., "MB help me")
-    4. Process as regular game command via LLM
+    3. Fast-path + game-command LLM (process_game_command)
+    4. If those cannot parse the command and an NPC is present, NPC dialogue LLM
     
-    This system allows seamless switching between NPC dialogue and game commands.
+    Game verbs (go, take, attack, …) always stay on the game path; everything
+    else gets a second chance as conversation when someone is in the room.
     """
     
     cmd_lower = command.lower().strip()
@@ -4214,13 +4216,7 @@ def process_command(command, player, current_room):
                 return result
             # If None returned, process as regular command (conversation was cleared)
     
-    # Check for direct NPC addressing (e.g., "MB tell me about riddles")
-    npc_response = check_npc_addressing(command, current_room.npc)
-    if npc_response:
-        set_command_meta(path="npc_direct", preprocessed=cmd_lower)
-        return npc_response
-    
-    # Process as regular game command via LLM
+    # Fast-path first, then game-command LLM; NPC dialogue is fallback inside process_game_command
     return process_game_command(command, player, current_room)
 
 def handle_pending_conversation(command, npc):
@@ -4228,12 +4224,12 @@ def handle_pending_conversation(command, npc):
     cmd_lower = command.lower().strip()
     
     # Detect if this is clearly a new game command (not a conversation response)
-    game_commands = ['go ', 'take ', 'attack ', 'use ', 'solve ', 'leave ', 'wear ', 'remove ', 'help', 'magic', 'inventory']
+    game_commands = ['go ', 'take ', 'attack ', 'use ', 'solve ', 'leave ', 'wear ', 'remove ', 'magic', 'inventory']
     movement_commands = ['n', 's', 'e', 'w', 'north', 'south', 'east', 'west']
     
     is_game_command = (any(cmd_lower.startswith(cmd) for cmd in game_commands) or 
                       cmd_lower in movement_commands or
-                      cmd_lower.startswith('go '))
+                      cmd_lower == 'help')
     
     if is_game_command:
         # Player is issuing a new command, clear conversation and process normally
@@ -4243,48 +4239,33 @@ def handle_pending_conversation(command, npc):
         # Handle as conversation response
         return npc.handle_conversation_response(command)
 
-def check_npc_addressing(command, npc):
-    """Check if player is directly addressing an NPC"""
-    if not npc:
-        return None
-        
-    cmd_lower = command.lower()
-    
-    # Special handling for Master Beast
-    if hasattr(npc, 'is_master_beast'):
-        mb_triggers = ['mb', 'master beast', 'beast', 'master']
-        for trigger in mb_triggers:
-            if trigger in cmd_lower:
-                # Check if it's a question or request, not a trade command
-                is_question = ('?' in command or 
-                             any(q in cmd_lower for q in ['what', 'where', 'how', 'why', 'when', 'which', 'who', 'tell me', 'tell', 'ask', 'explain']))
-                is_trade = any(t in cmd_lower for t in ['trade', 'exchange', 'swap', ' for '])
-                
-                if is_question and not is_trade:
-                    set_command_meta(path="npc_mb", preprocessed=cmd_lower)
-                    return playerOne.talk_to_npc(command)
-    
-    # General NPC addressing
-    elif npc.name.lower() in cmd_lower:
-        is_question = ('?' in command or 
-                     any(word in cmd_lower for word in ['tell', 'say', 'ask', 'what', 'where', 'how', 'why', 'when', 'which', 'who', 'explain']))
-        is_trade = any(t in cmd_lower for t in ['trade', 'exchange', 'swap', ' for '])
-        
-        if is_question and not is_trade:
-            set_command_meta(path="npc_named", preprocessed=cmd_lower)
-            return playerOne.talk_to_npc(command)
-
-    # CHANGE (NPC): questions about someone present (e.g. "ask the lady what we should do")
-    is_question = (
-        '?' in command
-        or any(q in cmd_lower for q in ['what', 'where', 'how', 'why', 'when', 'which', 'who', 'tell', 'ask', 'should'])
+def _is_direct_game_command(command: str) -> bool:
+    """True when the player clearly issued a movement/combat/inventory verb."""
+    cmd_lower = command.lower().strip()
+    game_starters = (
+        'go ', 'take ', 'attack ', 'use ', 'solve ', 'leave ', 'wear ', 'remove ',
+        'look', 'inventory', 'drop ', 'fight ', 'kill ', 'hit ',
     )
-    room_person_phrases = ['lady', 'woman', 'person', 'someone', 'in the room', 'here']
-    if is_question and any(p in cmd_lower for p in room_person_phrases):
-        set_command_meta(path="npc_room_person", preprocessed=cmd_lower)
-        return playerOne.talk_to_npc(command)
-    
-    return None
+    movement_commands = [
+        'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw',
+        'north', 'south', 'east', 'west',
+    ]
+    return cmd_lower.startswith(game_starters) or cmd_lower in movement_commands
+
+
+def _should_npc_conversation_fallback(chosen_action, confidence, command) -> bool:
+    """
+    CHANGE (NPC): after fast-path + game LLM fail to pick an action, let the
+    room NPC's dialogue LLM try (MB help, casual chat, ask the lady, etc.).
+    """
+    if _is_direct_game_command(command):
+        return False
+    action = chosen_action[0] if chosen_action else None
+    if action and action in ALL_ACTIONS:
+        return False
+    if needs_clarification(confidence, action):
+        return False
+    return True
 
 def process_game_command(command, player, current_room):
     """Process regular game commands using LLM"""
@@ -4337,7 +4318,14 @@ def process_game_command(command, player, current_room):
             entities=entities_by_type,
         )
         
-        return execute_action(chosen_action, entities_by_type, command, confidence)
+        result = execute_action(chosen_action, entities_by_type, command, confidence)
+
+        # CHANGE (NPC): unparsed command + NPC present → dialogue LLM second chance
+        if current_room.npc and _should_npc_conversation_fallback(chosen_action, confidence, command):
+            set_command_meta(path="npc_fallback", preprocessed=preprocessed)
+            return player.talk_to_npc(command)
+
+        return result
     except Exception as e:
         print(f"Error in command processing: {e}")
         set_command_meta(path="error", preprocessed=preprocessed, error=str(e))
