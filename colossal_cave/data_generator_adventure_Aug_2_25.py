@@ -1,9 +1,16 @@
-#data for adventure
-#JMR LLM based adventure game
-#2024-01-13 Added npcs and npc_descs
-#added room_descs_riddles
-#2024-01-14 Added double riddles, hints, magic items, action words
-#2024-02-09 removed names that did not sound right for the catagory.
+# data_generator_adventure_Aug_2_25.py — builds adventure_dataRA.json for Colossal Cave
+# JMR LLM based adventure game
+# 2024-01-13 Added npcs and npc_descs
+# added room_descs_riddles
+# 2024-01-14 Added double riddles, hints, magic items, action words
+# 2024-02-09 removed names that did not sound right for the catagory.
+#
+# HOW TO USE:
+#   cd colossal_cave && python data_generator_adventure_Aug_2_25.py
+#   Writes adventure_dataRA.json in this directory (game loads it on startup).
+#
+# FLOW: lists below → room_descs_riddles (plain / single-riddle / double-riddle rooms)
+#       → adventure_data dict → JSON file.
 import json
 
 room_desc = [ "A damp echoey cavern, the air heavy with the scent of wet stone.",
@@ -307,13 +314,13 @@ for i, desc in enumerate(double_riddle_room_desc):
         "action_words": double_action_words[i]      # Action to perform
     })
 
-for i in range(0, len(room_descs_riddles)):
-    desc = room_descs_riddles[i]["description"]
-    riddles = room_descs_riddles[i]["riddles"]
-    hints = room_descs_riddles[i]["hints"]
-    magic_items = room_descs_riddles[i]["magic_items"]
-    action_words = room_descs_riddles[i]["action_words"]
-    print(i, ": ", desc, ", ", riddles, ", ", hints, ", ", magic_items, " ", action_words)
+for i, room_entry in enumerate(room_descs_riddles):
+    desc = room_entry["description"]
+    room_riddles = room_entry["riddles"]
+    room_hints = room_entry["hints"]
+    room_magic = room_entry["magic_items"]
+    room_actions = room_entry["action_words"]
+    print(i, ": ", desc, ", ", room_riddles, ", ", room_hints, ", ", room_magic, " ", room_actions)
 
 
 monsters = ["Dragon", "Goblin","Giant Spider", "Undead Warrior", "Cave Troll", "Basilisk", "Shadow Beast", "Spectral Wraith", "Troll", "Ogre", "Vampire",
@@ -399,7 +406,7 @@ npc_descs = ["an old wizard with a long white beard and a mysterious aura",
             "a wizened hermit who lives in the woods and knows many secrets",
             "a fierce dragon with scales like steel and breath of fire",
             "a sly goblin with a quick wit and a quicker blade",
-            "a noble elf with a bow as tall as a man and eyes full of wisdom"
+            "a noble elf with a bow as tall as a man and eyes full of wisdom",
             "a stoic paladin with a gleaming sword and an unshakeable faith",
             "a cunning rogue with a hidden dagger and a charming smile",
             "a wise druid who can speak to animals and control the elements",
@@ -452,6 +459,10 @@ adventure_data = {
     "npc_descs": npc_descs
 }
 
-with open('adventure_dataRA.json', 'w') as f:
-    json.dump(adventure_data, f)
+# CHANGE: only write JSON when run as a script (not on import)
+if __name__ == "__main__":
+    with open('adventure_dataRA.json', 'w', encoding='utf-8') as f:
+        json.dump(adventure_data, f)
+    print(f"Wrote adventure_dataRA.json — {len(room_descs_riddles)} rooms, "
+          f"{len(monsters)} monsters, {len(npcs)} NPC names.")
 

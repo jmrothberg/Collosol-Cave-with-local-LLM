@@ -47,6 +47,7 @@ def test_load_game_skips_llm_diffuser_setup(game_module, minimal_game_world, tmp
         name_of_diffuser="test-diffuser",
         art_style="",
         generate_videos=False,
+        play_llm_name="gemma-4-12B-it-8bit",
     )
 
     setup_mock.assert_not_called()
@@ -82,8 +83,8 @@ def test_monster_combat_after_load_without_initialize(game_module, minimal_game_
 
     # Load then walk into monster room — must not NameError on you_started_it
     gm.talk_to_functions(" ", "combat_load", "Easy", "Load-Game", "", "", False, False, False,
-                         "test-model", "test-diffuser", "", False)
-    outputs = gm.talk_to_functions("go east", "combat_load", "Easy", "Play-Game", "", "", False, False, False,
-                                   "test-model", "test-diffuser", "", False)
+                         "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit")
+    outputs = gm.talk_to_functions("go north", "combat_load", "Easy", "Play-Game", "", "", False, False, False,
+                                   "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit")
     assert hasattr(gm, "you_started_it")
-    assert "moved east" in outputs[4].lower() or "Goblin" in outputs[4]
+    assert "moved north" in outputs[4].lower() or "Goblin" in outputs[4]

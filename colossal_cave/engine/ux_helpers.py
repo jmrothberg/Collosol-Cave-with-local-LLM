@@ -93,6 +93,35 @@ def adjacent_cues(room: Any, difficulty: str = "easy") -> str:
     return " ".join(lines[:2])
 
 
+def format_room_exits(room: Any, difficulty: str = "easy") -> str:
+    """Clear exit list for the room you are standing in (north/east/south/west)."""
+    if not room or not getattr(room, "connected_rooms", None):
+        return ""
+    parts = []
+    for direction, neighbor in sorted(room.connected_rooms.items()):
+        note = f"go {direction} (room {neighbor.number})"
+        if getattr(neighbor, "monsters", None):
+            if difficulty == "cheat":
+                note += f" — {', '.join(m.name for m in neighbor.monsters)}"
+            elif difficulty in ("easy", "medium"):
+                note += " — monsters"
+        elif getattr(neighbor, "riddles", None) and not getattr(neighbor, "riddle_solved", False):
+            note += " — riddle"
+        parts.append(note)
+    if not parts:
+        return ""
+    return "Exits from here: " + "; ".join(parts) + "\n"
+
+
+def exit_abbrev(room: Any) -> str:
+    """Short compass summary for HUD, e.g. N·SE·W."""
+    from engine.directions import ABBREV
+    if not room or not getattr(room, "connected_rooms", None):
+        return ""
+    keys = [ABBREV.get(d, d[:2].upper()) for d in sorted(room.connected_rooms.keys())]
+    return "·".join(keys) if keys else ""
+
+
 def riddle_eligibility_text(room: Any, player_items: List[Any]) -> str:
     """Non-LLM riddle eligibility summary for auto-surface on room entry."""
     if not room or not getattr(room, "riddles", None) or getattr(room, "riddle_solved", False):
@@ -146,9 +175,11 @@ def build_status_header(
     warn = ""
     if ambient and difficulty != "hard":
         warn = f" · ⚠️ {ambient[:40]}"
+    exits = exit_abbrev(room)
+    exit_line = f" · Exits: {exits}" if exits else ""
     return (
         f"❤️ {int(player.health)}/300 · 🪙 {getattr(player, 'wealth', 0)} · "
-        f"📍 Room {room.number} ({desc}) · ⚔️ {weapons} · ✨ {magic}{warn} · "
+        f"📍 Room {room.number} ({desc}) · ⚔️ {weapons} · ✨ {magic}{warn}{exit_line} · "
         f"turn {get_session_turns()}"
     )
 
