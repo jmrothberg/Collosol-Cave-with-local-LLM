@@ -27,7 +27,7 @@ _MINIMAL_ROOM = {
 @pytest.fixture(scope="module")
 def game_module():
     """Import main game module and load adventure data (weapons, treasures, etc.)."""
-    mod_name = "Colossal_Cave_Aug_2_25"
+    mod_name = "colossal_cave_July_5_26"
     if mod_name not in sys.modules:
         importlib.import_module(mod_name)
     mod = sys.modules[mod_name]
@@ -68,7 +68,7 @@ def test_find_item_smart_delegates_to_engine(game_module):
     assert found.name == "Iron Sword"
 
 
-@patch("Colossal_Cave_Aug_2_25.ollama_generate")
+@patch("colossal_cave_July_5_26.ollama_generate")
 def test_llm_process_command_take(mock_gen, game_module, test_room, test_player, mock_ollama_take_sword):
     mock_gen.return_value = mock_ollama_take_sword
     sword = game_module.Weapon("Iron Sword", 15, runllm=False)
@@ -81,7 +81,7 @@ def test_llm_process_command_take(mock_gen, game_module, test_room, test_player,
     mock_gen.assert_called_once()
 
 
-@patch("Colossal_Cave_Aug_2_25.ollama_generate")
+@patch("colossal_cave_July_5_26.ollama_generate")
 def test_execute_action_deterministic_inventory(mock_gen, game_module, test_player):
     """inventory action should not call Ollama."""
     game_module.playerOne = test_player

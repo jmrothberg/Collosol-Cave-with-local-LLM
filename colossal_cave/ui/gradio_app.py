@@ -6,6 +6,14 @@ import os
 import gradio as gr
 
 
+def _default_play_llm_choice(list_of_llms):
+    """Prefer gemma-4-12B-it-8bit when listed."""
+    preferred = os.environ.get("COLOSSAL_CAVE_PLAY_LLM", "gemma-4-12B-it-8bit")
+    if preferred in list_of_llms:
+        return preferred
+    return list_of_llms[0]
+
+
 def build_and_launch_ui(
     talk_to_functions,
     list_of_saved_games,
@@ -16,7 +24,7 @@ def build_and_launch_ui(
 ):
     """
     Build Gradio Blocks and launch the web interface.
-    Dependencies injected from Colossal_Cave_Aug_2_25.py to avoid circular imports.
+    Dependencies injected from colossal_cave_July_5_26.py to avoid circular imports.
     """
     if not list_of_saved_games:
         list_of_saved_games = ["No saved games"]
@@ -24,6 +32,9 @@ def build_and_launch_ui(
         list_of_llms = ["No Ollama models found - please install models with 'ollama pull <model>'"]
     if not list_of_diffusers:
         list_of_diffusers = ["No saved diffusers"]
+
+    play_default = _default_play_llm_choice(list_of_llms)
+    creation_default = list_of_llms[0]
 
     # CHANGE (UX): detect quicksave for Resume button
     has_quicksave = False
@@ -73,7 +84,13 @@ def build_and_launch_ui(
                     monster_desc_art = gr.Checkbox(visible=False, value=True, label="Monster Art & Description")
                     item_desc_art = gr.Checkbox(visible=False, value=True, label="Item Art and Description")
                 with gr.Row():
-                    llm_select = gr.Dropdown(list_of_llms, visible=False, label="Select LLM", value=list_of_llms[0])
+                    # CHANGE (speed): creation LLM for New-Game; play LLM for turns
+                    creation_llm_select = gr.Dropdown(
+                        list_of_llms, visible=False, label="Creation LLM (new game)", value=creation_default,
+                    )
+                    play_llm_select = gr.Dropdown(
+                        list_of_llms, visible=False, label="Play LLM (fast)", value=play_default,
+                    )
                     diff_select = gr.Dropdown(list_of_diffusers, visible=False, label="Select a Diffuser", value=list_of_diffusers[0])
 
                 submit_button = gr.Button("Submit", visible=True)
@@ -98,38 +115,39 @@ def build_and_launch_ui(
                 return (gr.Dropdown(visible=True), gr.Textbox(visible=False), gr.Textbox(visible=False),
                         gr.Checkbox(visible=False), gr.Checkbox(visible=False), gr.Checkbox(visible=False),
                         gr.Button(visible=True), gr.Dropdown(visible=True), gr.Dropdown(visible=True),
-                        gr.Textbox(visible=True), gr.Checkbox(visible=False))
+                        gr.Dropdown(visible=True), gr.Textbox(visible=True), gr.Checkbox(visible=False))
             elif game_state == "Save-Game":
                 return (gr.Dropdown(visible=False), gr.Textbox(visible=True), gr.Textbox(visible=False),
                         gr.Checkbox(visible=False), gr.Checkbox(visible=False), gr.Checkbox(visible=False),
                         gr.Button(visible=True), gr.Dropdown(visible=False), gr.Dropdown(visible=False),
-                        gr.Textbox(visible=False), gr.Checkbox(visible=False))
+                        gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False))
             elif game_state == "New-Game":
                 return (gr.Dropdown(visible=False), gr.Textbox(visible=True), gr.Textbox(visible=True),
                         gr.Checkbox(visible=True), gr.Checkbox(visible=True), gr.Checkbox(visible=True),
                         gr.Button(visible=True), gr.Dropdown(visible=True), gr.Dropdown(visible=True),
-                        gr.Textbox(visible=True), gr.Checkbox(visible=True, interactive=True))
+                        gr.Dropdown(visible=True), gr.Textbox(visible=True), gr.Checkbox(visible=True, interactive=True))
             elif game_state == "Play-Game":
                 return (gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Textbox(visible=False),
                         gr.Checkbox(visible=False), gr.Checkbox(visible=False), gr.Checkbox(visible=False),
-                        gr.Button(visible=True), gr.Dropdown(visible=False), gr.Dropdown(visible=False),
-                        gr.Textbox(visible=False), gr.Checkbox(visible=False))
+                        gr.Button(visible=True), gr.Dropdown(visible=False), gr.Dropdown(visible=True),
+                        gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False))
             else:
                 return (gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Textbox(visible=False),
                         gr.Checkbox(visible=False), gr.Checkbox(visible=False), gr.Checkbox(visible=False),
                         gr.Button(visible=False), gr.Dropdown(visible=False), gr.Dropdown(visible=False),
-                        gr.Textbox(visible=False), gr.Checkbox(visible=False))
+                        gr.Dropdown(visible=False), gr.Textbox(visible=False), gr.Checkbox(visible=False))
 
         game_state_selector.change(
             update_game_selector, inputs=[game_state_selector],
             outputs=[game_selector, name_of_game, number_of_rooms, room_npc_desc_art, monster_desc_art,
-                     item_desc_art, submit_button, llm_select, diff_select, art_style, generate_videos],
+                     item_desc_art, submit_button, creation_llm_select, play_llm_select, diff_select,
+                     art_style, generate_videos],
         )
 
         submit_inputs = [
             text_input, game_selector, difficulty_selector, game_state_selector, name_of_game,
             number_of_rooms, room_npc_desc_art, monster_desc_art, item_desc_art,
-            llm_select, diff_select, art_style, generate_videos,
+            creation_llm_select, diff_select, art_style, generate_videos, play_llm_select,
         ]
         submit_outputs = [
             image_output, map_image_output, room_desc_output, contents_output, console_output,
@@ -137,26 +155,28 @@ def build_and_launch_ui(
             game_state_selector, video_output, adventure_log_output, status_header_output,
         ]
 
-        def resume_last_run(difficulty, llm_name, diff_name, art_st, gen_vid):
+        def resume_last_run(difficulty, creation_llm, diff_name, art_st, gen_vid, play_llm):
             """Load the most recent quicksave if present."""
             if not game_dir or not os.path.isdir(game_dir):
-                return talk_to_functions("", "", difficulty, "Load-Game", "", "", False, False, False, llm_name, diff_name, art_st, gen_vid)
+                return talk_to_functions("", "", difficulty, "Load-Game", "", "", False, False, False,
+                                         creation_llm, diff_name, art_st, gen_vid, play_llm)
             quicksaves = sorted(
                 [f for f in os.listdir(game_dir) if f.startswith("Adv_quicksave") and f.endswith(".pkl")],
                 key=lambda f: os.path.getmtime(os.path.join(game_dir, f)),
                 reverse=True,
             )
             if not quicksaves:
-                return talk_to_functions("", "", difficulty, "Load-Game", "", "", False, False, False, llm_name, diff_name, art_st, gen_vid)
-            # saved_files() strips Adv_ and .pkl — rebuild the name key
+                return talk_to_functions("", "", difficulty, "Load-Game", "", "", False, False, False,
+                                         creation_llm, diff_name, art_st, gen_vid, play_llm)
             inner = quicksaves[0][4:-4]
-            return talk_to_functions("", inner, difficulty, "Load-Game", "", "", False, False, False, llm_name, diff_name, art_st, gen_vid)
+            return talk_to_functions("", inner, difficulty, "Load-Game", "", "", False, False, False,
+                                     creation_llm, diff_name, art_st, gen_vid, play_llm)
 
         text_input.submit(fn=talk_to_functions, inputs=submit_inputs, outputs=submit_outputs)
         submit_button.click(fn=talk_to_functions, inputs=submit_inputs, outputs=submit_outputs)
         resume_button.click(
             fn=resume_last_run,
-            inputs=[difficulty_selector, llm_select, diff_select, art_style, generate_videos],
+            inputs=[difficulty_selector, creation_llm_select, diff_select, art_style, generate_videos, play_llm_select],
             outputs=submit_outputs,
         )
 

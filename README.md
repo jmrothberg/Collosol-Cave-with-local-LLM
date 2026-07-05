@@ -64,7 +64,7 @@ See [`colossal_cave/README.md`](colossal_cave/README.md) for architecture and fu
 ├── README.md                          # This file
 ├── colossal_cave/                     # Game 1: code-driven + LLM support
 │   ├── README.md
-│   ├── Colossal_Cave_Aug_2_25.py      # Main game (Ollama + Diffusers + Pyramid Flow)
+│   ├── colossal_cave_July_5_26.py      # Main game (Ollama + Diffusers + Pyramid Flow)
 │   ├── adventure_dataRA.json          # 25+ rooms, NPCs, monsters, riddles
 │   ├── diffusion_manager.py           # Image generation interface
 │   ├── complete_instruction.py        # Help system

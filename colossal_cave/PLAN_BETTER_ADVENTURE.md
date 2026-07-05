@@ -1,6 +1,6 @@
 # Plan: Make Colossal Cave a Better, More Fun Adventure
 
-> Working notes for upcoming engine + UX improvements to `Colossal_Cave_Aug_2_25.py`.
+> Working notes for upcoming engine + UX improvements to `colossal_cave_July_5_26.py`.
 > Saved here so we can pick this up later without re-deriving the analysis.
 > All changes are intended to be **surgical** (clear `# CHANGE (...)` comments, no
 > file deletions, no comment removals, no unrelated edits).
@@ -9,7 +9,7 @@
 
 ## TL;DR
 
-`Colossal_Cave_Aug_2_25.py` is ~5060 lines that already contain almost everything
+`colossal_cave_July_5_26.py` is ~5060 lines that already contain almost everything
 needed for a great adventure — the wins are mostly about **surfacing existing
 state** and **routing input differently**, not new features.
 
@@ -31,7 +31,7 @@ The README accuracy pass is **already done** (2026-05-04).
 
 ## Reality check (what the code already has — do not rebuild)
 
-A second pass through `Colossal_Cave_Aug_2_25.py` and the helper modules turned up
+A second pass through `colossal_cave_July_5_26.py` and the helper modules turned up
 several pieces I almost duplicated. The plan should **route to / surface** these
 instead of writing new ones.
 
@@ -305,7 +305,7 @@ but don't move the needle on a play session.
 | `colossal_cave/engine/llm_commands.py` | `llm_process_command`, prompts, parsing |
 | `colossal_cave/ui/gradio_app.py` | `gr.Blocks`, wiring only |
 
-  Keep `Colossal_Cave_Aug_2_25.py` as a thin entry / re-export so existing paths
+  Keep `colossal_cave_July_5_26.py` as a thin entry / re-export so existing paths
   still work. Migration tactic: **move functions verbatim first**, fix imports,
   run one smoke path (new game → move → take → LLM-only line). No behavior change.
 

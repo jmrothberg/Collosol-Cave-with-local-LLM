@@ -1,8 +1,8 @@
 # Colossal Cave Classic
 
-Text adventure with 25+ rooms (from `adventure_dataRA.json`). **Ollama** parses commands and drives NPC chat. **Diffusers** generate room/item art from local models. **Pyramid Flow** (optional) generates room videos.
+Text adventure: the game picks **25+ rooms** from an **87-room pool** in `adventure_dataRA.json`. **Ollama** parses commands and drives NPC chat. **Diffusers** generate room/item art. **Pyramid Flow** (optional) generates room videos.
 
-**Run:** `python Colossal_Cave_Aug_2_25.py` → Gradio UI at `http://127.0.0.1:7860`
+**Run:** `cd colossal_cave && python colossal_cave_July_5_26.py` → Gradio at `http://127.0.0.1:7860` (or next free port).
 
 ---
 
@@ -17,10 +17,24 @@ pip install -r colossal_cave/colossal_requirements.txt
 
 ollama pull gemma3:4b-it-q8_0   # or any model you prefer
 ollama serve                   # separate terminal
-cd colossal_cave && python Colossal_Cave_Aug_2_25.py
+cd colossal_cave && python colossal_cave_July_5_26.py
 ```
 
 On first launch, pick a **models folder** (parent of `Diffusion_Models/`) and a **data folder** (defaults to this directory).
+
+**Load-Game** restores save state only — no LLM/diffuser setup or MB intro until your first Play turn.
+
+---
+
+## World data
+
+`data_generator_adventure_Aug_2_25.py` builds `adventure_dataRA.json`:
+
+```bash
+cd colossal_cave && python data_generator_adventure_Aug_2_25.py
+```
+
+Lists of room text, riddles, monsters, weapons, NPC names/descriptions → JSON. The game loads and validates it via `engine/data.py` (≥25 rooms; riddles need `magic_items` + `action_words`).
 
 ---
 
@@ -30,64 +44,29 @@ The diffusion dropdown lists **only folders** under `Diffusion_Models/` — no r
 
 | Model | Mac speed | Notes |
 |-------|-----------|--------|
-| **FLUX2-klein-9B-mlx-8bit** | Fastest | MLX via mflux (`mlx` in folder name). Download: `huggingface-cli download AITRADER/FLUX2-klein-9B-mlx-8bit --local-dir ~/Diffusion_Models/FLUX2-klein-9B-mlx-8bit` |
+| **FLUX2-klein-9B-mlx-8bit** | Fastest | MLX via mflux (`mlx` in folder name) |
 | **Z-Image-Turbo** | Medium | 9 steps, guidance 0. Needs `diffusers>=0.36` |
 | **FLUX.1-dev** | Slow | Full diffusers FLUX on MPS; 4 steps |
-| Qwen-Image / Qwen-Image-Edit / FLUX.1-Fill-dev | Slow / special | Edit/inpaint models; not tuned for adventure art |
 
-**Mac paths:** looks for `Diffusion_Models/` under `/Users/jonathanrothberg` or `/Users/jonathanrothberg_1`, or the folder you choose at startup.
-
-**HF token:** not required for local models. Set `HF_TOKEN` only if downloading new weights.
+**Mac paths:** `Diffusion_Models/` under `/Users/jonathanrothberg` or `/Users/jonathanrothberg_1`, or the folder you choose at startup.
 
 ---
 
 ## Video (Pyramid only)
 
-The main game uses **Pyramid Flow** (`pyramid-flow-miniflux`), not LTX. LTX is a separate CUDA test script (`vidiofromtext_ltx_Jan_7_25.py`).
-
-**Mac:** enable video in the UI; needs PyTorch **2.9.1+ stable** (Conv3D MPS), FFmpeg (`brew install ffmpeg`), and the model at `./pyramid-flow-miniflux` (repo root). Download once:
-
-```bash
-python miniflux_download.py   # or huggingface-cli download rain1011/pyramid-flow-miniflux --local-dir ../pyramid-flow-miniflux
-```
-
-Details: `README_pyramid_MPS_Video_Generation.md`
+Main game uses **Pyramid Flow** (`pyramid-flow-miniflux`), not LTX. Enable video in the UI; needs PyTorch **2.9.1+**, FFmpeg, and the model at `../pyramid-flow-miniflux`. See `README_pyramid_MPS_Video_Generation.md`.
 
 ---
 
-## Dependencies
-
-Core pins (`requirements.txt`):
-
-- `torch>=2.9.1` + `torchvision>=0.24.1` — install **together** from stable PyPI (not `--pre` nightly)
-- `diffusers>=0.36.0` (Z-Image support)
-- `transformers>=4.44,<5.0` and `huggingface-hub>=0.34,<1.0` (mflux / sentence-transformers compatibility)
-
-Upgrade ML stack:
-
-```bash
-pip install -U torch torchvision diffusers "transformers>=4.44,<5.0" accelerate safetensors "huggingface-hub>=0.34,<1.0"
-```
-
----
-
-## Requirements
-
-- **Python** 3.10 or 3.11 (Pyramid has issues on 3.12)
-- **Mac:** Apple Silicon + 16 GB+ RAM; **Linux:** NVIDIA GPU for best performance
-- **Ollama** running (`ollama serve`)
-
----
-
-## Architecture (brief)
+## Architecture
 
 ```
-command → engine/preprocess.py → engine/llm_commands.py (Ollama JSON)
-       → execute_action() → Gradio UI
-       → Diffusers / mflux (images) → Pyramid Flow (optional video)
+command → preprocess → try_local_command (fast-path: move, take, solve, help, …)
+       → if needed: Ollama JSON (engine/llm_commands.py) → execute_action()
+       → Gradio UI (ui/gradio_app.py) + Diffusers/mflux images + optional Pyramid video
 ```
 
-Extracted packages: `engine/`, `ui/`, `media/`, `config/`, `tests/`
+Packages: `engine/`, `ui/`, `media/`, `config/`, `tests/`
 
 ---
 
@@ -95,29 +74,54 @@ Extracted packages: `engine/`, `ui/`, `media/`, `config/`, `tests/`
 
 ```bash
 cd colossal_cave
-COLOSSAL_CAVE_SKIP_VECTOR_MODEL=1 COLOSSAL_CAVE_HEADLESS=1 pytest -m "not gpu and not ollama"
+COLOSSAL_CAVE_SKIP_VECTOR_MODEL=1 COLOSSAL_CAVE_HEADLESS=1 pytest -m "not gpu and not ollama and not mlx"
 ```
 
-- **CI-safe suite:** engine helpers, fast-path, execute_action, save/load, walkthrough simulator (~65+ tests)
-- **Optional local:** `pytest -m ollama` (live Ollama), `pytest -m gpu` (CUDA/MPS smoke)
-- Env vars: `COLOSSAL_CAVE_SKIP_VECTOR_MODEL=1` skips unused SentenceTransformer load; `COLOSSAL_CAVE_HEADLESS=1` skips interactive video prompts on load
+**110+ CI-safe tests**: fast-path (wear/remove/use/solve), dual LLM, category take, organic map, puzzles.
 
-CI runs on push via `.github/workflows/colossal_cave_tests.yml`.
+```bash
+# Local: live play LLM (gemma)
+COLOSSAL_CAVE_PLAY_LLM=gemma-4-12B-it-8bit pytest -m "ollama or mlx"
+```
+
+**Dual LLM env vars:**
+- `COLOSSAL_CAVE_PLAY_LLM` — default `gemma-4-12B-it-8bit` (fast play/command model)
+- `COLOSSAL_CAVE_CREATION_LLM` — optional override for new-game generation
+- `COLOSSAL_CAVE_MLX_MODELS_DIR` — default `~/MLX_Models`
+
+Optional: `pytest -m gpu` (diffusion smoke).
 
 ---
 
-## Game commands (summary)
+## Game commands
 
 | Command | Action |
 |---------|--------|
-| `go n/s/e/w` | Move |
+| `go n/s/e/w` | Move (you can enter monster rooms; attack there) |
 | `take` / `leave` / `use` / `wear` | Items |
 | `attack <monster> with <weapon>` | Combat |
 | `talk <msg>` / `MB, …` | NPC / Master Beast helper |
 | `solve <magic item>` | Riddles |
 | `inventory` / `status` / `map` / `help` | Info |
 
-MB (Master Beast) in Room 1 knows the full game state — ask her anything.
+MB (Master Beast) in Room 1 knows game state — ask for hints or what to do next.
+
+---
+
+## Organic cave map
+
+- **Load-Game:** Map relayouts from your saved connections (jagged chambers + brown tunnels). Topology unchanged.
+- **New-Game:** Cave graph topology (branches, dead ends, loops) — not a square grid.
+- Room art is **clipped** (not stretched) into unique **jagged polygons** per room; current room gets a gold outline.
+- **Tight layout:** connected rooms sit close together on the map.
+- **Navigation:** Type movement commands — the map is your compass:
+  - `go east` / `go e` — follow the **E** label on a tunnel from your current room
+  - `go north` / `n`, `go south` / `s`, `go east` / `e`, `go west` / `w` — cardinals when the tunnel is straight
+  - **8-way diagonals** when tunnels are angled: `go northeast` / `ne`, `go southeast` / `se`, `go southwest` / `sw`, `go northwest` / `nw` (hyphens ok: `south-east`)
+  - **Exits on entry:** When you enter a room, `Exits from here: ...` prints at the top of the console and in the room description
+- Preview: `python scripts/preview_organic_map.py`
+
+**2D vs 3D:** In-game map is a 2D PNG in Gradio. Click-to-move on the map is not implemented yet; a 3D fly-through would be a separate WebGL project.
 
 ---
 
@@ -125,11 +129,12 @@ MB (Master Beast) in Room 1 knows the full game state — ask her anything.
 
 | File | Purpose |
 |------|---------|
-| `Colossal_Cave_Aug_2_25.py` | Main game |
-| `adventure_dataRA.json` | World data |
+| `colossal_cave_July_5_26.py` | Main game |
+| `data_generator_adventure_Aug_2_25.py` | Regenerate `adventure_dataRA.json` |
+| `adventure_dataRA.json` | World data (rooms, riddles, monsters, NPCs) |
+| `engine/fast_path.py` | Local commands without Ollama |
+| `engine/debug_log.py` | Per-save play debug logs |
 | `requirements.txt` / `colossal_requirements.txt` | Dependencies |
-| `miniflux_download.py` | Pyramid video model downloader |
-| `Z_image_TestCode.py`, `mini_flux_*.py`, `vidiofromtext_*.py` | Standalone model tests (not imported by main game) |
 
 ---
 
@@ -137,17 +142,11 @@ MB (Master Beast) in Room 1 knows the full game state — ask her anything.
 
 **Ollama empty / not responding** — run `ollama serve` in another terminal.
 
-**`ZImagePipeline` missing** — `pip install -U "diffusers>=0.36.0"`
+**MB says nothing** — restart after updates; Qwen models may need thinking stripped; offline fallback applies when LLM returns empty.
 
-**`torchvision::nms does not exist`** — torch/torchvision mismatch; upgrade both from stable PyPI (see Dependencies).
+**Movement / combat issues** — debug log at `Adventure_Game_Saved/Debug_Logs/<save_name>_play_debug.log` (exits, monsters, routing, responses).
 
-**Z-Image very slow** — confirm log shows `Using Z-Image-Turbo settings: 9 steps, 0.0 guidance`. For fastest Mac images, use **FLUX2-klein-9B-mlx-8bit**.
-
-**Hugging Face token prompt** — not needed for local models; ignore or set `HF_TOKEN` only for downloads.
-
-**Video fails on Mac** — PyTorch 2.9.1+ stable, FFmpeg installed, `pyramid-flow-miniflux` present, see pyramid README.
-
-**Movement / combat looks wrong** — each game writes a play debug log under `Adventure_Game_Saved/Debug_Logs/<save_name>_play_debug.log` with room exits, monsters per direction, command routing (fast-path vs LLM), and responses. Attach that file when reporting bugs.
+**Video on Mac** — PyTorch 2.9.1+ stable, FFmpeg, `pyramid-flow-miniflux` present.
 
 ---
 

@@ -144,7 +144,7 @@ _RIDDLE_ROOM = {
 def game_module():
     """Import main game module and load adventure data."""
     import importlib
-    mod_name = "Colossal_Cave_Aug_2_25"
+    mod_name = "colossal_cave_July_5_26"
     # CHANGE (tests): force clean import with diffusers mocked
     if mod_name in sys.modules:
         del sys.modules[mod_name]
