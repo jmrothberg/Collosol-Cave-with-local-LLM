@@ -483,13 +483,13 @@ def try_local_command(
 
     # --- Look / examine (no diffusion regen on fast-path) ---
     if cmd_lower in ("look", "look around", "l") or cmd_lower.startswith(
-        ("examine ", "study ", "look at ", "inspect ", "check ")
+        ("examine ", "examin ", "study ", "look at ", "inspect ", "check ")
     ):
         study_fn = helpers.get("study")
         if study_fn:
             if cmd_lower in ("look", "look around", "l"):
                 return study_fn("around", cmd, redraw=False)
-            for prefix in ("look at ", "examine ", "study ", "inspect ", "check "):
+            for prefix in ("look at ", "examine ", "examin ", "study ", "inspect ", "check "):
                 if cmd_lower.startswith(prefix):
                     target = cmd_lower[len(prefix):].strip()
                     return study_fn(target, cmd, redraw=False)

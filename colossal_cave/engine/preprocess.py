@@ -13,7 +13,8 @@ def preprocess_command(command: str) -> str:
         'waer': 'wear', 'ware': 'wear', 'wera': 'wear',
         'noth': 'north', 'soth': 'south', 'esst': 'east', 'wst': 'west',
         'invntory': 'inventory', 'hlp': 'help', 'hlep': 'help',
-        'trdae': 'trade', 'traed': 'trade', 'talkk': 'talk'
+        'trdae': 'trade', 'traed': 'trade', 'talkk': 'talk',
+        'examin': 'examine', 'examne': 'examine', 'examinee': 'examine',
     }
 
     # CHANGE (accuracy): whole-word replacement only — 'tak' must not corrupt 'take'

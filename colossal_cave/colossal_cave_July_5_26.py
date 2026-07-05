@@ -1314,7 +1314,8 @@ class AdventureGame:
                     if self.npc.image == None:
                         prompt = prompt + " and " + self.npc.description
         elif isinstance(self, Item):
-            prompt = (f'{style} a {self.type} {self.description} in an adventue game')
+            desc = _sanitize_llm_text(self.description, _fallback_item_description(self))
+            prompt = (f'{style} a {self.type} {desc} in an adventue game')
         elif isinstance(self, LivingThing):
             prompt = (f'{style} a {self.description} in an adventue game')
         console = self.draw_and_save(prompt)
@@ -1366,12 +1367,15 @@ class AdventureGame:
             print(self.full_description)
             return self.full_description
         else:
-            if (
-                generated_text
-                and generated_text != "Error generating response"
-                and len(generated_text.strip()) >= 8
-            ):
-                self.description = generated_text
+            cleaned = _sanitize_llm_text(generated_text, "")
+            if cleaned and len(cleaned) >= 8:
+                self.description = cleaned
+            elif not _sanitize_llm_text(getattr(self, "description", ""), ""):
+                self.description = _fallback_item_description(self)
+            if _sanitize_llm_text(self.description, "") != self.description:
+                self.description = _sanitize_llm_text(
+                    self.description, _fallback_item_description(self)
+                )
             print(self.description)
             return self.description
 
@@ -1616,7 +1620,7 @@ class Weapon(Item):
     def __init__(self, name, damage, runllm=False):
         super().__init__(name = name, type = "weapon", runllm_item = runllm)
         self.damage = damage  # Damage dealt to monsters
-        if self.description == None:
+        if not self.description:
             self.description = (f"weapon that can deal {self.damage} damage.")
 
 class Armor(Item):
@@ -1624,7 +1628,7 @@ class Armor(Item):
     def __init__(self, name, protection, runllm=False):
         super().__init__(name, type = "armor", runllm_item = runllm)
         self.protection = protection  # Damage reduction amount
-        if self.description == None:
+        if not self.description:
             self.description = (f"armor that can protect you from {self.protection} damage.")
 
 class Treasure(Item):
@@ -1632,8 +1636,8 @@ class Treasure(Item):
     def __init__(self, name, value, runllm=False):
         super().__init__(name, type = "treasure", runllm_item = runllm)
         self.value = value  # Monetary value in shekels
-        if self.description == None:
-            self.description = (f"treasure worth {self.value} shekel.")
+        if not self.description:
+            self.description = (f"treasure worth {self.value} shekels.")
 
 class Magic(Item):
     """
@@ -1648,7 +1652,7 @@ class Magic(Item):
     def __init__(self, name, healing, runllm=False):
         super().__init__(name, type = "magic", runllm_item = runllm)
         self.healing = healing  # Health points restored
-        if self.description == None:
+        if not self.description:
             self.description = (f"magic that can heal {self.healing}.")
 
 ###############################################################################
@@ -1842,11 +1846,29 @@ class Player(LivingThing):
         """Find item using intelligent partial matching prioritizing substring matches"""
         return find_item_smart(item_name, items)
 
+    def _refresh_item_description_if_needed(self, item):
+        """Regenerate item prose when missing or left over from a failed LLM call."""
+        if _sanitize_llm_text(item.description, ""):
+            item.description = _sanitize_llm_text(
+                item.description, _fallback_item_description(item)
+            )
+            return
+        try:
+            item.llM_generate_self_description()
+        except Exception as e:
+            print(f"Item description LLM failed for {item.name}: {e}")
+        item.description = _sanitize_llm_text(
+            item.description, _fallback_item_description(item)
+        )
+
     def _describe_single_item(self, item, addvalue = None): #full description
+        if addvalue == "study":
+            self._refresh_item_description_if_needed(item)
+        desc = _sanitize_llm_text(item.description, _fallback_item_description(item))
         console = ""
         console = (f"This is {item.name} a {item.type}, ") #full description
         if addvalue == "study":
-            console = console + (f"it is a {item.description}.\n")
+            console = console + (f"it is a {desc}.\n")
         if isinstance(item, Weapon):
             console = console + (f"it can deal {item.damage} damage.\n")
         elif isinstance(item, Armor):
@@ -4964,13 +4986,31 @@ def _is_movement_command(command: str) -> bool:
     return is_movement_phrase(cmd)
 
 
+def _sanitize_llm_text(text, fallback=""):
+    """Drop LLM failure strings; return fallback prose instead."""
+    t = (text or "").strip()
+    if not t or t == "Error generating response" or t.startswith("Error generating"):
+        return fallback
+    return t
+
+
+def _fallback_item_description(item):
+    """Plain-text item blurb when MLX/Ollama description is missing or failed."""
+    if isinstance(item, Weapon):
+        return f"weapon that can deal {item.damage} damage."
+    if isinstance(item, Armor):
+        return f"armor that can protect you from {item.protection} damage."
+    if isinstance(item, Treasure):
+        return f"treasure worth {item.value} shekels."
+    if isinstance(item, Magic):
+        return f"magic item that can heal {item.healing} health."
+    return f"{getattr(item, 'type', 'item')} called {getattr(item, 'name', 'unknown')}."
+
+
 def _sanitize_long_description(full_desc, short_desc=""):
     """Fall back to short room blurb when LLM expansion failed."""
-    fd = (full_desc or short_desc or "").strip()
     short = (short_desc or "").strip()
-    if not fd or fd == "Error generating response" or fd.startswith("Error generating"):
-        return short
-    return fd
+    return _sanitize_llm_text(full_desc, short) or short
 
 
 def _long_desc_for_ui(room, difficulty):
