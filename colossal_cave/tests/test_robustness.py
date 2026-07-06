@@ -321,6 +321,195 @@ def test_save_game_post_process_no_unbound_local(game_module, minimal_game_world
     assert "Saved game" in outputs[4]
 
 
+def _talk_to_new_game_mocks(gm, minimal_game_world, monkeypatch, fake_new_game=None):
+    """Shared mocks for New-Game talk_to_functions tests."""
+    rooms = minimal_game_world["rooms"]
+    player = minimal_game_world["player"]
+    rooms[1].npc = gm.MasterBeast(current_room=1, llm_npc=False)
+
+    def _default_fake_new_game(**kwargs):
+        gm.rooms = rooms
+        gm.playerOne = player
+        gm.old_room = None
+        return "July_test"
+
+    monkeypatch.setattr(gm, "_llm_model_available", lambda name: True)
+    monkeypatch.setattr(gm, "initialize_game_variables", lambda: None)
+    monkeypatch.setattr(gm, "load_adventure_data", lambda: None)
+    monkeypatch.setattr(gm, "_ensure_llm_diffuser_ready", lambda **k: None)
+    monkeypatch.setattr(gm, "_log_llm_inventory", lambda **k: None)
+    monkeypatch.setattr(gm, "log_game_event", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "start_debug_session", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "new_game", fake_new_game or _default_fake_new_game)
+    monkeypatch.setattr(gm, "draw_map_png", lambda *a, **k: None)
+    return rooms, player
+
+
+def test_new_game_skips_turn_simulation(game_module, minimal_game_world, monkeypatch):
+    """New-Game must not run monster attacks, MB LLM intro, or trophy checks."""
+    gm = game_module
+    rooms, player = _talk_to_new_game_mocks(gm, minimal_game_world, monkeypatch)
+    goblin = gm.Monster("Goblin", 50, 10, runllm_mon=False)
+    rooms[1].monsters = [goblin]
+    gm.npc_introduced = False
+
+    trophy_mock = MagicMock(return_value=("", [], []))
+    attack_mock = MagicMock(return_value="ATTACK\n")
+    goblin.monster_attack = attack_mock
+    mb_dialogue_mock = MagicMock(return_value="MB says: welcome\n")
+    monkeypatch.setattr(gm, "check_trophy", trophy_mock)
+    monkeypatch.setattr(gm.MasterBeast, "llM_generate_self_dialogue", mb_dialogue_mock)
+
+    outputs = gm.talk_to_functions(
+        " ", "", "Easy", "New-Game", "July_test", "9", False, False, False,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    assert len(outputs) == 13
+    trophy_mock.assert_not_called()
+    attack_mock.assert_not_called()
+    mb_dialogue_mock.assert_not_called()
+
+
+def test_save_game_skips_turn_simulation(game_module, minimal_game_world, tmp_path, monkeypatch):
+    """Save-Game must not run monster attacks, MB LLM intro, or trophy checks."""
+    gm = game_module
+    player = minimal_game_world["player"]
+    rooms = minimal_game_world["rooms"]
+    rooms[1].npc = gm.MasterBeast(current_room=1, llm_npc=False)
+    goblin = gm.Monster("Goblin", 50, 10, runllm_mon=False)
+    rooms[1].monsters = [goblin]
+    gm.rooms = rooms
+    gm.playerOne = player
+    gm.active_game = True
+    gm.npc_introduced = False
+    save_dir = str(tmp_path / "saves")
+    os.makedirs(save_dir, exist_ok=True)
+    monkeypatch.setattr(gm, "game_dir", save_dir)
+    monkeypatch.setattr(gm, "save_game_state", lambda name=None: "saved_ok")
+    monkeypatch.setattr(gm, "saved_files", lambda: ["saved_ok"])
+    monkeypatch.setattr(gm, "draw_map_png", lambda *a, **k: None)
+
+    trophy_mock = MagicMock(return_value=("", [], []))
+    attack_mock = MagicMock(return_value="ATTACK\n")
+    goblin.monster_attack = attack_mock
+    mb_dialogue_mock = MagicMock(return_value="MB says: hi\n")
+    monkeypatch.setattr(gm, "check_trophy", trophy_mock)
+    monkeypatch.setattr(gm.MasterBeast, "llM_generate_self_dialogue", mb_dialogue_mock)
+
+    outputs = gm.talk_to_functions(
+        " ", "", "Easy", "Save-Game", "mysave", "9", False, False, False,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    assert len(outputs) == 13
+    trophy_mock.assert_not_called()
+    attack_mock.assert_not_called()
+    mb_dialogue_mock.assert_not_called()
+
+
+def test_new_game_mock_full_llm_flags(game_module, minimal_game_world, monkeypatch):
+    """New-Game with all LLM flags must complete Gradio tuple (mocked LLM work)."""
+    gm = game_module
+    captured = {}
+
+    def _fake_new_game(**kwargs):
+        captured.update(kwargs)
+        gm.rooms = minimal_game_world["rooms"]
+        gm.playerOne = minimal_game_world["player"]
+        gm.old_room = None
+        return "llm_flags_test"
+
+    _talk_to_new_game_mocks(gm, minimal_game_world, monkeypatch, fake_new_game=_fake_new_game)
+    monkeypatch.setattr(gm, "check_trophy", lambda *a, **k: ("", [], []))
+
+    outputs = gm.talk_to_functions(
+        " ", "", "Easy", "New-Game", "llm_flags_test", "9", True, True, True,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    assert len(outputs) == 13
+    assert captured.get("runllm_diff") is True
+    assert captured.get("runllm_mon") is True
+    assert captured.get("runllm_item") is True
+    assert "New game" in outputs[4] or "llm_flags_test" in outputs[4]
+
+
+def test_new_game_then_first_look(game_module, minimal_game_world, monkeypatch):
+    """After New-Game, first Play-Game look must return room UI without crash."""
+    gm = game_module
+    _talk_to_new_game_mocks(gm, minimal_game_world, monkeypatch)
+    monkeypatch.setattr(gm, "check_trophy", lambda *a, **k: ("", [], []))
+    monkeypatch.setattr(gm, "_ensure_llm_diffuser_ready", lambda **k: None)
+    monkeypatch.setattr(gm, "process_command", lambda cmd, p, r: f"You are in Room {r.number}.\n")
+
+    gm.talk_to_functions(
+        " ", "", "Easy", "New-Game", "look_test", "9", False, False, False,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    outputs = gm.talk_to_functions(
+        "look", "", "Easy", "Play-Game", "", "9", False, False, False,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    assert len(outputs) == 13
+    assert "Room 1" in outputs[2] or "Room 1" in outputs[4]
+
+
+def test_post_process_error_returns_tuple(game_module, minimal_game_world, monkeypatch):
+    """Play-Game turn-sim errors must not crash Gradio — return 13 outputs."""
+    gm = game_module
+    player = minimal_game_world["player"]
+    rooms = minimal_game_world["rooms"]
+    gm.rooms = rooms
+    gm.playerOne = player
+    gm.active_game = True
+    gm.npc_introduced = True
+    monkeypatch.setattr(gm, "draw_map_png", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "_ensure_llm_diffuser_ready", lambda **k: None)
+    monkeypatch.setattr(gm, "process_command", lambda cmd, p, r: "You look around.\n")
+    monkeypatch.setattr(gm, "consume_command_meta", lambda: {"path": "fast_path", "preprocessed": "look"})
+    monkeypatch.setattr(gm, "log_play_turn", lambda **k: None)
+    monkeypatch.setattr(gm, "is_empty_game_response", lambda r: False)
+
+    def _boom(*a, **k):
+        raise RuntimeError("trophy check failed")
+
+    monkeypatch.setattr(gm, "check_trophy", _boom)
+
+    outputs = gm.talk_to_functions(
+        "look", "", "Easy", "Play-Game", "", "9", False, False, False,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    assert len(outputs) == 13
+    assert "UI refresh error" in outputs[4] or "saved" in outputs[4].lower()
+
+
+def test_checkpoint_load_creates_player(game_module, minimal_game_world, tmp_path, monkeypatch):
+    """Checkpoint pickle with playerOne=None must recover a playable player on load."""
+    gm = game_module
+    rooms = minimal_game_world["rooms"]
+    save_dir = str(tmp_path / "saves")
+    os.makedirs(save_dir, exist_ok=True)
+    monkeypatch.setattr(gm, "game_dir", save_dir)
+    monkeypatch.setattr(gm, "_migrate_legacy_videos", lambda r: None)
+    monkeypatch.setattr(gm, "_ensure_master_beast", lambda r: None)
+    monkeypatch.setattr(gm, "_patch_all_npcs", lambda r: None)
+    with patch.object(gm.Player, "equip_self"):
+        payload = {
+            "rooms": rooms,
+            "playerOne": None,
+            "old_room": None,
+            "trophies": [],
+            "cheat_mode": False,
+            "magicword": "xyzzy",
+            "difficulty_g": "easy",
+            "checkpoint_phase": "rooms",
+        }
+        with open(os.path.join(save_dir, "Adv_ckpt_test.pkl"), "wb") as f:
+            pickle.dump(payload, f)
+        loaded_rooms, loaded_player, _ = gm.load_game_state("ckpt_test")
+    assert loaded_rooms is not None
+    assert loaded_player is not None
+    assert loaded_player.current_room.number == 1
+
+
 def test_game_module_room_still_has_treasures(game_module, minimal_game_world):
     """Game trophy helpers treat items=None as empty, not 'all collected'."""
     room = minimal_game_world["r1"]

@@ -50,11 +50,33 @@ def build_and_launch_ui(
         resize: none !important;
     }
     """
+    # CHANGE (UX): auto-scroll adventure log on update — head script only (never js= on Gradio events)
+    adventure_log_head = """
+    <script>
+    (function() {
+        function scrollAdventureLog() {
+            const root = document.getElementById('adventure-log-scroll');
+            const el = root && root.querySelector('textarea');
+            if (el) { el.scrollTop = el.scrollHeight; }
+        }
+        const obs = new MutationObserver(scrollAdventureLog);
+        function watch() {
+            const root = document.getElementById('adventure-log-scroll');
+            if (!root) { setTimeout(watch, 300); return; }
+            obs.observe(root, {subtree: true, childList: true, characterData: true});
+            scrollAdventureLog();
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', watch);
+        } else {
+            watch();
+        }
+    })();
+    </script>
+    """
+    ui_theme = gr.themes.Default(font=[gr.themes.GoogleFont("IBM Plex Mono")])
 
-    with gr.Blocks(
-        theme=gr.themes.Default(font=[gr.themes.GoogleFont("IBM Plex Mono")]),
-        css=adventure_log_css,
-    ) as web_interface:
+    with gr.Blocks() as web_interface:
         with gr.Row():
             gr.Markdown("<h1 style='text-align: center;'>JMR's Colossal Cave Adventure</h1>")
         with gr.Row():
@@ -181,7 +203,8 @@ def build_and_launch_ui(
         )
 
     ensure_mflux_installed_fn()
+    launch_kw = dict(css=adventure_log_css, theme=ui_theme, head=adventure_log_head)
     try:
-        web_interface.launch(share=True)
+        web_interface.launch(share=True, **launch_kw)
     except Exception:
-        web_interface.launch(share=False)
+        web_interface.launch(share=False, **launch_kw)
