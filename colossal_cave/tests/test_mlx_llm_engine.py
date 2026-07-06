@@ -50,6 +50,12 @@ def test_llm_available_via_mlx_without_ollama(game_module, monkeypatch):
         "resolve_mlx_folder_path",
         lambda name: "/fake/gemma" if name == "gemma-4-12B-it-8bit" else None,
     )
+    # CHANGE (CI): model_backend is imported from engine.mlx_llm — must mock on gm, not rely on ~/MLX_Models
+    monkeypatch.setattr(
+        gm,
+        "model_backend",
+        lambda name: "mlx" if name == "gemma-4-12B-it-8bit" else None,
+    )
     assert gm._llm_model_available("gemma-4-12B-it-8bit") is True
     assert gm.model_backend("gemma-4-12B-it-8bit") == "mlx"
 

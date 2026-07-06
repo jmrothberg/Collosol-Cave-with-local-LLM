@@ -144,6 +144,21 @@ def test_move_none_neighbor_does_not_corrupt_player(game_module, minimal_game_wo
     assert "can't go" in result.lower()
 
 
+def test_item_runllm_init_survives_fallback_path(game_module, monkeypatch):
+    """Regression: runllm item init must set damage/etc before drawing_self fallback runs."""
+    gm = game_module
+    monkeypatch.setattr(gm, "ollama_generate", lambda *a, **k: "Error generating response")
+    w = gm.Weapon("Rusty Axe", 33, runllm=True)
+    a = gm.Armor("Chain Mail", 12, runllm=True)
+    t = gm.Treasure("Gold Idol", 777, runllm=True)
+    m = gm.Magic("Healing Herb", 55, runllm=True)
+    assert w.damage == 33
+    assert a.protection == 12
+    assert t.value == 777
+    assert m.healing == 55
+    assert "33" in w.description or "weapon" in w.description.lower()
+
+
 def test_execute_action_take_with_string_entity(game_module, test_player):
     game_module.playerOne = test_player
     sword = game_module.Weapon("Iron Sword", 20, runllm=False)
@@ -296,6 +311,8 @@ def test_log_llm_inventory_mlx_folder_ok(game_module, tmp_path, monkeypatch):
     os.makedirs(game_dir, exist_ok=True)
     monkeypatch.setattr(gm, "check_ollama_running", lambda: False)
     monkeypatch.setattr(gm, "resolve_mlx_folder_path", lambda name: "/fake/gemma" if name == "gemma-4-12B-it-8bit" else None)
+    monkeypatch.setattr(gm, "model_backend", lambda name: "mlx" if name == "gemma-4-12B-it-8bit" else None)
+    monkeypatch.setattr(gm, "list_mlx_model_folders", lambda: ["gemma-4-12B-it-8bit"])
     from engine.debug_log import start_debug_session, get_debug_log_path
     start_debug_session(game_dir, "mlx_ok_test")
     gm._log_llm_inventory(context="test", creation="gemma-4-12B-it-8bit", play="gemma-4-12B-it-8bit", diffuser="none")

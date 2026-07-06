@@ -1643,24 +1643,24 @@ class Item(AdventureGame):
 class Weapon(Item):
     """WEAPON ITEMS for combat. Higher damage = more effective against monsters."""
     def __init__(self, name, damage, runllm=False):
+        self.damage = damage  # CHANGE (new-game): set before super — drawing_self uses _fallback_item_description
         super().__init__(name = name, type = "weapon", runllm_item = runllm)
-        self.damage = damage  # Damage dealt to monsters
         if not self.description:
             self.description = (f"weapon that can deal {self.damage} damage.")
 
 class Armor(Item):
     """ARMOR ITEMS for protection. Reduces incoming monster damage."""
     def __init__(self, name, protection, runllm=False):
+        self.protection = protection  # CHANGE (new-game): set before super — drawing_self needs protection
         super().__init__(name, type = "armor", runllm_item = runllm)
-        self.protection = protection  # Damage reduction amount
         if not self.description:
             self.description = (f"armor that can protect you from {self.protection} damage.")
 
 class Treasure(Item):
     """TREASURE ITEMS for wealth. Contributes to score and wealth tracking.""" 
     def __init__(self, name, value, runllm=False):
+        self.value = value  # CHANGE (new-game): set before super — drawing_self needs value
         super().__init__(name, type = "treasure", runllm_item = runllm)
-        self.value = value  # Monetary value in shekels
         if not self.description:
             self.description = (f"treasure worth {self.value} shekels.")
 
@@ -1675,8 +1675,8 @@ class Magic(Item):
     - Often dropped by defeated monsters
     """
     def __init__(self, name, healing, runllm=False):
+        self.healing = healing  # CHANGE (new-game): set before super — drawing_self needs healing
         super().__init__(name, type = "magic", runllm_item = runllm)
-        self.healing = healing  # Health points restored
         if not self.description:
             self.description = (f"magic that can heal {self.healing}.")
 
@@ -2660,7 +2660,7 @@ class NPC(LivingThing):
             "room": self.current_room,
             "timestamp": self.times_talked,
             "player_health": playerOne.health if playerOne else 0,
-            "player_items_count": len(playerOne.items) if playerOne else 0
+            "player_items_count": len(_safe_player_items()) if playerOne else 0
         }
         self.memory.append(memory_entry)
         # Keep only last 10 interactions to avoid memory bloat
@@ -3108,7 +3108,7 @@ Additional context:
         if self.personality_traits['helpfulness'] in ['very helpful', 'eager to help']:
             if playerOne.health < 100:
                 formatted_response += f"\n{self.name} notices your poor health and adds: 'You should find healing items quickly!'\n"
-            if not any(isinstance(i, Weapon) for i in playerOne.items):
+            if not any(isinstance(i, Weapon) for i in _safe_player_items()):
                 formatted_response += f"\n{self.name} warns: 'You have no weapons! That's dangerous in these caves.'\n"
         
         return formatted_response
@@ -5042,13 +5042,13 @@ def _sanitize_llm_text(text, fallback=""):
 def _fallback_item_description(item):
     """Plain-text item blurb when MLX/Ollama description is missing or failed."""
     if isinstance(item, Weapon):
-        return f"weapon that can deal {item.damage} damage."
+        return f"weapon that can deal {getattr(item, 'damage', 0)} damage."
     if isinstance(item, Armor):
-        return f"armor that can protect you from {item.protection} damage."
+        return f"armor that can protect you from {getattr(item, 'protection', 0)} damage."
     if isinstance(item, Treasure):
-        return f"treasure worth {item.value} shekels."
+        return f"treasure worth {getattr(item, 'value', 0)} shekels."
     if isinstance(item, Magic):
-        return f"magic item that can heal {item.healing} health."
+        return f"magic item that can heal {getattr(item, 'healing', 0)} health."
     return f"{getattr(item, 'type', 'item')} called {getattr(item, 'name', 'unknown')}."
 
 
