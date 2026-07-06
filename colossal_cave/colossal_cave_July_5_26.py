@@ -922,6 +922,25 @@ def _get_master_beast_npc():
     return None
 
 
+def _is_short_conversation_reply(command: str) -> bool:
+    """True for bare yes/no/sure replies to an NPC offer."""
+    cmd = (command or "").lower().strip().rstrip("!.,")
+    return cmd in {
+        "yes", "yeah", "yep", "y", "sure", "ok", "okay", "please", "do it",
+        "tell me", "go ahead", "absolutely", "definitely",
+        "no", "nope", "nah", "n", "not now", "later", "maybe later",
+    }
+
+
+def _offer_snippet_from_response(response_text: str) -> str:
+    """Last question sentence from NPC reply — the offer player may accept."""
+    for line in reversed((response_text or "").splitlines()):
+        line = line.strip()
+        if line.endswith("?"):
+            return line
+    return (response_text or "").strip()[-200:]
+
+
 def _should_route_to_remote_mb(command: str) -> bool:
     """True for help/riddle/chat phrasing that should reach MB without saying 'MB'."""
     if _is_direct_game_command(command):
@@ -2924,6 +2943,29 @@ class NPC(LivingThing):
         """Check if there's a pending action waiting for confirmation"""
         return self.conversation_state.get("pending_action") is not None
 
+    def _fulfill_information_offer(self, context, last_offer):
+        """Deliver promised info when accept had thin or missing info_details."""
+        offer_snippet = context.get("offer_snippet") or last_offer or ""
+        info_details = (context.get("info_details") or "").strip()
+        if len(info_details) >= 20:
+            return f"{self.name} explains: {info_details}\n"
+        if getattr(self, "is_master_beast", False):
+            lines = ["MB says:\n"]
+            if offer_snippet:
+                lines.append(f"*(As you asked — {offer_snippet})*\n")
+            lines.append(self._provide_contextual_help().strip())
+            lines.append(progress_summary(playerOne, rooms).strip())
+            room = playerOne.current_room if playerOne else None
+            diff = globals().get("difficulty_g", "easy")
+            if room:
+                exits = format_room_exits(room, diff)
+                if exits:
+                    lines.append(exits)
+            return "\n".join(line for line in lines if line) + "\n"
+        if info_details:
+            return f"{self.name} explains: {info_details}\n"
+        return f"{self.name} explains: {offer_snippet}\n" if offer_snippet else f"{self.name} says: 'Here is what I can tell you.'\n"
+
     def handle_conversation_response(self, response):
         """Handle player's response to pending conversation using LLM interpretation"""
         if not self.has_pending_action():
@@ -3016,14 +3058,13 @@ What is the player's intent?"""
                     return f"{self.name} says: 'Let me think of a good quest for you...'\n"
             
             elif pending_action == "information":
-                info_details = context.get("info_details")
-                if info_details:
+                info_details = (context.get("info_details") or "").strip()
+                if len(info_details) >= 20:
                     self.clear_pending_action()
-                    # Generate helpful information
                     return f"{self.name} explains: {info_details}\n"
-                else:
-                    self.clear_pending_action()
-                    return f"{self.name} says: 'What would you like to know?'\n"
+                result = self._fulfill_information_offer(context, last_offer)
+                self.clear_pending_action()
+                return result
         
         elif interpretation == "decline":
             self.clear_pending_action()
@@ -3308,7 +3349,9 @@ Return JSON only."""
                     "quest",
                     f"give you a quest: {details}",
                     {
-                        "quest_details": details
+                        "quest_details": details,
+                        "original_dialogue": dialogue,
+                        "offer_snippet": _offer_snippet_from_response(response_text),
                     }
                 )
             
@@ -3319,7 +3362,9 @@ Return JSON only."""
                     "information",
                     f"explain: {details}",
                     {
-                        "info_details": details
+                        "info_details": details,
+                        "original_dialogue": dialogue,
+                        "offer_snippet": _offer_snippet_from_response(response_text),
                     }
                 )
             
@@ -4489,10 +4534,32 @@ def process_command(command, player, current_room):
     
     # Handle special conversation management commands
     if cmd_lower in ["clear", "reset", "stop talking", "nevermind", "forget it"]:
+        cleared = False
+        mb = _get_master_beast_npc()
+        if mb and mb.has_pending_action():
+            mb.clear_pending_action()
+            cleared = True
         if current_room.npc and current_room.npc.has_pending_action():
             current_room.npc.clear_pending_action()
+            cleared = True
+        if cleared:
             set_command_meta(path="conversation_clear", preprocessed=cmd_lower)
             return "Conversation cleared.\n"
+    
+    # CHANGE (MB pending): short yes/no reaches MB in room 1 even when player is elsewhere
+    mb = _get_master_beast_npc()
+    if mb and mb.has_pending_action() and not _is_direct_game_command(command):
+        current_npc = getattr(current_room, "npc", None)
+        other_pending = (
+            current_npc is not None
+            and current_npc is not mb
+            and current_npc.has_pending_action()
+        )
+        if _is_short_conversation_reply(command) or not other_pending:
+            result = mb.handle_conversation_response(command)
+            if result is not None:
+                set_command_meta(path="npc_mb_pending", preprocessed=cmd_lower)
+                return result
     
     # Check for active NPC conversation awaiting response
     if current_room.npc and current_room.npc.has_pending_action():

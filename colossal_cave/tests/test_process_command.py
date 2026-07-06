@@ -221,6 +221,56 @@ def test_gather_all_items_uses_fast_path_not_mb(game_module, minimal_game_world)
     assert "Taking all items" in console or "Iron Sword" in console
 
 
+def test_yes_routes_to_mb_pending_when_remote(game_module, minimal_game_world):
+    """Bare 'yes' must reach MB pending in room 1 when player is in another room."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r2"]
+    room.npc = None
+    player.current_room = room
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    minimal_game_world["r1"].npc = mb
+    mb.set_pending_action(
+        "information",
+        "explain: which direction to go",
+        {"info_details": "which direction", "offer_snippet": "Would you like me to tell you which direction to go?"},
+    )
+    game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
+
+    with patch.object(mb, "handle_conversation_response", return_value="MB says: Go east.\n") as mock_handle:
+        with patch.object(game_module, "process_game_command") as mock_pgc:
+            result = game_module.process_command("yes", player, room)
+    mock_handle.assert_called_once_with("yes")
+    mock_pgc.assert_not_called()
+    assert "MB" in result
+
+
+def test_information_accept_fulfills_direction(game_module, minimal_game_world, monkeypatch):
+    """Accepting thin INFORMATION offer must fulfill with exits, not a generic prompt."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r1"]
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    room.npc = mb
+    player.current_room = room
+    game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
+    mb.set_pending_action(
+        "information",
+        "explain: direction",
+        {
+            "info_details": "direction",
+            "offer_snippet": "Would you like me to tell you which direction to go?",
+        },
+    )
+    monkeypatch.setattr(game_module, "ollama_generate", lambda *a, **k: "accept")
+
+    result = mb.handle_conversation_response("yes")
+    assert "What would you like to know?" not in result
+    assert "MB says:" in result
+    assert "go east" in result.lower() or "Exits" in result or "Room" in result
+    assert not mb.has_pending_action()
+
+
 def test_mb_dialogue_survives_null_monster_items(game_module, minimal_game_world, monkeypatch):
     """Legacy saves with monster.items=None must not crash MB knowledge gathering."""
     player = minimal_game_world["player"]
