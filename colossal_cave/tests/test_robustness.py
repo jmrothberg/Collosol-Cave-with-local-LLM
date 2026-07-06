@@ -261,6 +261,66 @@ def test_new_game_ollama_down_returns_error(game_module, monkeypatch):
     assert "not available" in outputs[4]
 
 
+def test_new_game_post_process_no_unbound_local(game_module, minimal_game_world, monkeypatch):
+    """Regression: New-Game must finish Gradio tuple without command_path UnboundLocalError."""
+    gm = game_module
+    rooms = minimal_game_world["rooms"]
+    player = minimal_game_world["player"]
+    rooms[1].npc = gm.MasterBeast(current_room=1, llm_npc=False)
+
+    def _fake_new_game(**kwargs):
+        gm.rooms = rooms
+        gm.playerOne = player
+        gm.old_room = None
+        return "July_test"
+
+    monkeypatch.setattr(gm, "_llm_model_available", lambda name: True)
+    monkeypatch.setattr(gm, "initialize_game_variables", lambda: None)
+    monkeypatch.setattr(gm, "load_adventure_data", lambda: None)
+    monkeypatch.setattr(gm, "_ensure_llm_diffuser_ready", lambda **k: None)
+    monkeypatch.setattr(gm, "_log_llm_inventory", lambda **k: None)
+    monkeypatch.setattr(gm, "log_game_event", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "start_debug_session", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "new_game", _fake_new_game)
+    monkeypatch.setattr(gm, "draw_map_png", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "check_trophy", lambda *a, **k: ("", [], []))
+    monkeypatch.setattr(gm.MasterBeast, "llM_generate_self_dialogue", lambda self, *a, **k: "MB says: welcome\n")
+
+    outputs = gm.talk_to_functions(
+        " ", "", "Easy", "New-Game", "July_test", "9", False, False, False,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    assert len(outputs) == 13
+    assert "New game" in outputs[4] or "July_test" in outputs[4]
+
+
+def test_save_game_post_process_no_unbound_local(game_module, minimal_game_world, tmp_path, monkeypatch):
+    """Save-Game must not crash in post-process when command_path was never set."""
+    gm = game_module
+    player = minimal_game_world["player"]
+    rooms = minimal_game_world["rooms"]
+    rooms[1].npc = gm.MasterBeast(current_room=1, llm_npc=False)
+    gm.rooms = rooms
+    gm.playerOne = player
+    gm.active_game = True
+    gm.npc_introduced = False
+    save_dir = str(tmp_path / "saves")
+    os.makedirs(save_dir, exist_ok=True)
+    monkeypatch.setattr(gm, "game_dir", save_dir)
+    monkeypatch.setattr(gm, "save_game_state", lambda name=None: "saved_ok")
+    monkeypatch.setattr(gm, "saved_files", lambda: ["saved_ok"])
+    monkeypatch.setattr(gm, "draw_map_png", lambda *a, **k: None)
+    monkeypatch.setattr(gm, "check_trophy", lambda *a, **k: ("", [], []))
+    monkeypatch.setattr(gm.MasterBeast, "llM_generate_self_dialogue", lambda self, *a, **k: "MB says: hi\n")
+
+    outputs = gm.talk_to_functions(
+        " ", "", "Easy", "Save-Game", "mysave", "9", False, False, False,
+        "test-model", "test-diffuser", "", False, play_llm_name="gemma-4-12B-it-8bit",
+    )
+    assert len(outputs) == 13
+    assert "Saved game" in outputs[4]
+
+
 def test_game_module_room_still_has_treasures(game_module, minimal_game_world):
     """Game trophy helpers treat items=None as empty, not 'all collected'."""
     room = minimal_game_world["r1"]

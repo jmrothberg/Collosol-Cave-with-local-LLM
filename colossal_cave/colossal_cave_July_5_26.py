@@ -5123,6 +5123,9 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     game_state_selector = "Play-Game"
     entry_exits_line = ""  # CHANGE (UX): exits shown on room entry in description panel
     adventure_log_body = None  # CHANGE (UX): player command response for adventure log
+    command_path = ""  # CHANGE (crash): only set on Play-Game — must exist for New-Game post-process
+    result = ""
+    room_before_command = None
 
     if not difficulty:
         difficulty = "easy"
@@ -5220,6 +5223,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
             console += exits
         append_adventure_log_system(console)
         active_game = True
+        npc_introduced = True  # CHANGE (New-Game): welcome already shown — skip duplicate MB LLM intro
         game_state_selector = gr.Radio(value="Play-Game")
         log_game_event(
             "NEW_GAME",
