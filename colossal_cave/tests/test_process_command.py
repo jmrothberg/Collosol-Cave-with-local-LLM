@@ -245,8 +245,8 @@ def test_yes_routes_to_mb_pending_when_remote(game_module, minimal_game_world):
     assert "MB" in result
 
 
-def test_information_accept_fulfills_direction(game_module, minimal_game_world, monkeypatch):
-    """Accepting thin INFORMATION offer must fulfill with exits, not a generic prompt."""
+def test_information_accept_fulfills_direction(game_module, minimal_game_world):
+    """Accepting INFORMATION offer must fulfill via MB dialogue, not detector metadata."""
     player = minimal_game_world["player"]
     room = minimal_game_world["r1"]
     mb = game_module.MasterBeast(current_room=1, llm_npc=False)
@@ -256,18 +256,89 @@ def test_information_accept_fulfills_direction(game_module, minimal_game_world, 
     game_module.rooms = minimal_game_world["rooms"]
     mb.set_pending_action(
         "information",
-        "explain: direction",
+        "Would you like me to tell you which direction to go?",
         {
-            "info_details": "direction",
             "offer_snippet": "Would you like me to tell you which direction to go?",
+            "original_dialogue": "ask mb how to win",
         },
     )
-    monkeypatch.setattr(game_module, "ollama_generate", lambda *a, **k: "accept")
 
-    result = mb.handle_conversation_response("yes")
+    with patch.object(
+        mb,
+        "llM_generate_self_dialogue",
+        return_value="MB says: Head **go east** to room 10 for your first treasure.\n",
+    ) as mock_dialogue:
+        result = mb.handle_conversation_response("yes")
+    mock_dialogue.assert_called_once()
+    fulfill_arg = mock_dialogue.call_args[0][0]
+    assert "accepted your offer" in fulfill_arg.lower()
+    assert "which direction" in fulfill_arg.lower()
     assert "What would you like to know?" not in result
-    assert "MB says:" in result
-    assert "go east" in result.lower() or "Exits" in result or "Room" in result
+    assert "go east" in result.lower()
+    assert not mb.has_pending_action()
+
+
+def test_information_accept_ignores_meta_details(game_module, minimal_game_world):
+    """Legacy pending with detector meta details must still fulfill from offer_snippet."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r1"]
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    room.npc = mb
+    player.current_room = room
+    game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
+    meta = "The NPC is asking if the player wants to know the specific direction to find the first treasure."
+    mb.set_pending_action(
+        "information",
+        "Would you like me to tell you exactly which direction to head first to find your first treasure?",
+        {
+            "info_details": meta,
+            "offer_snippet": "Would you like me to tell you exactly which direction to head first to find your first treasure?",
+            "original_dialogue": "ask mb how to win",
+        },
+    )
+
+    with patch.object(
+        mb,
+        "llM_generate_self_dialogue",
+        return_value="MB says: Start with **go east** to room 10.\n",
+    ):
+        result = mb.handle_conversation_response("yes!")
+    assert "npc is asking" not in result.lower()
+    assert "go east" in result.lower()
+    assert not mb.has_pending_action()
+
+
+def test_quest_accept_with_meta_details_fulfills_for_mb(game_module, minimal_game_world):
+    """QUEST misclassified with meta details should fulfill like any accepted offer."""
+    player = minimal_game_world["player"]
+    room = minimal_game_world["r1"]
+    mb = game_module.MasterBeast(current_room=1, llm_npc=False)
+    room.npc = mb
+    player.current_room = room
+    game_module.playerOne = player
+    game_module.rooms = minimal_game_world["rooms"]
+    meta = "The NPC is asking if the player wants specific information regarding which direction to head."
+    mb.set_pending_action(
+        "quest",
+        "Would you like me to tell you which direction to go?",
+        {
+            "quest_details": meta,
+            "info_details": meta,
+            "offer_snippet": "Would you like me to tell you which direction to go?",
+            "original_dialogue": "ask mb how to win",
+        },
+    )
+
+    with patch.object(
+        mb,
+        "llM_generate_self_dialogue",
+        return_value="MB says: Try **go south** to room 13.\n",
+    ):
+        result = mb.handle_conversation_response("yes")
+    assert "quest accepted" not in result.lower()
+    assert "npc is asking" not in result.lower()
+    assert "go south" in result.lower()
     assert not mb.has_pending_action()
 
 

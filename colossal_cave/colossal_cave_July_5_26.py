@@ -925,11 +925,13 @@ def _get_master_beast_npc():
 def _is_short_conversation_reply(command: str) -> bool:
     """True for bare yes/no/sure replies to an NPC offer."""
     cmd = (command or "").lower().strip().rstrip("!.,")
-    return cmd in {
+    if cmd in {
         "yes", "yeah", "yep", "y", "sure", "ok", "okay", "please", "do it",
         "tell me", "go ahead", "absolutely", "definitely",
         "no", "nope", "nah", "n", "not now", "later", "maybe later",
-    }
+    }:
+        return True
+    return cmd.startswith(("yes ", "yeah ", "yep ", "sure ", "ok ", "please "))
 
 
 def _offer_snippet_from_response(response_text: str) -> str:
@@ -2944,27 +2946,23 @@ class NPC(LivingThing):
         return self.conversation_state.get("pending_action") is not None
 
     def _fulfill_information_offer(self, context, last_offer):
-        """Deliver promised info when accept had thin or missing info_details."""
-        offer_snippet = context.get("offer_snippet") or last_offer or ""
-        info_details = (context.get("info_details") or "").strip()
-        if len(info_details) >= 20:
-            return f"{self.name} explains: {info_details}\n"
-        if getattr(self, "is_master_beast", False):
-            lines = ["MB says:\n"]
-            if offer_snippet:
-                lines.append(f"*(As you asked — {offer_snippet})*\n")
-            lines.append(self._provide_contextual_help().strip())
-            lines.append(progress_summary(playerOne, rooms).strip())
-            room = playerOne.current_room if playerOne else None
-            diff = globals().get("difficulty_g", "easy")
-            if room:
-                exits = format_room_exits(room, diff)
-                if exits:
-                    lines.append(exits)
-            return "\n".join(line for line in lines if line) + "\n"
-        if info_details:
-            return f"{self.name} explains: {info_details}\n"
-        return f"{self.name} explains: {offer_snippet}\n" if offer_snippet else f"{self.name} says: 'Here is what I can tell you.'\n"
+        """Fulfill accepted offer from the NPC's actual words — never detector metadata."""
+        offer_snippet = (context.get("offer_snippet") or last_offer or "").strip()
+        original = (context.get("original_dialogue") or "").strip()
+        parts = [
+            "The player just accepted your offer. Fulfill exactly what you promised now.",
+            "Be specific and concrete (directions, room numbers, item names, next steps).",
+            "Do not ask the same yes/no question again.",
+        ]
+        if original:
+            parts.append(f"Their earlier question: {original}")
+        if offer_snippet:
+            parts.append(f"Your offer they accepted: {offer_snippet}")
+        if playerOne and getattr(playerOne, "current_room", None):
+            parts.append(f"They are in room {playerOne.current_room.number}.")
+        fulfill_prompt = " ".join(parts)
+        my_stuff = playerOne.get_item_names() if playerOne else []
+        return self.llM_generate_self_dialogue(fulfill_prompt, my_stuff)
 
     def handle_conversation_response(self, response):
         """Handle player's response to pending conversation using LLM interpretation"""
@@ -3009,8 +3007,15 @@ What is the player's intent?"""
 
     """
         
-        # Get LLM interpretation
-        interpretation = ollama_generate(prompt, max_tokens=50, temperature=0.1).strip().lower()
+        # CHANGE (MB pending): skip LLM for obvious yes/no on short replies
+        interpretation = None
+        resp_lower = (response or "").lower().strip().rstrip("!.,")
+        if resp_lower in {"yes", "yeah", "yep", "y", "sure", "ok", "okay", "please", "do it", "tell me", "go ahead", "absolutely"} or resp_lower.startswith(("yes ", "yeah ", "sure ")):
+            interpretation = "accept"
+        elif resp_lower in {"no", "nope", "nah", "n", "not now", "later", "maybe later"}:
+            interpretation = "decline"
+        if interpretation is None:
+            interpretation = ollama_generate(prompt, max_tokens=50, temperature=0.1).strip().lower()
         print(f"DEBUG: LLM interpreted '{response}' as: {interpretation}")
         
         # Handle the response based on LLM interpretation and pending action
@@ -3048,20 +3053,11 @@ What is the player's intent?"""
                     return f"{self.name} says: 'Let me think about that riddle...'\n"
             
             elif pending_action == "quest":
-                quest_details = context.get("quest_details")
-                if quest_details:
-                    self.clear_pending_action()
-                    # Generate a helpful quest response
-                    return f"{self.name} explains: '{quest_details}'\n\n💡 Quest accepted! {quest_details}\n"
-                else:
-                    self.clear_pending_action()
-                    return f"{self.name} says: 'Let me think of a good quest for you...'\n"
+                result = self._fulfill_information_offer(context, last_offer)
+                self.clear_pending_action()
+                return result
             
             elif pending_action == "information":
-                info_details = (context.get("info_details") or "").strip()
-                if len(info_details) >= 20:
-                    self.clear_pending_action()
-                    return f"{self.name} explains: {info_details}\n"
                 result = self._fulfill_information_offer(context, last_offer)
                 self.clear_pending_action()
                 return result
@@ -3088,6 +3084,9 @@ What is the player's intent?"""
                     return f"{self.name} explains: 'This is {item_to_give.name} - {item_to_give.description}. I think it could help you! Would you like me to give it to you?'\n"
             elif pending_action == "riddle_help":
                 return f"{self.name} says: 'I can tell you exactly which magic items you need to solve the riddle in this room. Would you like me to share that information?'\n"
+            elif pending_action in ("information", "quest"):
+                result = self._fulfill_information_offer(context, last_offer)
+                return result
             
             return f"{self.name} says: 'What would you like to know about {last_offer}?'\n"
         
@@ -3343,26 +3342,22 @@ Return JSON only."""
                     print("DEBUG: Riddle help offer detected but no riddle in room")
             
             elif offer_type == "QUEST":
-                details = analysis.get("details", "")
                 print("DEBUG: Quest offer detected")
                 self.set_pending_action(
                     "quest",
-                    f"give you a quest: {details}",
+                    _offer_snippet_from_response(response_text) or "offer a quest",
                     {
-                        "quest_details": details,
                         "original_dialogue": dialogue,
                         "offer_snippet": _offer_snippet_from_response(response_text),
                     }
                 )
             
             elif offer_type == "INFORMATION":
-                details = analysis.get("details", "")
                 print("DEBUG: Information offer detected")
                 self.set_pending_action(
                     "information",
-                    f"explain: {details}",
+                    _offer_snippet_from_response(response_text) or "share information",
                     {
-                        "info_details": details,
                         "original_dialogue": dialogue,
                         "offer_snippet": _offer_snippet_from_response(response_text),
                     }
