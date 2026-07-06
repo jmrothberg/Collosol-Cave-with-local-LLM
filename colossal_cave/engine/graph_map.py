@@ -246,6 +246,12 @@ def relayout_rooms(rooms: Dict[int, Any], preserve_coords: bool = False) -> None
     sanitize_connected_rooms(rooms)
 
 
+def safe_connected_rooms(room: Any) -> Dict[str, Any]:
+    """Return room.connected_rooms as a dict — never None (prevents .items crashes)."""
+    conns = getattr(room, "connected_rooms", None)
+    return conns if isinstance(conns, dict) else {}
+
+
 def sanitize_connected_rooms(rooms: Dict[int, Any]) -> None:
     """Drop None neighbors from connected_rooms (prevents .number / .items crashes)."""
     for room in rooms.values():

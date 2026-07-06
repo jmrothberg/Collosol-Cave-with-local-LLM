@@ -82,6 +82,13 @@ from datetime import datetime
 import subprocess
 import importlib.util
 
+# CHANGE (pickle/MB bug): when run as `python colossal_cave_July_5_26.py`, unpickling a save
+# imported a SECOND copy of this module. MB (and all saved objects) then read that copy's
+# globals — playerOne=None, rooms={} — so MB dialogue crashed and fell back to offline text.
+# Aliasing the module name makes unpickling reuse THIS running module instead.
+if __name__ == "__main__" and "colossal_cave_July_5_26" not in sys.modules:
+    sys.modules["colossal_cave_July_5_26"] = sys.modules[__name__]
+
 ###############################################################################
 # ═══════════════════════ GAME CONSTANTS ═══════════════════════════════════ #
 ###############################################################################
@@ -796,7 +803,7 @@ def save_game_state(name_of_game = None):
             "trophies": trophies,
             "cheat_mode": cheat_mode,
             "magicword": magicword,
-            "difficulty_g": difficulty_g,
+            "difficulty_g": globals().get("difficulty_g", "easy"),
             "adventure_log": get_adventure_log_text(),
             "play_model": play_model,
         }
@@ -947,6 +954,16 @@ def _normalize_loaded_game_state(rooms, player):
     sanitize_connected_rooms(rooms)
 
 
+def _safe_player_items(player=None):
+    """Player inventory as a list — never None."""
+    if player is None:
+        try:
+            player = playerOne
+        except NameError:
+            return []
+    return _safe_items(player)
+
+
 def _room_still_has_treasures(room) -> bool:
     """Trophy check: None items must not count as 'all treasures collected'."""
     return any(isinstance(i, Treasure) for i in _safe_items(room))
@@ -967,7 +984,12 @@ def load_game_state(name):
         _GAME_MODULE = "colossal_cave_July_5_26"
 
         def find_class(self, module, name):
-            if module in ("__main__", "Colossal_Cave_Aug_2_25"):
+            if module in ("__main__", "Colossal_Cave_Aug_2_25", self._GAME_MODULE):
+                # CHANGE (pickle/MB bug): resolve classes from THIS running module —
+                # importing a fresh copy gave saved objects empty globals (playerOne=None)
+                current = sys.modules[__name__]
+                if hasattr(current, name):
+                    return getattr(current, name)
                 module = self._GAME_MODULE
             return super().find_class(module, name)
 
@@ -1002,6 +1024,9 @@ def load_game_state(name):
         # CHANGE (load): player is standing here — ensure current room shows on map
         if playerOne and playerOne.current_room:
             playerOne.current_room.explored = True
+        # CHANGE (load): None old_room made `old_room != current_room` true and re-fired MB intro
+        if old_room is None and playerOne and playerOne.current_room:
+            old_room = playerOne.current_room
     except Exception as e:
         print("Error loading game state:", e)
         import traceback
@@ -2687,7 +2712,8 @@ class NPC(LivingThing):
         dangers = []
         current_room = rooms.get(self.current_room)
         if current_room:
-            for direction, connected_room in current_room.connected_rooms.items():
+            from engine.graph_map import safe_connected_rooms
+            for direction, connected_room in safe_connected_rooms(current_room).items():
                 if connected_room is None:
                     continue
                 monsters = getattr(connected_room, "monsters", None) or []
@@ -2722,8 +2748,8 @@ class NPC(LivingThing):
         progress = {
             "health_status": "healthy" if playerOne.health > 200 else "injured" if playerOne.health > 100 else "critical",
             "wealth_level": "rich" if playerOne.wealth > 1000 else "moderate" if playerOne.wealth > 500 else "poor",
-            "combat_ready": len([i for i in playerOne.items if isinstance(i, Weapon)]) > 0,
-            "riddle_ready": len([i for i in playerOne.items if isinstance(i, Magic)]) > 0
+            "combat_ready": len([i for i in _safe_player_items() if isinstance(i, Weapon)]) > 0,
+            "riddle_ready": len([i for i in _safe_player_items() if isinstance(i, Magic)]) > 0
         }
         return progress
     
@@ -2810,10 +2836,11 @@ class NPC(LivingThing):
     def _get_room_connections(self):
         """Get all room connections in the game"""
         connections_info = []
+        from engine.graph_map import safe_connected_rooms
         for room in rooms.values():
             connected = ", ".join(
                 f"{dir}: Room {r.number}"
-                for dir, r in room.connected_rooms.items()
+                for dir, r in safe_connected_rooms(room).items()
                 if r is not None
             )
             if connected:
@@ -3097,8 +3124,8 @@ NPC Name: {self.name}
 Player's original message: "{dialogue}"
 NPC's response: "{response_text}"
 
-Available player items: {[item.name for item in playerOne.items] if playerOne.items else "None"}
-Available NPC items: {[item.name for item in self.items] if self.items else "None"}
+Available player items: {[item.name for item in _safe_player_items()] or "None"}
+Available NPC items: {[item.name for item in _safe_items(self)] or "None"}
 
 Analyze if the NPC is making any of these types of offers:
 1. TRADE - Offering to exchange one item for another (e.g., "Would you like to trade your sword for my potion?")
@@ -3472,13 +3499,15 @@ If you're not very helpful, be vague or demand something in return for informati
         elif player_in_room and "suspicious" in self.personality_traits['mood']:
             # Suspicious NPCs might leave when player arrives
             if random.randint(0, 3) == 0:
-                directions = list(rooms[self.current_room].connected_rooms.keys())
+                from engine.graph_map import safe_connected_rooms
+                directions = list(safe_connected_rooms(rooms[self.current_room]).keys())
                 if directions:
                     return ("move", random.choice(directions))
         
         # Standard movement logic
         if random.randint(0, 9) == 0:
-            directions = list(rooms[self.current_room].connected_rooms.keys())
+            from engine.graph_map import safe_connected_rooms
+            directions = list(safe_connected_rooms(rooms[self.current_room]).keys())
             if directions:
                 return ("move", random.choice(directions))
         
@@ -3521,9 +3550,11 @@ class MasterBeast(NPC):
         lines.append(self._provide_contextual_help().strip())
         lines.append(progress_summary(playerOne, rooms).strip())
         room = playerOne.current_room if playerOne else None
-        if room and room.connected_rooms:
+        from engine.graph_map import safe_connected_rooms
+        conns = safe_connected_rooms(room) if room else {}
+        if conns:
             exits = []
-            for direction, neighbor in room.connected_rooms.items():
+            for direction, neighbor in conns.items():
                 if neighbor is None:
                     continue
                 note = f"go {direction} (room {neighbor.number})"
@@ -3548,6 +3579,7 @@ class MasterBeast(NPC):
             return self._llM_generate_self_dialogue_inner(dialogue, my_stuff)
         except Exception as e:
             log_game_event("MB_DIALOGUE_ERROR", f"dialogue={dialogue!r} err={e}")
+            print(f"MB_DIALOGUE_ERROR: {e}")
             return self._mb_offline_guidance(dialogue)
 
     def _llM_generate_self_dialogue_inner(self, dialogue="what do you have to trade", my_stuff=None):
@@ -3616,8 +3648,8 @@ Current game state:
 - Player health: {playerOne.health if playerOne else 'unknown'}
 - Player wealth: {playerOne.wealth if playerOne else 'unknown'}
 - Player has solved {len([r for r in rooms.values() if r.riddle_solved])} riddles out of {len([r for r in rooms.values() if r.riddles])}
-- Player has {len([i for i in playerOne.items if isinstance(i, Magic)])} magic items
-- Player has {len([i for i in playerOne.items if isinstance(i, Weapon)])} weapons
+- Player has {len([i for i in _safe_player_items() if isinstance(i, Magic)])} magic items
+- Player has {len([i for i in _safe_player_items() if isinstance(i, Weapon)])} weapons
 
 IMPORTANT INSTRUCTIONS:
 - LISTEN CAREFULLY to what type of question they're asking
@@ -3641,7 +3673,7 @@ Give progressive hints — do NOT dump full item location atlases unless the pla
 """
         # CHANGE (MB hints): full spoiler atlas only in cheat mode or explicit spoiler request
         wants_spoilers = (
-            difficulty_g == "cheat"
+            globals().get("difficulty_g", "easy") == "cheat"
             or any(w in dialogue.lower() for w in ["spoiler", "cheat", "exact location", "where is every"])
         )
         if wants_spoilers:
@@ -3751,7 +3783,7 @@ Share hints and next steps without listing every item location. Point the player
             # Check if in riddle room
             if playerOne.current_room.riddles and not playerOne.current_room.riddle_solved:
                 required = playerOne.current_room.riddle_magic_items
-                has_items = [i.name for i in playerOne.items if isinstance(i, Magic)]
+                has_items = [i.name for i in _safe_player_items() if isinstance(i, Magic)]
                 
                 if all(item in has_items for item in required):
                     help_text += f"🎯 YOU CAN SOLVE THIS RIDDLE NOW! Type: solve {' and '.join(required)}\n"
@@ -3773,11 +3805,11 @@ Share hints and next steps without listing every item location. Point the player
                                 help_text += f"   - {item} is held by {room.npc.name} in room {room.number}\n"
             
             # No weapons warning
-            if not any(isinstance(i, Weapon) for i in playerOne.items):
+            if not any(isinstance(i, Weapon) for i in _safe_player_items()):
                 help_text += "⚔️ You have no weapons! This is dangerous. Find one quickly!\n"
             
             # Magic items info
-            magic_count = len([i for i in playerOne.items if isinstance(i, Magic)])
+            magic_count = len([i for i in _safe_player_items() if isinstance(i, Magic)])
             if magic_count == 0:
                 help_text += "✨ You have no magic items. Kill monsters or trade with NPCs to get some!\n"
             else:
@@ -4022,13 +4054,14 @@ def initialize_game_variables():
     - art_style_g: String - global art style for image generation
     - magicword: String - random cheat code for creating connections
     """
-    global rooms, npc_introduced, you_started_it, cheat_mode, old_room, trophies, active_game, art_style_g, magicword
+    global rooms, npc_introduced, you_started_it, cheat_mode, old_room, trophies, active_game, art_style_g, magicword, difficulty_g
     
     # Game state flags
     npc_introduced = False   # Has NPC introduced themselves in this room?
     you_started_it = False   # Did player attack first (affects monster behavior)?
     cheat_mode = False       # Debug mode with extra commands
     active_game = False      # Is a game currently loaded and playable?
+    difficulty_g = "easy"    # CHANGE (MB): reset so MB dialogue never hits NameError
     
     # Game world state
     old_room = None          # Previous room (for tracking room changes)
@@ -4496,6 +4529,12 @@ def _should_npc_conversation_fallback(chosen_action, confidence, command) -> boo
 def process_game_command(command, player, current_room):
     """Process regular game commands using LLM"""
     global magicword
+    # CHANGE (robustness): legacy saves / hot-reload can leave None .items or connected_rooms
+    try:
+        if rooms and player is not None:
+            _normalize_loaded_game_state(rooms, player)
+    except Exception:
+        pass
     preprocessed = preprocess_command(command)
     try:
         # CHANGE (fast-path): deterministic verbs skip Ollama when unambiguous
@@ -4573,9 +4612,15 @@ def process_game_command(command, player, current_room):
     except Exception as e:
         print(f"Error in command processing: {e}")
         # CHANGE (NPC): MB talk should not die on legacy save data or LLM hiccups
-        if current_room.npc and hasattr(current_room.npc, "is_master_beast"):
-            cmd_l = command.lower()
-            if any(t in cmd_l for t in ("mb", "master beast", "beast", "ask", "talk", "tell", "help")):
+        if _should_route_to_remote_mb(command) or (
+            current_room.npc and hasattr(current_room.npc, "is_master_beast")
+            and any(t in command.lower() for t in ("mb", "master beast", "beast", "ask", "talk", "tell", "help"))
+        ):
+            mb_reply = _talk_to_master_beast(player, command)
+            if mb_reply:
+                set_command_meta(path="npc_mb_recovery", preprocessed=preprocessed, error=str(e))
+                return mb_reply
+            if current_room.npc and hasattr(current_room.npc, "is_master_beast"):
                 set_command_meta(path="npc_mb_recovery", preprocessed=preprocessed, error=str(e))
                 return current_room.npc._mb_offline_guidance(command)
         set_command_meta(path="error", preprocessed=preprocessed, error=str(e))
@@ -5077,6 +5122,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
     art_style_g = art_style # global variable for art_style in classes
     game_state_selector = "Play-Game"
     entry_exits_line = ""  # CHANGE (UX): exits shown on room entry in description panel
+    adventure_log_body = None  # CHANGE (UX): player command response for adventure log
 
     if not difficulty:
         difficulty = "easy"
@@ -5148,6 +5194,8 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         npc_introduced = True  # CHANGE (load): skip MB re-introduction LLM call
         you_started_it = False  # CHANGE (load): combat flag must exist after restore
         restore_only = True
+        if old_room is None and playerOne and playerOne.current_room:
+            old_room = playerOne.current_room
         if difficulty_g:
             difficulty = difficulty_g
         game_state_selector = gr.Radio(value="Play-Game")
@@ -5199,7 +5247,7 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         model = play_model
         _ensure_llm_diffuser_ready(diff_name=name_of_diffuser, llm_name=name_of_llm, play_llm_name=play_model)
         room_before_command = playerOne.current_room if playerOne else None
-        if old_room != playerOne.current_room:
+        if old_room is not None and old_room != playerOne.current_room:
             you_started_it = False
             npc_introduced = False
         
@@ -5237,10 +5285,11 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
 
         # CHANGE (debug): persistent per-game log with room exits, monsters, routing
         meta = consume_command_meta()
+        command_path = meta.get("path", "")
         log_play_turn(
             command=command,
             preprocessed=meta.get("preprocessed", command),
-            path=meta.get("path", "unknown"),
+            path=command_path or "unknown",
             room_before=room_before_command,
             room_after=playerOne.current_room,
             player=playerOne,
@@ -5252,8 +5301,8 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         if is_empty_game_response(result):
             console = console + "\n(no response — try: look · inventory · go <direction>)\n"
 
-        # --- Adventure Log append ---
-        append_adventure_log(command, console)
+        # --- Adventure Log append (deferred to end of turn — see below) ---
+        adventure_log_body = console
 
         # CHANGE (UX): on room entry, print exits first (before movement text / ambient)
         entered_new_room = (
@@ -5349,9 +5398,16 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
                 direction = npc_action[1]
                 console = console + npc.move(direction)
             elif not npc_introduced:
+                # CHANGE (MB): skip welcome LLM if player already talked to MB this turn
+                mb_already_spoke = (
+                    command_path.startswith("npc_mb")
+                    or (result and "MB says:" in result and "MB'S SPECIAL GUIDANCE" not in result)
+                )
+                if mb_already_spoke:
+                    npc_introduced = True
                 # More dynamic introduction based on NPC personality
                 # Special introduction for MB
-                if hasattr(npc, 'is_master_beast') and npc.is_master_beast:
+                elif hasattr(npc, 'is_master_beast') and npc.is_master_beast:
                     console += "\n🌟 A stunningly beautiful, woman with glowing eyes turns to greet you: 🌟\n"
                     console += npc.llM_generate_self_dialogue("Welcome, young adventurer! I am MB, the Master Beast. *flexes impressively* I know all the secrets of this cave and I'm here to help you succeed! Ask me anything - about riddles, items, monsters, or game strategy. I want you to win! And if you're curious about me... well, I have many talents beyond just helping with your quest. *winks*")
                     npc_introduced = True
@@ -5400,6 +5456,10 @@ def talk_to_functions(command, name_of_game, difficulty, game_state, new_game_na
         console += console_temp
         player_image += player_image_temp
         item_images += item_images_temp
+
+        # CHANGE (UX): log player-facing command response (not trophy/exits noise)
+        if adventure_log_body is not None:
+            append_adventure_log(command, adventure_log_body)
 
     #Riddles
     if playerOne.current_room.riddles and playerOne.current_room.riddle_solved == False:
@@ -5630,6 +5690,7 @@ active_game = False
 you_started_it = False  # CHANGE (load): module default — Load-Game skips initialize_game_variables
 npc_introduced = False
 magicword = "xyzzy"  # CHANGE (fast-path): default before initialize_game_variables
+difficulty_g = "easy"  # CHANGE (MB): must exist before first talk — New-Game used to NameError here
 diff_dict = DIFFICULTY_ATTACK_FREQ
 
 playerOne = None

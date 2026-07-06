@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("gradio")
 pytest.importorskip("torch")
 
-from engine.graph_map import sanitize_connected_rooms, relayout_rooms
+from engine.graph_map import sanitize_connected_rooms, relayout_rooms, safe_connected_rooms
 from engine.items import safe_items
 from engine.llm_commands import parse_llm_json_response
 from engine.map_utils import draw_map_png
@@ -30,6 +30,29 @@ def test_parse_scalar_entity_category_coerced_to_list():
     raw = '{"chosen_action":["take"],"entity_categories":{"room_items":"sword"},"confidence":0.9}'
     result = parse_llm_json_response(raw)
     assert result["entities"]["room_items"] == ["sword"]
+
+
+def test_safe_connected_rooms_none_attr():
+    room = SimpleNamespace(connected_rooms=None)
+    assert safe_connected_rooms(room) == {}
+
+
+def test_mb_game_knowledge_survives_none_connected_rooms(game_module, three_room_world):
+    """MB must not crash when a room has connected_rooms=None (legacy save edge case)."""
+    gm = game_module
+    gm.rooms = three_room_world
+    gm.playerOne = SimpleNamespace(
+        health=200,
+        wealth=0,
+        items=[],
+        current_room=three_room_world[1],
+    )
+    three_room_world[1].npc = gm.MasterBeast(current_room=1, llm_npc=False)
+    three_room_world[2].connected_rooms = None
+    mb = gm._get_master_beast_npc()
+    knowledge = mb._get_game_knowledge()
+    assert "room_connections" in knowledge
+    assert isinstance(knowledge["room_connections"], list)
 
 
 def test_sanitize_connected_rooms_drops_none_neighbors(three_room_world):
